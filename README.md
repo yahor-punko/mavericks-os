@@ -12,6 +12,17 @@ Mavericks is not a deliverable product you run in production. It's a reusable fr
 - **Artifact-sync validator** — detects drift between `BACKLOG.md` and `TASK_STATUS.md` before it causes confusion, and blocks commits when artifacts are out of sync
 - **Operator dashboard** — a terminal UI showing workflow state, context usage, runtime actors, and open waits
 
+## Why Mavericks
+
+Mavericks wasn't designed on a whiteboard — it was extracted from running real agent-driven development across multiple repositories at once. The rules in `CLAUDE.md` and `docs/core/` codify what actually kept that work on track, not what seemed like a good idea in the abstract.
+
+For a single operator directing a team of AI agents, it gives you:
+
+- **Speed** — a repeatable operating loop (session start → task lifecycle → close) means less time spent re-explaining state or re-deciding process, and more time on the decisions only you can make.
+- **Architecture documentation as part of the workflow, not an afterthought** — `docs/ARCHITECTURE_GUIDE.md` and the architect's design briefs (see `docs/ARCHITECT_OUTPUT.md`) make capturing "why we built it this way" a normal step in shipping a task, instead of a cleanup job nobody gets to.
+- **Multi-repo work without holding it all in your head** — artifact-first state (`BACKLOG.md`, `TASK_STATUS.md`, `PROCESS_STATE.json`) plus a cross-repo task model let you track and drive work spread across several repositories without keeping the whole picture in working memory.
+- **Delegation with guardrails** — a main orchestrator plus specialized sub-agents, with an artifact-sync validator and QA/UX/security review gates that catch drift before it becomes rework.
+
 ## Before you clone
 
 Mavericks ships with autonomous tool execution enabled by default (`permissions.defaultMode: "bypassPermissions"` in the committed `.claude/settings.json`). This means agents can read, write, and execute across your filesystem and shell without a per-action confirmation prompt once you start a session. This is deliberate — see **[`SECURITY.md`](SECURITY.md)** for exactly what it means and how to opt out before your first session.
@@ -115,21 +126,23 @@ Deploy statuses (`deployed_dev`, `deployed_prod`) are optional — projects with
 
 ## Roles
 
-Every sub-agent role has a spec in [`.claude/agents/`](.claude/agents/) — pass the relevant file to the sub-agent as context when spawning it. The main orchestrator agent (plans, coordinates, accepts/rejects sub-agent work, drives momentum) does not have its own spec file — it *is* the session you're running.
+Every sub-agent role has a spec in [`.claude/agents/`](.claude/agents/) — pass the relevant file to the sub-agent as context when spawning it. The main orchestrator agent (plans, coordinates, accepts/rejects sub-agent work, drives momentum) does not have its own spec file — it *is* the session you're running, on Opus 4.8.
 
-| Role | Responsibility | Prompt |
-|---|---|---|
-| **Developer** | Narrow, self-contained implementation slices | [`.claude/agents/developer.md`](.claude/agents/developer.md) |
-| **QA** | Functional validation against acceptance criteria — `qa_passed` or `needs_fix` | [`.claude/agents/qa.md`](.claude/agents/qa.md) |
-| **UX** | Flows, microcopy, feedback states, accessibility — `ux_passed` or `ux_needs_fix` (optional per task) | [`.claude/agents/ux.md`](.claude/agents/ux.md) |
-| **Security reviewer** | Security review for new inputs/outputs, auth flows, integrations — `security_passed` or `security_needs_fix` (optional per task) | [`.claude/agents/security-reviewer.md`](.claude/agents/security-reviewer.md) |
-| **Product/docs** | Backlog clarity, process docs, artifact sync | [`.claude/agents/product-docs.md`](.claude/agents/product-docs.md) |
-| **Technical writer** | User-facing docs — README, getting-started guides, API reference, changelog | [`.claude/agents/technical-writer.md`](.claude/agents/technical-writer.md) |
-| **Architect** | Pre-task design brief and task decomposition (mandatory gate before any sub-agent is spawned) | [`.claude/agents/architect.md`](.claude/agents/architect.md) |
-| **Analyst** | External technology and landscape research, ahead of architect review | [`.claude/agents/analyst.md`](.claude/agents/analyst.md) |
-| **Frontend design** | Visual/interaction design for frontend surfaces | [`.claude/agents/frontend-design.md`](.claude/agents/frontend-design.md) |
-| **UI designer** | UI component and layout design | [`.claude/agents/ui-designer.md`](.claude/agents/ui-designer.md) |
-| **Exa researcher** | Web research via the Exa search tool | [`.claude/agents/exa-researcher.md`](.claude/agents/exa-researcher.md) |
+| Role | Responsibility | Model | Prompt |
+|---|---|---|---|
+| **Developer** | Narrow, self-contained implementation slices | Sonnet (→ Opus for complex slices) | [`.claude/agents/developer.md`](.claude/agents/developer.md) |
+| **QA** | Functional validation against acceptance criteria — `qa_passed` or `needs_fix` | Sonnet (→ Opus for complex slices) | [`.claude/agents/qa.md`](.claude/agents/qa.md) |
+| **UX** | Flows, microcopy, feedback states, accessibility — `ux_passed` or `ux_needs_fix` (optional per task) | Sonnet (→ Opus for complex slices) | [`.claude/agents/ux.md`](.claude/agents/ux.md) |
+| **Security reviewer** | Security review for new inputs/outputs, auth flows, integrations — `security_passed` or `security_needs_fix` (optional per task) | Sonnet (→ Opus for a full, non-checklist review) | [`.claude/agents/security-reviewer.md`](.claude/agents/security-reviewer.md) |
+| **Product/docs** | Backlog clarity, process docs, artifact sync | Sonnet (→ Opus for complex slices) | [`.claude/agents/product-docs.md`](.claude/agents/product-docs.md) |
+| **Technical writer** | User-facing docs — README, getting-started guides, API reference, changelog | Sonnet (→ Opus for complex slices) | [`.claude/agents/technical-writer.md`](.claude/agents/technical-writer.md) |
+| **Architect** | Pre-task design brief and task decomposition (mandatory gate before any sub-agent is spawned) | Fable 5 (primary) → Opus 4.8 (fallback) | [`.claude/agents/architect.md`](.claude/agents/architect.md) |
+| **Analyst** | External technology and landscape research, ahead of architect review | Sonnet (→ Opus for complex slices) | [`.claude/agents/analyst.md`](.claude/agents/analyst.md) |
+| **Frontend design** | Visual/interaction design for frontend surfaces | Sonnet (→ Opus for complex slices) | [`.claude/agents/frontend-design.md`](.claude/agents/frontend-design.md) |
+| **UI designer** | UI component and layout design | Sonnet (→ Opus for complex slices) | [`.claude/agents/ui-designer.md`](.claude/agents/ui-designer.md) |
+| **Exa researcher** | Web research via the Exa search tool | Sonnet (→ Opus for complex slices) | [`.claude/agents/exa-researcher.md`](.claude/agents/exa-researcher.md) |
+
+Model and effort selection policy (including the exact escalation signals) lives in [`docs/AGENT_SPEC.md`](docs/AGENT_SPEC.md) — "Model selection" — the single source of truth.
 
 ## Core docs
 

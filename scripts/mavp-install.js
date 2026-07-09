@@ -353,12 +353,12 @@ async function main() {
       updatedCount++;
     }
 
-    // Sync all project scripts from mavericks: agent, close-session, shared lib, version
+    // Sync project-specific scripts from mavericks (agent, close-session).
+    // mavp-operator-lib.js and mavp-version.js are NOT synced — projects resolve
+    // them at runtime from the mavericks install via MAVERICKS_SCRIPTS (direct-reference model).
     const SYNC_SCRIPTS = [
       'mavp-operator-agent.js',
       'mavp-operator-close-session.js',
-      'mavp-operator-lib.js',
-      'mavp-version.js',
     ];
     for (const scriptFile of SYNC_SCRIPTS) {
       const srcScript = path.join(FRAMEWORK_DIR, scriptFile);

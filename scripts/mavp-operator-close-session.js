@@ -17,9 +17,36 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const readline = require('node:readline');
 const { execSync, spawnSync } = require('node:child_process');
-const { generateProcessStateMd, archiveActiveWaveInBacklog, readPermissionMode, readPersistedPermissionMode } = require('./mavp-operator-lib');
+
+/**
+ * Resolve the mavericks installation's scripts/ directory, so project-copied
+ * scripts (this file) can require the shared lib without a local copy.
+ * Resolution order:
+ *   (a) MAVERICKS_SCRIPTS env var, if set and it contains mavp-operator-lib.js
+ *       (normal bootstrapped-project path — the bash wrapper exports this)
+ *   (b) __dirname, if it contains mavp-operator-lib.js
+ *       (the mavericks repo itself, and legacy projects with a local lib copy)
+ *   (c) ~/Documents/mavericks/scripts (matches the existing VALIDATOR fallback)
+ */
+function resolveMavericksScriptsDir() {
+  const candidates = [];
+  if (process.env.MAVERICKS_SCRIPTS) candidates.push(process.env.MAVERICKS_SCRIPTS);
+  candidates.push(__dirname);
+  candidates.push(path.join(os.homedir(), 'Documents', 'mavericks', 'scripts'));
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'mavp-operator-lib.js'))) return dir;
+  }
+  throw new Error(
+    `Cannot locate mavp-operator-lib.js (checked: ${candidates.join(', ')}). ` +
+      `Set MAVERICKS_HOME to your mavericks installation's root directory.`
+  );
+}
+
+const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
+const { generateProcessStateMd, archiveActiveWaveInBacklog, readPermissionMode, readPersistedPermissionMode } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
@@ -27,7 +54,7 @@ const PROCESS_STATE_MD = path.join(ROOT, 'PROCESS_STATE.md');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
 const VALIDATOR = path.join(
-  process.env.MAVERICKS_SCRIPTS || path.join(require('node:os').homedir(), 'Documents', 'mavericks', 'scripts'),
+  process.env.MAVERICKS_SCRIPTS || path.join(os.homedir(), 'Documents', 'mavericks', 'scripts'),
   'mavp-validator.js'
 );
 
