@@ -1,0 +1,7 @@
+{
+  "name": "mavericks",
+  "private": true,
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.100.1"
+  }
+}

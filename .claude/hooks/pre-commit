@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Mavericks pre-commit hook — validates artifact sync before each commit.
+#
+# Exit codes from mavp-validator.js:
+#   0 = healthy   → silent, commit proceeds
+#   1 = drifting  → warning printed, commit proceeds
+#   2 = repair required → commit BLOCKED
+
+set -euo pipefail
+
+# Locate the validator: prefer MAVERICKS_SCRIPTS env var, then MAVERICKS_HOME, then default path.
+MAVERICKS_SCRIPT_DIR="${MAVERICKS_SCRIPTS:-${MAVERICKS_HOME:-$HOME/Documents/mavericks}/scripts}"
+VALIDATOR="$MAVERICKS_SCRIPT_DIR/mavp-validator.js"
+
+if [[ ! -f "$VALIDATOR" ]]; then
+  echo "WARNING: Mavericks validator not found at $VALIDATOR — skipping pre-commit check."
+  echo "Set MAVERICKS_HOME if mavericks is not at ~/Documents/mavericks."
+  exit 0
+fi
+
+EXIT_CODE=0
+node "$VALIDATOR" || EXIT_CODE=$?
+
+if [[ $EXIT_CODE -eq 2 ]]; then
+  echo ""
+  echo "COMMIT BLOCKED: artifact repair required. Run: node scripts/mavp-validator.js"
+  exit 1
+elif [[ $EXIT_CODE -eq 1 ]]; then
+  echo ""
+  echo "WARNING: artifact drift detected (exit 1). Commit proceeding — fix drift soon."
+  exit 0
+fi
+
+exit 0

@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+
+if [[ "${1-}" == "--help" ]]; then
+  echo "Usage: ./scripts/mavp-operator [flag]"
+  echo ""
+  echo "Flags:"
+  echo "  --agent          Print session context summary for the Main Agent"
+  echo "  --watch          Dashboard watch mode (r = refresh, s = snapshot, q = quit)"
+  echo "  --snapshot       Print a text snapshot of current project state"
+  echo "  --handoff        Write HANDOFF.md context file for cross-session continuity"
+  echo "  --close-session  Run end-of-session ritual (summarise, bump wave, commit)"
+  echo "  --set-strategy-note  Set wave strategy context note (persists in PROCESS_STATE.json until --close-session)"
+  echo "                       Usage: --set-strategy-note \"text\" (empty string clears)"
+  echo "  --new-task       Interactively create and register a new task"
+  echo "  --quick-task     Quickly register a task skeleton (title + problem only)"
+  echo "  --apply-decomposition [FILE]  Parse architect decomposition block and register tasks"
+  echo "                   Reads from FILE if provided, otherwise from stdin"
+  echo "  --quick-merge    Fast-track an XS change directly to merged (title + commit hash)"
+  echo "                   Use only for XS changes: <=2 files, <=10 lines diff, no risk"
+  echo "  --update-task    Interactively update an existing task"
+  echo "  --merge-task     Promote a qa_passed task to merged with evidence"
+  echo "  --update-status  Atomically set task status in BACKLOG.md + TASK_STATUS.md"
+  echo "                   Usage: --update-status T-NNN <status>"
+  echo "  --set-status     Batch-update status for one or more tasks (comma-separated IDs)"
+  echo "                   Usage: --set-status T-NNN[,T-MMM,...] <status>"
+  echo "  --rename-task    Atomically rename a task title in BACKLOG.md and TASK_STATUS.md"
+  echo "                   Usage: --rename-task T-NNN \"New title\""
+  echo "  --rescope-task   Atomically re-scope or un-defer a task (moves it between"
+  echo "                   BACKLOG.md's Deferred Tasks <-> Active Wave sections)"
+  echo "                   Usage: --rescope-task T-NNN [--status <s>] [--owner <role>] [--title \"...\"]"
+  echo "  --sync-status    Sync TASK_STATUS.md Status lines from BACKLOG.md Active Wave"
+  echo "  --arm-recheck T-NNN --due YYYY-MM-DD [--interval 8w] [--note \"...\"]"
+  echo "                   Register a time-based recheck entry in PROCESS_STATE.json rechecks[]"
+  echo "                   Use --interval to enable rearming (e.g. 8w, 2d); --note for context"
+  echo "  --ack-recheck RC-N [--rearm]"
+  echo "                   Acknowledge a recheck: removes it from rechecks[]"
+  echo "                   With --rearm: reschedule due = today + interval instead of removing"
+  echo "  --reflect-skill <role>   Run skill reflection loop for a role (SkillOpt)"
+  echo "  --validate       Run the parliamentary validator (artifact sync check)"
+  echo "  --check-sync     Compare agent/skill files in known projects against mavericks source"
+  echo "  --install        Bootstrap Mavericks into a target project directory"
+  echo "  --strip          Remove all Mavericks files from a project (pre-publish)"
+  echo "  --version        Print the installed Mavericks framework version"
+  echo "  --help           Show this help message and exit"
+  echo ""
+  echo "(no flag)          Open the operator dashboard"
+  exit 0
+elif [[ "${1-}" == "--snapshot" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-snapshot.js" "$@"
+elif [[ "${1-}" == "--handoff" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-handoff.js" "$@"
+elif [[ "${1-}" == "--agent" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-agent.js" "$@"
+elif [[ "${1-}" == "--close-session" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-close-session.js" "$@"
+elif [[ "${1-}" == "--set-strategy-note" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-set-strategy-note.js" "$@"
+elif [[ "${1-}" == "--new-task" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-new-task.js" "$@"
+elif [[ "${1-}" == "--quick-task" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-quick-task.js" "$@"
+elif [[ "${1-}" == "--apply-decomposition" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-apply-decomposition.js" "$@"
+elif [[ "${1-}" == "--quick-merge" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-quick-merge.js" "$@"
+elif [[ "${1-}" == "--update-task" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-update-task.js" "$@"
+elif [[ "${1-}" == "--merge-task" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-merge-task.js" "$@"
+elif [[ "${1-}" == "--update-status" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-update-status.js" "$@"
+elif [[ "${1-}" == "--set-status" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-set-status.js" "$@"
+elif [[ "${1-}" == "--rename-task" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-rename-task.js" "$@"
+elif [[ "${1-}" == "--rescope-task" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-rescope-task.js" "$@"
+elif [[ "${1-}" == "--sync-status" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-sync-status.js" "$@"
+elif [[ "${1-}" == "--reflect-skill" ]]; then
+  ROLE="$2"
+  shift 2
+  node "$SCRIPT_DIR/mavp-skill-reflect.js" "$ROLE"
+elif [[ "${1-}" == "--arm-recheck" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-arm-recheck.js" "$@"
+elif [[ "${1-}" == "--ack-recheck" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-ack-recheck.js" "$@"
+elif [[ "${1-}" == "--validate" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-validator.js" "$(pwd)" "$@"
+elif [[ "${1-}" == "--check-sync" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-check-sync.js" "$@"
+elif [[ "${1-}" == "--install" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-install.js" "$@"
+elif [[ "${1-}" == "--strip" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-install.js" --strip "$@"
+elif [[ "${1-}" == "--version" ]]; then
+  node -e "const {MAVERICKS_VERSION}=require('$SCRIPT_DIR/mavp-version.js');console.log('mavericks v'+MAVERICKS_VERSION);"
+else
+  node "$SCRIPT_DIR/mavp-operator-dashboard.js" "$@"
+fi

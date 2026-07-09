@@ -1,0 +1,5 @@
+{
+  "_comment": "Add this case to the *TASK_STATUS.md) branch of your PostToolUse hook command, after the validator step.",
+  "fragment": "; case \"$FP\" in *TASK_STATUS.md) node \"$MAVERICKS/mavp-operator-doc-sync-check.js\" 2>&1 >&2 || true ;; esac",
+  "requires": "scripts/mavp-operator-doc-sync-check.js from mavericks >= 0.17.x"
+}

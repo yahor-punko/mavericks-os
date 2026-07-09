@@ -1,0 +1,18 @@
+# Generic ignores
+.DS_Store
+node_modules/
+dist/
+coverage/
+.tmp/
+
+# Claude Code local settings
+.claude/settings.local.json
+.claude/mcp.json
+.claude/worktrees/
+
+# Handoff context file (single-use, not committed)
+HANDOFF.md
+.mavp-hook-ts
+
+# Persisted runtime permission_mode (machine/session state, not committed)
+.mavp/permission-mode

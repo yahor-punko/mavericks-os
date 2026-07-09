@@ -1,0 +1,60 @@
+{
+  "env": {
+    "EXA_API_KEY": "<EXA_API_KEY>"
+  },
+  "permissions": {
+    "allow": [
+      "Agent(*)",
+      "Bash(./scripts/mavp-operator*)",
+      "Bash(node scripts/mavp-validator.js*)",
+      "Bash(node:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git rm:*)",
+      "Bash(git clone *)",
+      "Bash(git merge *)",
+      "Bash(git checkout *)",
+      "Bash(git restore *)",
+      "Bash(git diff *)",
+      "Bash(git branch *)",
+      "Bash(git worktree *)",
+      "Bash(git cherry-pick *)",
+      "Bash(git apply *)",
+      "Bash(git init:*)",
+      "Bash(git config:*)",
+      "Bash(gh repo *)",
+      "Bash(npm install:*)",
+      "Bash(npm run:*)",
+      "Bash(npm create:*)",
+      "Bash(npm root:*)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "Bash(bash .claude/hooks/pre-commit)",
+      "WebFetch(domain:www.anthropic.com)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebSearch",
+      "Skill(session-start)",
+      "Skill(validate)",
+      "Skill(update-config)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "cd \"$(git rev-parse --show-toplevel)\" && ./scripts/mavp-operator --agent" } ] }
+    ],
+    "PostCompact": [
+      { "hooks": [ { "type": "command", "command": "cd \"$(git rev-parse --show-toplevel)\" && echo '=== STATE RESTORED AFTER COMPACTION ===' && ./scripts/mavp-operator --agent" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Edit|Write", "hooks": [ { "type": "command", "command": "<PostToolUse validator hook — see CLAUDE.md; use repo-relative paths via $(git rev-parse --show-toplevel), no absolute /Users paths>" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "<UserPromptSubmit hook command — repo-relative paths only>" } ] }
+    ]
+  }
+}

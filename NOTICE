@@ -1,0 +1,41 @@
+Mavericks — Third-Party Notices
+================================
+
+The root `LICENSE` file (MIT) covers Mavericks' own code, docs, and
+templates. It does NOT extend to third-party components vendored into
+this repository, which retain their original license terms. This file
+lists every such component and how it is licensed.
+
+--------------------------------------------------------------------
+frontend-design skill
+--------------------------------------------------------------------
+
+- Path (canonical):  .agents/skills/frontend-design/
+- Also reachable via symlinks:
+    - skills/frontend-design           -> ../.agents/skills/frontend-design
+    - .claude/skills/frontend-design   -> ../../.agents/skills/frontend-design
+  (all three paths resolve to the same on-disk files; there is one copy)
+- Source: installed from the public `anthropics/skills` GitHub
+  repository via `npx skills add` (see commit 1e93013,
+  "feat: add exa-researcher agent + update frontend-design skill from
+  GitHub").
+- License: Apache License, Version 2.0. Full license text is bundled
+  in-tree at `.agents/skills/frontend-design/LICENSE.txt` and applies
+  as-is, unmodified, to that directory and its contents.
+
+This NOTICE file, together with the unmodified Apache-2.0 license text
+at `.agents/skills/frontend-design/LICENSE.txt`, constitutes the
+retained-attribution and license-reference carve-out for this
+component as required by Section 4 of the Apache License, Version 2.0.
+Redistribution or modification of `.agents/skills/frontend-design/`
+(or its symlinked paths) must comply with the Apache License, Version
+2.0, not the root MIT `LICENSE`.
+
+--------------------------------------------------------------------
+
+No other vendored third-party licenses were found elsewhere in this
+repository as of the date this file was added (a repo-wide sweep for
+LICENSE*/NOTICE*/COPYING* files, excluding `node_modules/` and
+`.claude/worktrees/`, returned only the root `LICENSE` and the
+frontend-design `LICENSE.txt` listed above). If a future vendored
+component is added, add an entry here at the same time.

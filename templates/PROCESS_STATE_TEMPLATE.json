@@ -1,0 +1,19 @@
+{
+  "initiative": "New project",
+  "stage": "execution",
+  "stage_owner": "main_agent",
+  "wave": 1,
+  "wave_session": 1,
+  "wave_status": "planning",
+  "wave_goal": null,
+  "wave_summary": null,
+  "parked_waves": [],
+  "active_slices": [],
+  "blocker": null,
+  "next_action": null,
+  "last_task_id": 0,
+  "last_updated": "YYYY-MM-DD",
+  "deploy_contours": 0,
+  "mavericks_version": "__MAVERICKS_VERSION__",
+  "rechecks": []
+}

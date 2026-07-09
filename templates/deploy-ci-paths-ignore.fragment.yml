@@ -1,0 +1,50 @@
+# deploy-ci-paths-ignore.fragment.yml
+#
+# GitHub Actions paths-ignore fragment for Mavericks framework-only commits.
+#
+# HOW TO USE:
+#   1. Copy the `paths-ignore` block below into your deploy workflow job's `on:` trigger
+#      (under `push:` or `pull_request:`) so CI skips framework-sync commits.
+#   2. Example placement in .github/workflows/deploy.yml:
+#
+#        on:
+#          push:
+#            branches: [main]
+#            paths-ignore:
+#              - 'BACKLOG.md'
+#              - 'TASK_STATUS.md'
+#              - 'PROCESS_STATE.md'
+#              - 'PROCESS_STATE.json'
+#              - 'EXECUTION_LOG.md'
+#              - '.claude/**'
+#              - '.mavp/**'
+#              - 'SKILL_PROPOSALS/**'
+#              - 'scripts/mavp-operator'
+#              - 'scripts/mavp-operator-agent.js'
+#              - 'scripts/mavp-operator-close-session.js'
+#
+#   3. Verify with two commits (see BOOTSTRAP_GUIDE.md §"Deploy CI: skipping framework-only commits").
+#
+# NOTE: Do NOT add paths-ignore to the same job that triggers on `workflow_dispatch` or
+# `schedule` — those triggers ignore path filters. Apply only to push/pull_request triggers.
+#
+# This fragment is v1 — GitHub Actions only.
+# GitLab CI / CircleCI support is tracked separately (T-283).
+
+_comment: >
+  Paste the paths-ignore list into your deploy workflow's push (or pull_request) trigger.
+  All paths below are framework-owned and contain no deployable application code.
+  See docs/core/BOOTSTRAP_GUIDE.md for wiring instructions and two-commit verification.
+
+paths-ignore:
+  - 'BACKLOG.md'
+  - 'TASK_STATUS.md'
+  - 'PROCESS_STATE.md'
+  - 'PROCESS_STATE.json'
+  - 'EXECUTION_LOG.md'
+  - '.claude/**'
+  - '.mavp/**'
+  - 'SKILL_PROPOSALS/**'
+  - 'scripts/mavp-operator'
+  - 'scripts/mavp-operator-agent.js'
+  - 'scripts/mavp-operator-close-session.js'
