@@ -118,7 +118,7 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "  --arm-recheck    Register a time-based recheck entry in PROCESS_STATE.json"
   echo "  --ack-recheck    Acknowledge (or --rearm) a recheck entry"
   echo "  --reflect-skill <role>   Run skill reflection loop for a role (SkillOpt)"
-  echo "  --validate       Run the parliamentary validator (artifact sync check)"
+  echo "  --validate       Run the MavP validator (artifact sync check)"
   echo "  --check-sync     Compare agent/skill files in known projects against mavericks source"
   echo "  --install        Bootstrap Mavericks into a target project directory"
   echo "  --strip          Remove all Mavericks files from a project (pre-publish)"

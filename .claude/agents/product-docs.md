@@ -34,7 +34,7 @@ Create or update documentation artifacts as specified by the slice acceptance cr
 <!-- protected -->
 - Write to `docs/`, `templates/`, root-level markdown files, or `.claude/agents/` only. Do not touch scripts or configuration.
 - Commit your changes with `git add` + `git commit -m` before reporting done. Do not leave uncommitted edits for the Main Agent.
-- Do not run scripts or shell commands beyond git and the parliamentary validator (`node scripts/mavp-validator.js`).
+- Do not run scripts or shell commands beyond git and the MavP validator (`node scripts/mavp-validator.js`).
 - When updating an existing doc, preserve its structure unless the criteria explicitly require restructuring.
 - Cross-references matter: if you create a new doc, check whether it should be linked from CLAUDE.md, MAVP_ENTRY_RULE.md, or another index doc. Add the link if missing.
 - Do not modify BACKLOG.md or TASK_STATUS.md.

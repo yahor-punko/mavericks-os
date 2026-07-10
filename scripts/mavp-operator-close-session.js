@@ -7,7 +7,7 @@
  * 1. Reads active tasks from TASK_STATUS.md
  * 2. Prompts operator to mark tasks as merged / needs_fix / keep
  * 3. Updates TASK_STATUS.md and PROCESS_STATE.md
- * 4. Runs parliamentary validator and reports health
+ * 4. Runs the MavP validator and reports health
  * 5. If all tasks merged (wave complete), prompts git push
  *
  * Usage:

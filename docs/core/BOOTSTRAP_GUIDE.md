@@ -101,7 +101,7 @@ After one healthy cycle, parallelize narrow independent slices. Keep approval-se
 
 ## Pre-commit hook
 
-The installer automatically sets up a git pre-commit hook that runs the parliamentary validator before every commit.
+The installer automatically sets up a git pre-commit hook that runs the validator before every commit.
 
 **What it does:**
 

@@ -39,7 +39,7 @@ if [[ "${1-}" == "--help" ]]; then
   echo "                   Acknowledge a recheck: removes it from rechecks[]"
   echo "                   With --rearm: reschedule due = today + interval instead of removing"
   echo "  --reflect-skill <role>   Run skill reflection loop for a role (SkillOpt)"
-  echo "  --validate       Run the parliamentary validator (artifact sync check)"
+  echo "  --validate       Run the MavP validator (artifact sync check)"
   echo "  --check-sync     Compare agent/skill files in known projects against mavericks source"
   echo "  --install        Bootstrap Mavericks into a target project directory"
   echo "  --strip          Remove all Mavericks files from a project (pre-publish)"

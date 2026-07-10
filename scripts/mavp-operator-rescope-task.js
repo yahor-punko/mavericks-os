@@ -6,7 +6,7 @@
  * Atomically re-scope (or un-defer) an existing task: moves its block between
  * BACKLOG.md sections (## Deferred Tasks <-> ## Active Wave), updates
  * Status/Owner role/title, ensures a matching TASK_STATUS.md "## Active
- * tasks" entry, then runs the parliamentary validator exactly once.
+ * tasks" entry, then runs the MavP validator exactly once.
  *
  * Usage:
  *   ./scripts/mavp-operator --rescope-task T-NNN [--status <s>] [--owner <role>] [--title "..."]

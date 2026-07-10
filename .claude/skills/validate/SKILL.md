@@ -1,6 +1,6 @@
 ---
 name: validate
-description: Run the parliamentary validator to check artifact sync between BACKLOG.md and TASK_STATUS.md. Use after any backlog changes or to confirm healthy state before starting new work.
+description: Run the MavP validator to check artifact sync between BACKLOG.md and TASK_STATUS.md. Use after any backlog changes or to confirm healthy state before starting new work.
 user-invocable: true
 allowed-tools: Bash(./scripts/mavp-operator --validate*)
 ---

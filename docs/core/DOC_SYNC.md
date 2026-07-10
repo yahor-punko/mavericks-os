@@ -8,7 +8,7 @@ Without this, docs drift silently — contributors discover the gap only when a 
 
 ## How it triggers
 
-The script (`scripts/mavp-operator-doc-sync-check.js`) is wired into the PostToolUse hook that runs after every `Edit` or `Write` on `TASK_STATUS.md`. It fires as the last step in the hook pipeline, after the parliamentary validator.
+The script (`scripts/mavp-operator-doc-sync-check.js`) is wired into the PostToolUse hook that runs after every `Edit` or `Write` on `TASK_STATUS.md`. It fires as the last step in the hook pipeline, after the validator.
 
 The hook invocation is:
 

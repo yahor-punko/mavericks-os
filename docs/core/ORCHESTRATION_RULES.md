@@ -69,6 +69,18 @@ The developer-side mandatory exit check (developer.md lines 64-65) only fires if
 
 This is the recovery counterpart to the developer-side exit-check. When the exit check fires, it handles this automatically; when the agent aborts before it can fire, the Main Agent must perform recovery manually.
 
+### GAP C — Stale reads: ff-merge pre-authorization when the task must read current main
+
+Harness-created sub-agent worktrees branch from the session's STARTING HEAD (e.g. the last close-session commit), not current main. This means commits the Main Agent cherry-picked or merged onto main earlier in the SAME session are absent from a freshly-spawned worktree — the worktree is stale not just at integration time (GAP A) but at read time, from the moment it is created. The root cause is harness/SDK worktree-creation behavior, not an in-repo bug.
+
+This matters whenever a sub-agent's task requires it to READ current-main state rather than merely write new content — for example: current version numbers, files merged earlier in the session, or a manifest that references newly-added files. If the sub-agent instead reads its stale worktree, it will act on outdated information (an old version number, a missing file, an inaccurate manifest) without any indication that anything is wrong.
+
+**Conditional rule:** when a task must read current-main state, the Main Agent's brief pre-authorizes the sub-agent to run `git merge --ff-only main` from the worktree root (equivalently `git -C <worktree> merge --ff-only main` when invoked from outside the worktree) as its FIRST step, before doing any other work. `--ff-only` is safe by construction: it aborts with no side effects unless the worktree tip is a strict ancestor of main's current HEAD — it never creates a merge commit and never produces a conflict.
+
+Absent this explicit pre-authorization, sub-agents must not reconcile their worktree to main on their own initiative — merge/reconciliation onto main is Main-Agent-owned (see the developer sub-agent spec's worktree-mechanics section, `.claude/agents/developer.md`, which states this from the developer side). This subsection is the reciprocal, Main-Agent-side rule: it defines when the Main Agent should proactively authorize the one safe exception (a strict fast-forward that can only bring the worktree closer to main, never diverge it).
+
+**Empirical grounding:** observed twice this initiative. In the Wave-44 T-330 session, four separate sub-agent spawns each saw framework version `0.23.1` instead of the already-merged `0.23.2`, because their worktrees had branched before that merge landed on main. In this session's T-338, the developer brief pre-authorized `git merge --ff-only main` because the task required bumping the version file — in that instance the merge was a no-op fast-forward (the worktree happened to already be current), but the pattern of pre-authorizing the read-side ff-merge is now proven and should be applied whenever a task's brief depends on current-main state.
+
 ## Wave architect review gate
 
 Waves with 3 or more planned tasks require architect review before the first task starts.

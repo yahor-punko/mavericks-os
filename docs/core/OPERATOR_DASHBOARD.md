@@ -59,7 +59,7 @@ Column definitions:
 | `n=` | Total tasks recorded for this role in the trajectory store. |
 | `ok=` | Tasks whose score reached the success threshold (score >= 0.7). |
 | `fixes:N` | Count of tasks where `needsFixCount > 0` — tasks that required at least one QA needs-fix round-trip before passing. Only shown when N > 0. |
-| `blocked:N` | Count of tasks where `validatorExitCode === 2` or `validator_blocked: true` — tasks that had a commit blocked by the parliamentary validator. Only shown when N > 0. |
+| `blocked:N` | Count of tasks where `validatorExitCode === 2` or `validator_blocked: true` — tasks that had a commit blocked by the validator. Only shown when N > 0. |
 
 **When is a task considered successful?** A task scores >= 0.7 when it passed QA on the first attempt (score 1.0) or passed after a single needs-fix round-trip (score 0.7 base). Additional needs-fix cycles, validator blocks, and scope-deviation flags each lower the score. The full scoring formula is defined in `docs/SKILL_OPTIMIZATION.md` Section 4.
 

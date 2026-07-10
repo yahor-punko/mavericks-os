@@ -4,7 +4,7 @@
  * mavp-operator-rename-task.js
  *
  * Atomically rename a task's `### T-NNN — <title>` heading in both
- * BACKLOG.md and TASK_STATUS.md, then run the parliamentary validator.
+ * BACKLOG.md and TASK_STATUS.md, then run the MavP validator.
  *
  * Usage:
  *   ./scripts/mavp-operator --rename-task T-NNN "New title"

@@ -1242,7 +1242,7 @@ function renderValidatorReport(parsed) {
   const { comparison, counts } = parsed;
   const grouped = groupFindingsBySeverity(comparison.findings);
   const lines = [
-    '# Parliamentary Validator Report',
+    '# MavP Validator Report',
     '',
     `- Overall result: ${getOverallResultLabel(comparison.overallCandidateState)}`,
     `- Failures: ${comparison.counts.bySeverity.failure || 0}`,

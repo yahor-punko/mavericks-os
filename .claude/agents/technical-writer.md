@@ -36,7 +36,7 @@ Create or update user-facing documentation as specified by the slice acceptance 
 
 - Process docs (`docs/core/`) — those belong to product-docs
 - `BACKLOG.md`, `TASK_STATUS.md`, `PROCESS_STATE.md` templates — product-docs
-- Internal operating-model artifacts (roles, parliamentary spec, orchestrator rules) — product-docs
+- Internal operating-model artifacts (roles, lifecycle spec, orchestrator rules) — product-docs
 - Scripts, configuration, or code — developer sub-agent
 
 If a slice requires both user-facing docs and process docs, the Main Agent should split it into two sub-agent tasks.

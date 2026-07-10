@@ -4,7 +4,7 @@
  * mavp-operator-set-status.js
  *
  * Atomically update the Status field for one or more tasks in both BACKLOG.md
- * and TASK_STATUS.md, then run the parliamentary validator once.
+ * and TASK_STATUS.md, then run the MavP validator once.
  *
  * Usage:
  *   ./scripts/mavp-operator --set-status T-NNN <status>

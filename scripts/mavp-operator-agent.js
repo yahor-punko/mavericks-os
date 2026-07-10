@@ -6,7 +6,7 @@
  * Compact JSON summary for the Main Agent to read at session start.
  * Outputs a single JSON object with current stage, active slice, status, and blockers.
  * Computes next_action dynamically from active tasks + dependency graph.
- * Runs parliamentary validator silently and appends WARNING if artifacts are drifting.
+ * Runs the MavP validator silently and appends WARNING if artifacts are drifting.
  *
  * Usage: ./scripts/mavp-operator --agent
  */
