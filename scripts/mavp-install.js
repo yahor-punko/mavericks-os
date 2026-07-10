@@ -99,12 +99,27 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "  --agent          Print session context summary for the Main Agent"
   echo "  --watch          Dashboard watch mode (r = refresh, s = snapshot, q = quit)"
   echo "  --snapshot       Print a text snapshot of current project state"
+  echo "  --handoff        Write HANDOFF.md context file for cross-session continuity"
   echo "  --close-session  Run end-of-session ritual (summarise, bump wave, commit)"
+  echo "  --set-strategy-note  Set wave strategy context note (persists until --close-session)"
   echo "  --new-task       Interactively create and register a new task"
+  echo "  --quick-task     Quickly register a task skeleton (title + problem only)"
+  echo "  --apply-decomposition [FILE]  Parse architect decomposition block and register tasks"
+  echo "  --ingest-decomposition        Ingest an architect decomposition block"
+  echo "  --absorb-task    Mark a task as superseded/absorbed by another task"
+  echo "  --quick-merge    Fast-track an XS change directly to merged (title + commit hash)"
   echo "  --update-task    Interactively update an existing task"
   echo "  --merge-task     Promote a qa_passed task to merged with evidence"
+  echo "  --update-status  Atomically set task status in BACKLOG.md + TASK_STATUS.md"
+  echo "  --set-status     Batch-update status for one or more tasks (comma-separated IDs)"
+  echo "  --rename-task    Atomically rename a task title in BACKLOG.md and TASK_STATUS.md"
+  echo "  --rescope-task   Atomically re-scope or un-defer a task"
+  echo "  --sync-status    Sync TASK_STATUS.md Status lines from BACKLOG.md Active Wave"
+  echo "  --arm-recheck    Register a time-based recheck entry in PROCESS_STATE.json"
+  echo "  --ack-recheck    Acknowledge (or --rearm) a recheck entry"
   echo "  --reflect-skill <role>   Run skill reflection loop for a role (SkillOpt)"
   echo "  --validate       Run the parliamentary validator (artifact sync check)"
+  echo "  --check-sync     Compare agent/skill files in known projects against mavericks source"
   echo "  --install        Bootstrap Mavericks into a target project directory"
   echo "  --strip          Remove all Mavericks files from a project (pre-publish)"
   echo "  --version        Print the installed Mavericks framework version"
@@ -115,28 +130,73 @@ if [[ "\${1-}" == "--help" ]]; then
 elif [[ "\${1-}" == "--snapshot" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-snapshot.js" "$@"
+elif [[ "\${1-}" == "--handoff" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-handoff.js" "$@"
 elif [[ "\${1-}" == "--agent" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-agent.js" "$@"
 elif [[ "\${1-}" == "--close-session" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-close-session.js" "$@"
+elif [[ "\${1-}" == "--set-strategy-note" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-set-strategy-note.js" "$@"
 elif [[ "\${1-}" == "--new-task" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-new-task.js" "$@"
+elif [[ "\${1-}" == "--quick-task" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-quick-task.js" "$@"
+elif [[ "\${1-}" == "--apply-decomposition" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-apply-decomposition.js" "$@"
+elif [[ "\${1-}" == "--ingest-decomposition" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-ingest-decomposition.js" "$@"
+elif [[ "\${1-}" == "--absorb-task" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-absorb-task.js" "$@"
+elif [[ "\${1-}" == "--quick-merge" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-quick-merge.js" "$@"
 elif [[ "\${1-}" == "--update-task" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-update-task.js" "$@"
 elif [[ "\${1-}" == "--merge-task" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-merge-task.js" "$@"
+elif [[ "\${1-}" == "--update-status" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-update-status.js" "$@"
+elif [[ "\${1-}" == "--set-status" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-set-status.js" "$@"
+elif [[ "\${1-}" == "--rename-task" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-rename-task.js" "$@"
+elif [[ "\${1-}" == "--rescope-task" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-rescope-task.js" "$@"
+elif [[ "\${1-}" == "--sync-status" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-sync-status.js" "$@"
 elif [[ "\${1-}" == "--reflect-skill" ]]; then
   ROLE="\$2"
   shift 2
-  node "\${MAVERICKS_PROJECT_ROOT}/scripts/mavp-skill-reflect.js" "\$ROLE"
+  node "$MAVERICKS/mavp-skill-reflect.js" "\$ROLE"
+elif [[ "\${1-}" == "--arm-recheck" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-arm-recheck.js" "$@"
+elif [[ "\${1-}" == "--ack-recheck" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-ack-recheck.js" "$@"
 elif [[ "\${1-}" == "--validate" ]]; then
   shift
-  node "$MAVERICKS/mavp-validator.js" "$@"
+  node "$MAVERICKS/mavp-validator.js" "$PROJECT_ROOT" "$@"
+elif [[ "\${1-}" == "--check-sync" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-check-sync.js" "$@"
 elif [[ "\${1-}" == "--install" ]]; then
   shift
   node "$MAVERICKS/mavp-install.js" "$@"
@@ -373,6 +433,24 @@ async function main() {
       updatedCount++;
     }
 
+    // Re-sync the generated bash wrapper (scripts/mavp-operator) from the current
+    // (flag-parity) buildBashWrapper() output — overwrites the existing wrapper,
+    // same "overwrites existing" contract used for agent.js/close-session.js above.
+    // This is what brings restored flags + correct validator routing (mavp-validator.js
+    // with "$PROJECT_ROOT") to already-bootstrapped projects, which fresh-install-only
+    // wiring never reached.
+    {
+      const wrapperDst = path.join(targetDir, 'scripts', BASH_FILE);
+      if (fs.existsSync(path.dirname(wrapperDst))) {
+        const existedWrapper = fs.existsSync(wrapperDst);
+        fs.writeFileSync(wrapperDst, buildBashWrapper(FRAMEWORK_DIR), 'utf8');
+        fs.chmodSync(wrapperDst, 0o755);
+        const label = existedWrapper ? `${YELLOW}updated${RESET}` : `${GREEN}new${RESET}   `;
+        console.log(`  ${label}  scripts/${BASH_FILE} ${DIM}(bash wrapper)${RESET}`);
+        updatedCount++;
+      }
+    }
+
     // Update mavericks_version in target project's PROCESS_STATE.json if it exists
     const psJsonPath = path.join(targetDir, 'PROCESS_STATE.json');
     if (fs.existsSync(psJsonPath)) {
@@ -423,6 +501,45 @@ async function main() {
         fs.writeFileSync(settingsLocalPath, JSON.stringify(settingsLocal, null, 2) + '\n', 'utf8');
         console.log(`  ${GREEN}updated${RESET}  .claude/settings.local.json ${DIM}(fallbackModel opus safety chain backfilled)${RESET}`);
         updatedCount++;
+      }
+    } catch {
+      // malformed or missing settings.local.json — skip silently
+    }
+
+    // Refresh the mavp PostToolUse validator hook command in settings.local.json.
+    // The hook is written only at fresh-install time (buildPostToolUseHookCommand),
+    // so already-bootstrapped projects still reference the pre-T-329 validator name
+    // (parliamentary-validator-parser-v1.js) in their PostToolUse hook command.
+    //
+    // Surgical rewrite: parse the JSON, walk ONLY hooks.PostToolUse[].hooks[].command
+    // strings, and replace the stale validator filename token with mavp-validator.js.
+    // Every other key (permissions, effortLevel, fallbackModel, alwaysThinkingEnabled,
+    // any non-mavp hooks) is preserved untouched. The inert stale permission allow-list
+    // entries (permissions.allow) are deliberately NOT rewritten — they are out of scope
+    // (T-336) and scoping the replacement to PostToolUse commands leaves them intact.
+    try {
+      if (fs.existsSync(settingsLocalPath)) {
+        const settingsLocal = JSON.parse(fs.readFileSync(settingsLocalPath, 'utf8'));
+        const OLD_VALIDATOR = 'parliamentary-validator-parser-v1.js';
+        const NEW_VALIDATOR = 'mavp-validator.js';
+        let hookChanged = false;
+        const postToolUse = settingsLocal.hooks && settingsLocal.hooks.PostToolUse;
+        if (Array.isArray(postToolUse)) {
+          for (const entry of postToolUse) {
+            if (!entry || !Array.isArray(entry.hooks)) continue;
+            for (const h of entry.hooks) {
+              if (h && typeof h.command === 'string' && h.command.includes(OLD_VALIDATOR)) {
+                h.command = h.command.split(OLD_VALIDATOR).join(NEW_VALIDATOR);
+                hookChanged = true;
+              }
+            }
+          }
+        }
+        if (hookChanged) {
+          fs.writeFileSync(settingsLocalPath, JSON.stringify(settingsLocal, null, 2) + '\n', 'utf8');
+          console.log(`  ${YELLOW}updated${RESET}  .claude/settings.local.json ${DIM}(PostToolUse validator hook → mavp-validator.js)${RESET}`);
+          updatedCount++;
+        }
       }
     } catch {
       // malformed or missing settings.local.json — skip silently

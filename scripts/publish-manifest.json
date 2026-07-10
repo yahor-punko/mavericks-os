@@ -80,12 +80,12 @@
     "scripts/mavp-skill-reflect.js",
     "scripts/mavp-validator.js",
     "scripts/mavp-version.js",
-    "scripts/parliamentary-validator-parser-v1.js",
     "scripts/publish-manifest.json",
     "scripts/test-active-wave-reinsert.js",
     "scripts/test-close-session-mode.js",
     "scripts/test-install-bypass-default.js",
     "scripts/test-install-shared-settings.js",
+    "scripts/test-install-wrapper-hook-resync.js",
     "scripts/test-merged-evidence-type-aware.js",
     "scripts/test-next-action-preserve.js",
     "scripts/test-permission-mode.js",
@@ -128,6 +128,8 @@
     "docs/SKILL_REFLECTION_PILOT.md": "internal dogfooding memo (T-323) — pilot notes for skill-reflection loop",
     "docs/TURN_BUDGET.md": "internal dogfooding memo (T-323) — private turn-budget analysis",
     ".mavp/trajectories/developer.jsonl": "dogfooding trajectory data — private session telemetry, not framework code",
-    "SKILL_PROPOSALS/developer-2026-05-29.md": "internal skill-reflection proposal — private review artifact, not framework code"
+    ".mavp/trajectories/qa.jsonl": "dogfooding trajectory data — private session telemetry, not framework code",
+    "SKILL_PROPOSALS/developer-2026-05-29.md": "internal skill-reflection proposal — private review artifact, not framework code",
+    "docs/PUBLIC_RELEASE_STRATEGY.md": "internal maintainer process — how THIS repo syncs private→public (T-326); not adopter-facing"
   }
 }
