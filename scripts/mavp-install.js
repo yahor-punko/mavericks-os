@@ -16,6 +16,7 @@
  *
  * Usage:
  *   node /path/to/mavericks/scripts/mavp-install.js <target-dir>
+ *   node /path/to/mavericks/scripts/mavp-install.js <target-dir> --yes
  *   node /path/to/mavericks/scripts/mavp-install.js --check <target-dir>
  *   node /path/to/mavericks/scripts/mavp-install.js --update <target-dir>
  *   node /path/to/mavericks/scripts/mavp-install.js --strip <target-dir> [--keep-artifacts]
@@ -35,6 +36,19 @@
  *                Pass --keep-artifacts to skip the state-artifacts group entirely. Requires an
  *                interactive TTY — non-interactive runs print the manifest, delete nothing, exit 1.
  *                Does not affect npm/Docker ignores — those are the safer alternative.
+ *
+ * --yes / -y — accepts the default answer to the fresh-install file-creation prompt without
+ *              asking (works at a real TTY too). Ignored (no effect, prints a notice) in
+ *              --strip mode — it never bypasses the strip refuse/confirm gates. Accepted and
+ *              ignored by --update / --check, which have no prompts.
+ *
+ * Non-TTY contract — asymmetric by design:
+ *   default install — when stdin is not a TTY, the file-creation prompt is skipped and the
+ *                      install proceeds as if answered Y (agent Bash sessions can bootstrap
+ *                      a project without hanging or silently creating nothing).
+ *   --strip          — when stdin is not a TTY, prints the manifest, deletes nothing, exits 1.
+ *                       This refusal is NOT bypassable by --yes (destructive action requires
+ *                       a real interactive confirmation).
  *
  * After bootstrap, set MAVERICKS_HOME env var if mavericks is not at ~/Documents/mavericks.
  */
@@ -250,13 +264,11 @@ function buildPostToolUseHookCommand(targetDir) {
 }
 
 /**
- * Ensure the debounce timestamp file used by the hardened PostToolUse hook
- * (.mavp-hook-ts) is gitignored in the target project. Idempotent.
+ * Ensure a single entry is present in the target project's .gitignore. Idempotent.
  * Returns 'created' | 'added' | 'exists'.
  */
-function ensureHookDebounceGitignoreEntry(targetDir) {
+function ensureGitignoreEntry(targetDir, entry) {
   const gitignorePath = path.join(targetDir, '.gitignore');
-  const entry = '.mavp-hook-ts';
   const existing = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, 'utf8') : null;
   if (existing !== null && existing.split('\n').map(l => l.trim()).includes(entry)) {
     return 'exists';
@@ -265,6 +277,26 @@ function ensureHookDebounceGitignoreEntry(targetDir) {
   const sep = base.length && !base.endsWith('\n') ? '\n' : '';
   fs.writeFileSync(gitignorePath, base + sep + entry + '\n', 'utf8');
   return existing === null ? 'created' : 'added';
+}
+
+/**
+ * Ensure the debounce timestamp file used by the hardened PostToolUse hook
+ * (.mavp-hook-ts) is gitignored in the target project. Idempotent.
+ * Returns 'created' | 'added' | 'exists'.
+ */
+function ensureHookDebounceGitignoreEntry(targetDir) {
+  return ensureGitignoreEntry(targetDir, '.mavp-hook-ts');
+}
+
+/**
+ * Ensure the seeded ONBOARDING.md (consumed and deleted by session-start on
+ * first use) is gitignored in the target project — keeps consume-and-delete
+ * from dirtying the tree and prevents the seeded copy from ever being
+ * committed. Idempotent.
+ * Returns 'created' | 'added' | 'exists'.
+ */
+function ensureOnboardingGitignoreEntry(targetDir) {
+  return ensureGitignoreEntry(targetDir, 'ONBOARDING.md');
 }
 
 async function prompt(rl, question) {
@@ -408,7 +440,8 @@ async function main() {
   const checkOnly = args.includes('--check');
   const updateOnly = args.includes('--update');
   const stripMode = args.includes('--strip');
-  const targetArg = args.find(a => !a.startsWith('--'));
+  const yesFlag = args.includes('--yes') || args.includes('-y');
+  const targetArg = args.find(a => !a.startsWith('-'));
   const targetDir = targetArg ? path.resolve(targetArg) : process.cwd();
   const targetScripts = path.join(targetDir, 'scripts');
 
@@ -679,6 +712,9 @@ async function main() {
     const keepArtifacts = args.includes('--keep-artifacts');
     console.log(`${BOLD}${RED}Strip mode${RESET} — removing mavericks files from ${targetDir}\n`);
     console.log(`${YELLOW}WARNING: This is destructive. Ensure changes are committed before stripping.${RESET}\n`);
+    if (yesFlag) {
+      console.log(`${DIM}note: --yes has no effect in strip mode${RESET}\n`);
+    }
 
     // Plumbing: regenerable by re-running the installer.
     const PLUMBING_PATHS = [
@@ -688,6 +724,7 @@ async function main() {
       '.claude',
       '.mavp',
       '.mavp-hook-ts',
+      'ONBOARDING.md',
     ];
     // State artifacts: irreplaceable project state.
     const STATE_PATHS = [
@@ -809,14 +846,22 @@ async function main() {
     return;
   }
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const filesToCreate = [...(needsBash ? [BASH_FILE] : []), ...newFiles.map(r => r.file)];
-  const answer = await prompt(rl, `Create ${filesToCreate.length} file(s) in ${targetScripts}? [Y/n]: `);
-  rl.close();
 
-  if (answer.trim().toLowerCase() === 'n') {
-    console.log(`${DIM}Cancelled.${RESET}\n`);
-    return;
+  if (!process.stdin.isTTY) {
+    console.log(`${DIM}Non-interactive session — creating ${filesToCreate.length} file(s) in ${targetScripts} (install is additive; only missing files are created).${RESET}`);
+  } else if (yesFlag) {
+    console.log(`${DIM}--yes — creating ${filesToCreate.length} file(s) in ${targetScripts} (install is additive; only missing files are created).${RESET}`);
+  } else {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await prompt(rl, `Create ${filesToCreate.length} file(s) in ${targetScripts}? [Y/n]: `);
+    rl.close();
+
+    const normalizedAnswer = answer.trim().toLowerCase();
+    if (normalizedAnswer === 'n' || normalizedAnswer === 'no') {
+      console.log(`${DIM}Cancelled.${RESET}\n`);
+      return;
+    }
   }
 
   if (!fs.existsSync(targetScripts)) {
@@ -873,6 +918,25 @@ async function main() {
     fs.writeFileSync(targetPath, src, 'utf8');
     console.log(`  ${GREEN}✓${RESET} ${target} ${DIM}(from template)${RESET}`);
     artifactsCreated++;
+  }
+
+  // Seed ONBOARDING.md (one-time orientation, consumed and deleted by
+  // session-start on first use) — only on fresh bootstrap, only if missing.
+  // Gitignored so consume-and-delete never dirties the tree and the seeded
+  // copy is never committed.
+  const onboardingTargetPath = path.join(targetDir, 'ONBOARDING.md');
+  if (!fs.existsSync(onboardingTargetPath)) {
+    const onboardingSrcPath = path.join(TEMPLATES_DIR, 'ONBOARDING_TEMPLATE.md');
+    const onboardingSrc = readUtf8(onboardingSrcPath);
+    if (onboardingSrc) {
+      fs.writeFileSync(onboardingTargetPath, onboardingSrc, 'utf8');
+      console.log(`  ${GREEN}✓${RESET} ONBOARDING.md ${DIM}(from template)${RESET}`);
+      artifactsCreated++;
+      const onboardingGitignoreResult = ensureOnboardingGitignoreEntry(targetDir);
+      if (onboardingGitignoreResult !== 'exists') {
+        console.log(`  ${GREEN}✓${RESET} .gitignore ${DIM}(ONBOARDING.md ${onboardingGitignoreResult})${RESET}`);
+      }
+    }
   }
 
   // Bootstrap PROCESS_STATE.json if missing
@@ -1025,11 +1089,13 @@ async function main() {
     console.log(`  ${GREEN}✓${RESET} git config core.hooksPath .claude/hooks/`);
   }
 
-  console.log(`\n${GREEN}✓ Bootstrap complete.${RESET}`);
-  console.log(`${CYAN}Next steps:${RESET}`);
-  console.log(`  1. Edit BACKLOG.md and TASK_STATUS.md with your first tasks`);
-  console.log(`  2. Edit ${targetScripts}/mavp-operator-agent.js for project-specific logic`);
-  console.log(`  3. Run: cd ${targetDir} && ./scripts/mavp-operator --version\n`);
+  console.log(`\n${GREEN}✓ Mavericks is installed in this project.${RESET}\n`);
+  console.log(`Open this folder with your agent (Claude Code) and tell it what you want`);
+  console.log(`to build — it drives the rest from here.\n`);
+  if (fs.existsSync(path.join(targetDir, 'ONBOARDING.md'))) {
+    console.log(`New here? There's a short ONBOARDING.md at the project root — your agent`);
+    console.log(`walks you through it on your first session, then it removes itself.\n`);
+  }
 }
 
 main().catch(err => {

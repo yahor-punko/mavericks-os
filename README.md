@@ -14,14 +14,15 @@ Mavericks is not a deliverable product you run in production. It's a reusable fr
 
 ## Why Mavericks
 
-Mavericks wasn't designed on a whiteboard — it was extracted from running real agent-driven development across multiple repositories at once. The rules in `CLAUDE.md` and `docs/core/` codify what actually kept that work on track, not what seemed like a good idea in the abstract.
+Mavericks wasn't designed on a whiteboard — it was extracted from running real agent-driven development across many repos at once. Everything here earned its place by keeping that work on track.
 
-For a single operator directing a team of AI agents, it gives you:
+For a single operator directing a team of AI agents:
 
-- **Speed** — a repeatable operating loop (session start → task lifecycle → close) means less time spent re-explaining state or re-deciding process, and more time on the decisions only you can make.
-- **Architecture documentation as part of the workflow, not an afterthought** — `docs/ARCHITECTURE_GUIDE.md` and the architect's design briefs (see `docs/ARCHITECT_OUTPUT.md`) make capturing "why we built it this way" a normal step in shipping a task, instead of a cleanup job nobody gets to.
-- **Multi-repo work without holding it all in your head** — artifact-first state (`BACKLOG.md`, `TASK_STATUS.md`, `PROCESS_STATE.json`) plus a cross-repo task model let you track and drive work spread across several repositories without keeping the whole picture in working memory.
-- **Delegation with guardrails** — a main orchestrator plus specialized sub-agents, with an artifact-sync validator and QA/UX/security review gates that catch drift before it becomes rework.
+- **Never reconstruct where things stand.** Every session resumes from written state, not from re-reading a chat log — so your time goes to the decisions only you can make, not to status archaeology.
+- **See — and diff — why the system did what it did.** State and decisions live in versioned artifacts, not in opaque model memory. Runs are auditable and repeatable instead of "trust the context window" — the process is inspectable even when the model isn't.
+- **Drive several repos without holding it all in your head.** The full picture lives in the artifacts and a cross-repo task model, so nothing depends on you remembering it.
+- **Capture the "why we built it this way" as you ship.** Architecture rationale is a normal step in finishing a task, not a cleanup job nobody gets to.
+- **Delegate without babysitting.** An orchestrator plus specialized sub-agents — gated by an artifact-sync validator and QA / security / UX review — catch drift before it turns into rework.
 
 ## Before you clone
 
@@ -58,6 +59,10 @@ Use `--check` first to preview what would happen without writing anything:
 ```bash
 node <path-to-mavericks>/scripts/mavp-install.js --check /path/to/your-project
 ```
+
+Runs non-interactively (no prompt) when invoked from an agent's Bash tool or piped/CI, or explicitly via `--yes` / `-y`; at a real terminal without either it still asks `Create N file(s)...? [Y/n]`.
+
+If you ask an agent to install Mavericks from a session where shell access is denied, it can't — run the one command above yourself (terminal, or the `!` prefix in Claude Code). This one-time human step is deliberate: the person running the installer consents to the prompt-free `bypassPermissions` default it configures (see **[`SECURITY.md`](SECURITY.md)**). In prompting permission modes a single approval suffices instead. Later sessions inherit the configured permissions and the agent operates autonomously.
 
 This creates, in `your-project/`:
 

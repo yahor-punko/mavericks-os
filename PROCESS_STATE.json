@@ -11,7 +11,7 @@
   "active_slices": [],
   "blocker": null,
   "next_action": null,
-  "last_task_id": 0,
+  "last_task_id": 1,
   "last_updated": "YYYY-MM-DD",
   "deploy_contours": 0,
   "mavericks_version": "__MAVERICKS_VERSION__",

@@ -1,9 +1,15 @@
 ---
 name: session-start
-description: Load current Mavericks operating state. Use at the start of any session or after context is lost. Injects live initiative, stage, active slices, and next action. If HANDOFF.md is present at the repo root, its contents are output first and the file is deleted.
+description: Load current Mavericks operating state. Use at the start of any session or after context is lost. Injects live initiative, stage, active slices, and next action. If ONBOARDING.md is present at the repo root (freshly bootstrapped project), its contents are output first and the file is deleted. If HANDOFF.md is present at the repo root, its contents are output next and the file is deleted.
 user-invocable: true
-allowed-tools: Bash(./scripts/mavp-operator --agent), Bash(!test -f HANDOFF.md && cat HANDOFF.md || true), Bash(rm HANDOFF.md)
+allowed-tools: Bash(./scripts/mavp-operator --agent), Bash(!test -f ONBOARDING.md && cat ONBOARDING.md || true), Bash(rm ONBOARDING.md), Bash(!test -f HANDOFF.md && cat HANDOFF.md || true), Bash(rm HANDOFF.md)
 ---
+
+## First-run onboarding (if present)
+
+!`test -f ONBOARDING.md && cat ONBOARDING.md || true`
+
+If the block above contained text, this is the first session of a freshly bootstrapped project — present the orientation to the operator, then delete the file with the Bash tool: `rm ONBOARDING.md`. The file must not persist into the next session. The `|| true` makes this a no-op on projects without the file (including mavericks itself).
 
 ## Mid-session handoff (if present)
 
