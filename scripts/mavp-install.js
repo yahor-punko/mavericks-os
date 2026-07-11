@@ -18,15 +18,22 @@
  *   node /path/to/mavericks/scripts/mavp-install.js <target-dir>
  *   node /path/to/mavericks/scripts/mavp-install.js --check <target-dir>
  *   node /path/to/mavericks/scripts/mavp-install.js --update <target-dir>
- *   node /path/to/mavericks/scripts/mavp-install.js --strip <target-dir>
+ *   node /path/to/mavericks/scripts/mavp-install.js --strip <target-dir> [--keep-artifacts]
  *
  * Modes:
  *   (default)  — copy project-specific templates if missing, show status
  *   --check    — report what would be done, exit 1 if not bootstrapped
  *   --update   — re-sync entire framework from mavericks: .claude/ + all scripts (overwrites existing)
  *                does NOT touch artifacts (BACKLOG.md, TASK_STATUS.md, PROCESS_STATE.*)
- *   --strip    — remove all mavericks files from the project (pre-publish cleanup)
+ *   --strip    — remove mavericks files from the project (pre-publish cleanup).
  *                WARNING: destructive. Run before pushing to a public repo or publishing a package.
+ *                Prints a deletion manifest labeling each path's git-recoverability BEFORE any
+ *                prompt (tracked / tracked-with-uncommitted-changes / NOT TRACKED — IRRECOVERABLE).
+ *                Two-stage confirm: plumbing (regenerable via reinstall) is [y/N]; state artifacts
+ *                (BACKLOG.md, TASK_STATUS.md, PROCESS_STATE.*, EXECUTION_LOG.md, SKILL_PROPOSALS/)
+ *                require typing the word "delete" if any state path is git-irrecoverable, else [y/N].
+ *                Pass --keep-artifacts to skip the state-artifacts group entirely. Requires an
+ *                interactive TTY — non-interactive runs print the manifest, delete nothing, exit 1.
  *                Does not affect npm/Docker ignores — those are the safer alternative.
  *
  * After bootstrap, set MAVERICKS_HOME env var if mavericks is not at ~/Documents/mavericks.
@@ -35,7 +42,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
-const { execSync } = require('node:child_process');
+const { execSync, execFileSync } = require('node:child_process');
 const { MAVERICKS_VERSION } = require('./mavp-version.js');
 
 const RESET = '\x1b[0m';
@@ -323,6 +330,79 @@ function installHook(targetDir) {
   return existed ? 'updated' : 'installed';
 }
 
+/**
+ * Determine whether targetDir is inside a git working tree.
+ * Degrades safely: any failure (not a repo, git not installed) returns false.
+ */
+function isGitWorkTree(targetDir) {
+  try {
+    execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: targetDir, stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Classify a path's git-recoverability for the --strip deletion manifest.
+ * Returns { label, irrecoverable }.
+ *
+ * irrecoverable=true means: deleting this path loses data that git cannot restore
+ * (untracked/ignored content, or a directory containing untracked files, or a path
+ * we could not verify — fail toward the louder warning, never crash).
+ *
+ * irrecoverable=false (but still may warn) means: the path is fully tracked; even
+ * with local uncommitted changes, `git checkout`/history can restore committed content.
+ */
+function classifyPath(targetDir, rel, gitAvailable) {
+  if (!gitAvailable) {
+    return { label: 'NOT TRACKED — IRRECOVERABLE', irrecoverable: true };
+  }
+  try {
+    const lsOut = execFileSync('git', ['ls-files', '--', rel], { cwd: targetDir, encoding: 'utf8' }).trim();
+    const trackedFiles = lsOut ? lsOut.split('\n').filter(Boolean) : [];
+    if (trackedFiles.length === 0) {
+      return { label: 'NOT TRACKED — IRRECOVERABLE', irrecoverable: true };
+    }
+    // --ignored is needed so ignored files nested inside an otherwise-tracked
+    // directory (e.g. .claude/settings.local.json under a global gitignore rule)
+    // are still surfaced as untracked-equivalent — fail toward the louder warning.
+    const statusOut = execFileSync('git', ['status', '--porcelain', '--ignored', '--', rel], { cwd: targetDir, encoding: 'utf8' });
+    const statusLines = statusOut.split('\n').filter(Boolean);
+    const untrackedLines = statusLines.filter(l => l.startsWith('??') || l.startsWith('!!'));
+    const modifiedLines = statusLines.filter(l => !l.startsWith('??') && !l.startsWith('!!'));
+
+    let label = 'tracked';
+    let irrecoverable = false;
+    if (modifiedLines.length > 0) {
+      label = 'tracked, uncommitted changes (will be lost)';
+    }
+    if (untrackedLines.length > 0) {
+      label += ', contains untracked files';
+      irrecoverable = true;
+    }
+    return { label, irrecoverable };
+  } catch {
+    return { label: 'cannot verify — irrecoverable', irrecoverable: true };
+  }
+}
+
+/**
+ * Remove a single path, symlink-safe: uses lstatSync so a symlinked path is
+ * unlinked as a link, never recursed into via its target.
+ */
+function removeStripPath(targetDir, rel) {
+  const fullPath = path.join(targetDir, rel);
+  const stat = fs.lstatSync(fullPath);
+  if (stat.isSymbolicLink()) {
+    fs.unlinkSync(fullPath);
+  } else if (stat.isDirectory()) {
+    fs.rmSync(fullPath, { recursive: true, force: true });
+  } else {
+    fs.unlinkSync(fullPath);
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const checkOnly = args.includes('--check');
@@ -595,43 +675,123 @@ async function main() {
   }
 
   if (stripMode) {
-    // --strip: remove all mavericks files for pre-publish cleanup
+    // --strip: manifest-first, git-recoverability-aware, two-stage confirm removal
+    const keepArtifacts = args.includes('--keep-artifacts');
     console.log(`${BOLD}${RED}Strip mode${RESET} — removing mavericks files from ${targetDir}\n`);
     console.log(`${YELLOW}WARNING: This is destructive. Ensure changes are committed before stripping.${RESET}\n`);
 
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const answer = await prompt(rl, `Remove all mavericks files from ${targetDir}? [y/N]: `);
-    rl.close();
-
-    if (answer.trim().toLowerCase() !== 'y') {
-      console.log(`${DIM}Cancelled.${RESET}\n`);
-      return;
-    }
-
-    const toRemove = [
-      'BACKLOG.md', 'TASK_STATUS.md', 'PROCESS_STATE.md',
-      'PROCESS_STATE.json', 'EXECUTION_LOG.md',
+    // Plumbing: regenerable by re-running the installer.
+    const PLUMBING_PATHS = [
       path.join('scripts', 'mavp-operator'),
       path.join('scripts', 'mavp-operator-agent.js'),
       path.join('scripts', 'mavp-operator-close-session.js'),
       '.claude',
+      '.mavp',
+      '.mavp-hook-ts',
+    ];
+    // State artifacts: irreplaceable project state.
+    const STATE_PATHS = [
+      'BACKLOG.md', 'TASK_STATUS.md', 'PROCESS_STATE.md',
+      'PROCESS_STATE.json', 'EXECUTION_LOG.md', 'SKILL_PROPOSALS',
     ];
 
-    let removedCount = 0;
-    for (const rel of toRemove) {
-      const fullPath = path.join(targetDir, rel);
-      if (!fs.existsSync(fullPath)) continue;
-      const stat = fs.statSync(fullPath);
-      if (stat.isDirectory()) {
-        fs.rmSync(fullPath, { recursive: true, force: true });
-      } else {
-        fs.unlinkSync(fullPath);
+    const plumbingExisting = PLUMBING_PATHS.filter(rel => fs.existsSync(path.join(targetDir, rel)));
+    const stateExisting = STATE_PATHS.filter(rel => fs.existsSync(path.join(targetDir, rel)));
+
+    if (plumbingExisting.length === 0 && stateExisting.length === 0) {
+      console.log(`${DIM}Nothing to remove.${RESET}\n`);
+      return;
+    }
+
+    const gitAvailable = isGitWorkTree(targetDir);
+    if (!gitAvailable) {
+      console.log(`${RED}${BOLD}WARNING: ${targetDir} is NOT a git repository.${RESET}`);
+      console.log(`${RED}${BOLD}ALL deletions listed below are irrecoverable.${RESET}\n`);
+    }
+
+    function printManifestGroup(heading, list) {
+      console.log(`${BOLD}${heading}${RESET}`);
+      const info = {};
+      for (const rel of list) {
+        const c = classifyPath(targetDir, rel, gitAvailable);
+        info[rel] = c;
+        const tagColor = c.irrecoverable ? RED : (c.label === 'tracked' ? GREEN : YELLOW);
+        console.log(`  ${rel}  ${DIM}—${RESET} ${tagColor}${c.label}${RESET}`);
       }
-      console.log(`  ${RED}removed${RESET}  ${rel}`);
-      removedCount++;
+      console.log('');
+      return info;
+    }
+
+    const plumbingInfo = plumbingExisting.length
+      ? printManifestGroup('Plumbing (regenerable via reinstall):', plumbingExisting)
+      : {};
+
+    const showStateGroup = !keepArtifacts && stateExisting.length > 0;
+    const stateInfo = showStateGroup
+      ? printManifestGroup('State artifacts (irreplaceable project data):', stateExisting)
+      : {};
+
+    // Non-interactive: print manifest, delete nothing, exit 1. No --force bypass in v1.
+    if (!process.stdin.isTTY) {
+      console.log(`${YELLOW}Non-interactive session detected (stdin is not a TTY).${RESET}`);
+      console.log(`${YELLOW}Nothing has been deleted. Re-run this command interactively to confirm removal.${RESET}\n`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+    let plumbingConfirmed = false;
+    if (plumbingExisting.length > 0) {
+      const answer = await prompt(rl, `Remove plumbing files/dirs listed above? [y/N]: `);
+      plumbingConfirmed = answer.trim().toLowerCase() === 'y';
+    }
+
+    let stateConfirmed = false;
+    if (showStateGroup) {
+      const anyIrrecoverable = stateExisting.some(rel => stateInfo[rel].irrecoverable);
+      if (anyIrrecoverable) {
+        const answer = await prompt(
+          rl,
+          `${RED}Some state artifacts are NOT TRACKED — IRRECOVERABLE.${RESET} Type "delete" to confirm removing state artifacts listed above: `
+        );
+        stateConfirmed = answer.trim().toLowerCase() === 'delete';
+      } else {
+        const answer = await prompt(rl, `Remove state artifacts listed above? [y/N]: `);
+        stateConfirmed = answer.trim().toLowerCase() === 'y';
+      }
+    }
+
+    rl.close();
+
+    let removedCount = 0;
+
+    if (plumbingConfirmed) {
+      for (const rel of plumbingExisting) {
+        removeStripPath(targetDir, rel);
+        console.log(`  ${RED}removed${RESET}  ${rel}`);
+        removedCount++;
+      }
+    } else if (plumbingExisting.length > 0) {
+      console.log(`${DIM}Plumbing group: cancelled, nothing removed.${RESET}`);
+    }
+
+    if (stateConfirmed) {
+      for (const rel of stateExisting) {
+        removeStripPath(targetDir, rel);
+        console.log(`  ${RED}removed${RESET}  ${rel}`);
+        removedCount++;
+      }
+    } else if (showStateGroup) {
+      console.log(`${DIM}State artifacts group: cancelled, nothing removed. Files left on disk.${RESET}`);
+    } else if (keepArtifacts && stateExisting.length > 0) {
+      console.log(`${DIM}--keep-artifacts: state artifacts left on disk untouched.${RESET}`);
     }
 
     console.log(`\n${GREEN}✓ Strip complete.${RESET} ${removedCount} item(s) removed.`);
+    if (!stateConfirmed && stateExisting.length > 0) {
+      console.log(`${DIM}State artifacts preserved on disk: ${stateExisting.join(', ')}${RESET}`);
+    }
     console.log(`${DIM}Re-run installer to restore mavericks if needed.${RESET}\n`);
     return;
   }

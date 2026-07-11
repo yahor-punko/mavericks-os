@@ -39,7 +39,7 @@ The session-start brief reports the active permission mode via a `permission_mod
 ./scripts/mavp-operator --validate       # run the validator via the operator wrapper (equivalent to node scripts/mavp-validator.js "$(pwd)")
 ./scripts/mavp-operator --check-sync     # compare agent/skill files in known projects against mavericks source
 ./scripts/mavp-operator --install <target-dir>  # bootstrap Mavericks into a target project (operator wrapper for node scripts/mavp-install.js)
-./scripts/mavp-operator --strip <target-dir>    # remove all Mavericks files from a project (pre-publish cleanup)
+./scripts/mavp-operator --strip <target-dir> [--keep-artifacts]  # remove Mavericks files from a project (pre-publish cleanup); prints a git-recoverability manifest before any prompt, then two-stage confirm — plumbing [y/N], state artifacts (BACKLOG/TASK_STATUS/PROCESS_STATE/EXECUTION_LOG/SKILL_PROPOSALS) require typing "delete" if any state path is git-irrecoverable; --keep-artifacts skips the state group; requires an interactive TTY
 ./scripts/mavp-operator --apply-decomposition [FILE]  # apply architect decomposition block to BACKLOG + TASK_STATUS
 ./scripts/mavp-operator --arm-recheck T-NNN --due YYYY-MM-DD [--interval 8w] [--note "..."]  # register a time-based post-merge recheck for task T-NNN; auto-assigns next RC-N id; copies task title for self-containment
 ./scripts/mavp-operator --ack-recheck RC-N [--rearm]  # acknowledge and remove a recheck; --rearm reschedules instead (sets due = today + interval; requires interval on the entry)

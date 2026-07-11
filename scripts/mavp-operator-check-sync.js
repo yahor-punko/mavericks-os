@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// MAVERICKS_VERSION: 0.2.0
+// MAVERICKS_VERSION: 0.2.1
 
 /**
  * mavp-operator-check-sync.js
@@ -64,6 +64,9 @@ function walkDir(dirPath, ext) {
   if (!stat.isDirectory()) return results;
 
   for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+    // Skip dotfiles/OS junk (e.g. .DS_Store, Thumbs.db) — never part of the synced set.
+    // These live on disk but are not git-tracked, so they would surface as false-positive drift.
+    if (entry.name.startsWith('.')) continue;
     const fullPath = path.join(dirPath, entry.name);
     const isDir = entry.isDirectory() || (entry.isSymbolicLink() && fs.statSync(fullPath).isDirectory());
     if (isDir) {
