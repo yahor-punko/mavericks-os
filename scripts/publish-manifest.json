@@ -23,6 +23,7 @@
     ".claude/skills/frontend-design",
     ".claude/skills/session-start/SKILL.md",
     ".claude/skills/validate/SKILL.md",
+    ".github/workflows/ci.yml",
     ".gitignore",
     "CLAUDE.md",
     "CODE_OF_CONDUCT.md",
@@ -93,6 +94,7 @@
     "scripts/mavp-validator.js",
     "scripts/mavp-version.js",
     "scripts/publish-manifest.json",
+    "scripts/run-tests.js",
     "scripts/test-active-wave-reinsert.js",
     "scripts/test-close-session-mode.js",
     "scripts/test-install-bypass-default.js",
@@ -112,6 +114,7 @@
     "scripts/test-trajectory-status-filter.js",
     "scripts/test-trajectory-tool-uses.js",
     "scripts/test-validator-review-statuses.js",
+    "scripts/test-version-sync.js",
     "scripts/test-wave-close-sweep.js",
     "scripts/test-wave-summary-scope.js",
     "skills-lock.json",
@@ -152,6 +155,6 @@
     "docs/PUBLIC_RELEASE_STRATEGY.md": "internal maintainer process — how THIS repo syncs private→public (T-326); not adopter-facing"
   },
   "preserve": {
-    ".github/": "public-native (T-356) — issue templates etc. live only in the mirror, never in private source"
+    ".github/ISSUE_TEMPLATE/": "public-native (T-356) — issue templates live only in the mirror, never in private source; CI workflow (T-376) ships from source"
   }
 }

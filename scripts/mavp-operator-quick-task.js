@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// MAVERICKS_VERSION: 0.7.0
 
 /**
  * mavp-operator-quick-task.js

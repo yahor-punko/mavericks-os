@@ -2,7 +2,7 @@
 
 ## Bootstrap
 
-- [ ] Run `node ~/Documents/mavericks/scripts/mavp-install.js /path/to/project`
+- [ ] Run `node "$HOME/.mavericks/scripts/mavp-install.js" /path/to/project`
 - [ ] Confirm `scripts/mavp-operator`, `BACKLOG.md`, `TASK_STATUS.md`, `PROCESS_STATE.md`, `PROCESS_STATE.json` were created
 - [ ] Edit `PROCESS_STATE.json` — set initiative name, confirm `wave: 1`
 - [ ] Run `./scripts/mavp-operator --version` — confirms mavericks connection works

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// MAVERICKS_VERSION: 0.2.0
 
 /**
  * mavp-install.js
@@ -50,7 +49,9 @@
  *                       This refusal is NOT bypassable by --yes (destructive action requires
  *                       a real interactive confirmation).
  *
- * After bootstrap, set MAVERICKS_HOME env var if mavericks is not at ~/Documents/mavericks.
+ * After bootstrap, the generated wrapper and hooks resolve the mavericks install location as:
+ * explicit MAVERICKS_HOME env var > ~/.mavericks (canonical) > ~/Documents/mavericks (legacy).
+ * Set MAVERICKS_HOME if mavericks lives somewhere else entirely.
  */
 
 const fs = require('node:fs');
@@ -108,7 +109,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
-MAVERICKS="\${MAVERICKS_HOME:-$HOME/Documents/mavericks}/scripts"
+MAVERICKS="\${MAVERICKS_HOME:-$( [ -d "$HOME/.mavericks" ] && printf %s "$HOME/.mavericks" || printf %s "$HOME/Documents/mavericks" )}/scripts"
 
 export MAVERICKS_PROJECT_ROOT="$PROJECT_ROOT"
 export MAVERICKS_SCRIPTS="$MAVERICKS"
@@ -260,7 +261,7 @@ fi
  * framework and target happen to be the same repo.
  */
 function buildPostToolUseHookCommand(targetDir) {
-  return `INPUT=$(cat); FP=$(node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write((d.tool_input&&d.tool_input.file_path)||'')}catch(e){}" <<< "$INPUT"); case "$FP" in *BACKLOG.md|*TASK_STATUS.md) ;; *) exit 0 ;; esac; MAVERICKS="\${MAVERICKS_HOME:-$HOME/Documents/mavericks}/scripts"; MAVROOT="${targetDir}"; export MAVERICKS_PROJECT_ROOT="$MAVROOT"; TS=$(node -e "process.stdout.write(String(Date.now()))"); echo "$TS" > "$MAVROOT/.mavp-hook-ts"; sleep 1.5; CURRENT_TS=$(cat "$MAVROOT/.mavp-hook-ts" 2>/dev/null); if [ "$CURRENT_TS" != "$TS" ]; then exit 0; fi; rm -f "$MAVROOT/.mavp-hook-ts"; cd "$MAVROOT"; case "$FP" in *BACKLOG.md) node "$MAVERICKS/mavp-operator-sync-status.js" 1>&2 ;; esac; VOUT=$(node "$MAVERICKS/mavp-validator.js" 2>&1); VCODE=$?; [ $VCODE -ne 0 ] && printf '%s\\n' "$VOUT" >&2 || true; exit 0`;
+  return `INPUT=$(cat); FP=$(node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write((d.tool_input&&d.tool_input.file_path)||'')}catch(e){}" <<< "$INPUT"); case "$FP" in *BACKLOG.md|*TASK_STATUS.md) ;; *) exit 0 ;; esac; MAVERICKS="\${MAVERICKS_HOME:-$( [ -d "$HOME/.mavericks" ] && printf %s "$HOME/.mavericks" || printf %s "$HOME/Documents/mavericks" )}/scripts"; MAVROOT="${targetDir}"; export MAVERICKS_PROJECT_ROOT="$MAVROOT"; TS=$(node -e "process.stdout.write(String(Date.now()))"); echo "$TS" > "$MAVROOT/.mavp-hook-ts"; sleep 1.5; CURRENT_TS=$(cat "$MAVROOT/.mavp-hook-ts" 2>/dev/null); if [ "$CURRENT_TS" != "$TS" ]; then exit 0; fi; rm -f "$MAVROOT/.mavp-hook-ts"; cd "$MAVROOT"; case "$FP" in *BACKLOG.md) node "$MAVERICKS/mavp-operator-sync-status.js" 1>&2 ;; esac; VOUT=$(node "$MAVERICKS/mavp-validator.js" 2>&1); VCODE=$?; [ $VCODE -ne 0 ] && printf '%s\\n' "$VOUT" >&2 || true; exit 0`;
 }
 
 /**
@@ -449,7 +450,8 @@ async function main() {
   console.log(`${DIM}Framework: ${FRAMEWORK_DIR}${RESET}`);
   console.log(`${DIM}Target:    ${targetScripts}${RESET}\n`);
   console.log(`${DIM}Core framework scripts (dashboard, lib, snapshot, validator) are used directly`);
-  console.log(`from mavericks — not copied. Set MAVERICKS_HOME if mavericks is not at ~/Documents/mavericks.${RESET}\n`);
+  console.log(`from mavericks — not copied. Resolved as ~/.mavericks (canonical), falling back to`);
+  console.log(`~/Documents/mavericks (legacy) — set MAVERICKS_HOME to override.${RESET}\n`);
 
   if (!fs.existsSync(targetDir)) {
     console.error(`${RED}Target directory not found: ${targetDir}${RESET}`);

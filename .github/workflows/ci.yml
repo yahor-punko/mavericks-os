@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: [18, 20, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Run test suite
+        run: npm test
+
+      - name: Run validator (fail only on exit code 2)
+        run: |
+          set +e
+          node scripts/mavp-validator.js "$PWD"
+          code=$?
+          set -e
+          if [ "$code" -eq 2 ]; then
+            echo "Validator reported repair-required (exit 2) — failing job."
+            exit 1
+          elif [ "$code" -eq 1 ]; then
+            echo "::warning::validator drift (exit 1)"
+          fi
+
+      - name: Quick Start proxy
+        run: |
+          mkdir -p "$RUNNER_TEMP/qs-project"
+          node scripts/mavp-install.js "$RUNNER_TEMP/qs-project"
+          test -x "$RUNNER_TEMP/qs-project/scripts/mavp-operator"
+          MAVERICKS_HOME="$GITHUB_WORKSPACE" "$RUNNER_TEMP/qs-project/scripts/mavp-operator" --validate

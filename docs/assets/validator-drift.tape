@@ -6,23 +6,26 @@
 Output docs/assets/validator-drift.gif
 
 Set Shell "bash"
-Set FontSize 16
-Set Width 1200
-Set Height 800
+Set FontSize 20
+Set Padding 20
+Set Width 1245
+Set Height 705
 Set Theme "Dracula"
-Set TypingSpeed 40ms
+Set TypingSpeed 20ms
 
 Hide
 Type "cd $(git rev-parse --show-toplevel)" Enter
+Type "export PATH=$(git rev-parse --show-toplevel)/scripts:$PATH" Enter
 Type "export HOME=$(mktemp -d)" Enter
 Type "clear" Enter
 Show
 
-Type "mavp-operator --demo --phase drift --reveal 1500"
-Sleep 800ms
+Type "mavp-operator --demo --phase drift --reveal 1350"
+Sleep 400ms
 Enter
 
 # Pacing is driven by the demo's own --reveal frames (in-process): drift has
-# ~4 beats x ~2 reveals each x 1.5s per reveal, so a single generous trailing
-# Sleep covers the full runtime plus margin so the GIF never cuts mid-story.
-Sleep 16s
+# ~6 reveal beats x 1350ms plus tool-exec overhead. The trailing Sleep is
+# sized so the final frame holds ~1.2s after the story ends without a long
+# static tail, and the GIF never cuts mid-story.
+Sleep 8300ms

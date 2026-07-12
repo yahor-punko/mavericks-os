@@ -5,7 +5,7 @@ How to set up a new project with Mavericks.
 ## Step 1 — Run the installer
 
 ```bash
-node ~/Documents/mavericks/scripts/mavp-install.js /path/to/your-project
+node "$HOME/.mavericks/scripts/mavp-install.js" /path/to/your-project
 ```
 
 This creates:
@@ -15,7 +15,15 @@ This creates:
 - `BACKLOG.md`, `TASK_STATUS.md`, `PROCESS_STATE.md` — from templates
 - `PROCESS_STATE.json` — machine-readable state
 
-If mavericks is not at `~/Documents/mavericks`, set `MAVERICKS_HOME` before running.
+### Where the installer looks for mavericks
+
+Generated wrappers and hooks resolve the mavericks install location in this order:
+
+1. **Explicit `MAVERICKS_HOME` env var** — always wins if set.
+2. **`$HOME/.mavericks`** — the canonical default location, used if that directory exists. This is where the public installer (`install.sh`) clones mavericks.
+3. **`$HOME/Documents/mavericks`** — legacy fallback, used only if neither of the above resolves.
+
+**Maintainer caveat:** if you develop the framework itself from a checkout at `~/Documents/mavericks` *and* a `~/.mavericks` directory also exists on the same machine (e.g. from installing mavericks into another project), the `~/.mavericks` copy will silently shadow your `Documents` checkout for every wrapper or hook that doesn't set `MAVERICKS_HOME` explicitly — because step 2 resolves before step 3 ever runs. Framework developers should set `MAVERICKS_HOME` explicitly in their shell profile to avoid running against the wrong checkout.
 
 This first install is a one-time human-run command: an agent session opened before Mavericks is installed may lack shell/edit permission entirely, since the permissive default (`bypassPermissions`) is created *by* this install and can't exist before it runs.
 
@@ -140,7 +148,7 @@ git config core.hooksPath .claude/hooks/
 **Keeping the hook up to date:**
 
 ```bash
-node ~/Documents/mavericks/scripts/mavp-install.js --update /path/to/your-project
+node "$HOME/.mavericks/scripts/mavp-install.js" --update /path/to/your-project
 ```
 
 This re-copies `.claude/hooks/pre-commit` from the mavericks source along with agents, skills, and rules.
@@ -223,7 +231,7 @@ git diff --name-only HEAD~1 HEAD
 If new framework-owned paths are added in a future mavericks release, re-run the installer with `--update`:
 
 ```bash
-node ~/Documents/mavericks/scripts/mavp-install.js --update /path/to/your-project
+node "$HOME/.mavericks/scripts/mavp-install.js" --update /path/to/your-project
 ```
 
 This emits a fresh fragment only if one does not already exist. To pull in path additions to an existing file, compare your wired `paths-ignore` list against the latest `templates/deploy-ci-paths-ignore.fragment.yml` manually.

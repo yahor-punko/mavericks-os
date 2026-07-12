@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// MAVERICKS_VERSION: 0.10.0
 
 /**
  * mavp-operator-apply-decomposition.js

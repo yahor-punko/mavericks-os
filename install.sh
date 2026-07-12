@@ -99,6 +99,36 @@ if [ -n "$REF" ]; then
   validate_ref "$REF"
 fi
 
+# ---------------------------------------------------------------------------
+# TTY helpers — used by the consent gate and the demo prompt.
+#
+# Under `curl -fsSL <url> | sh`, stdin is the piped script body, so
+# `[ -t 0 ]` is false even when the invoking shell has a controlling
+# terminal a human could interact with. have_tty() additionally probes
+# whether /dev/tty can be opened — this is true exactly when there is a
+# controlling terminal, independent of what stdin is wired to. read_tty()
+# prompts on the terminal directly in that case so the answer isn't read
+# from stdin (which would otherwise consume piped script text).
+# ---------------------------------------------------------------------------
+
+# Can we prompt a human? True if stdin is a TTY, or /dev/tty is openable
+# (piped `curl | sh` launched from an interactive terminal).
+have_tty() {
+  [ -t 0 ] && return 0
+  ( : </dev/tty ) 2>/dev/null
+}
+
+# read_tty <prompt> — prompt via the controlling terminal; sets TTY_ANSWER.
+read_tty() {
+  if [ -t 0 ]; then
+    printf '%s' "$1"
+    read -r TTY_ANSWER
+  else
+    printf '%s' "$1" >/dev/tty
+    read -r TTY_ANSWER </dev/tty
+  fi
+}
+
 echo "=================================================================="
 echo " Mavericks bootstrap installer"
 echo " Source: $REPO_URL"
@@ -181,11 +211,11 @@ if [ "$ASSUME_YES" -eq 1 ]; then
   echo
   echo "Proceeding (--yes supplied)."
   echo
-elif [ -t 0 ]; then
+elif have_tty; then
   print_disclosure
   echo
-  printf "Type 'y' to continue and clone Mavericks: "
-  read -r CONSENT
+  read_tty "Type 'y' to continue and clone Mavericks: "
+  CONSENT="$TTY_ANSWER"
   case "$CONSENT" in
     y|Y|yes|YES)
       echo
@@ -280,20 +310,43 @@ echo
 # ---------------------------------------------------------------------------
 # Step 5: Print environment export lines (do NOT edit the user's shell rc)
 # ---------------------------------------------------------------------------
+# Bootstrapped wrappers/hooks (scripts/mavp-operator, .claude/hooks/pre-commit)
+# resolve MAVERICKS_HOME with a fallback chain: $MAVERICKS_HOME if set, else
+# $HOME/.mavericks, else the legacy $HOME/Documents/mavericks. A default
+# install (this script's own default target dir) already lands on the first
+# fallback, so no export is required for it to keep working in a fresh shell.
+DEFAULT_TARGET_DIR="$HOME/.mavericks"
+LEGACY_TARGET_DIR="$HOME/Documents/mavericks"
+
 echo "------------------------------------------------------------------"
-echo "Add the following to your current shell session:"
-echo
-echo "  export MAVERICKS_HOME=\"$TARGET_DIR\""
-echo "  export PATH=\"\$MAVERICKS_HOME/scripts:\$PATH\""
-echo
-echo "IMPORTANT: these exports only apply to your CURRENT shell. To make"
-echo "them permanent, append the two lines above to your shell profile"
-echo "(~/.bashrc, ~/.zshrc, ~/.profile, etc.) and restart your shell or"
-echo "run 'source' on that file. This step is load-bearing: bootstrapped"
-echo "projects' scripts/mavp-operator wrapper and .claude/hooks/pre-commit"
-echo "default to \$HOME/Documents/mavericks when MAVERICKS_HOME is unset,"
-echo "so installing here ($TARGET_DIR) will silently break in a fresh"
-echo "shell unless MAVERICKS_HOME is persisted as shown above."
+if [ "$TARGET_DIR" = "$DEFAULT_TARGET_DIR" ] || [ "$TARGET_DIR" = "$LEGACY_TARGET_DIR" ]; then
+  echo "Installed at the default location ($TARGET_DIR)."
+  echo
+  echo "No MAVERICKS_HOME export is needed: bootstrapped projects' scripts/"
+  echo "mavp-operator wrapper and .claude/hooks/pre-commit already fall back"
+  echo "to \$HOME/.mavericks (and the legacy \$HOME/Documents/mavericks) when"
+  echo "MAVERICKS_HOME is unset, so this install works in a fresh shell"
+  echo "without any further setup."
+  echo
+  echo "Optional: add \"$TARGET_DIR/scripts\" to your PATH if you want to run"
+  echo "mavp-operator directly by name instead of via its full path:"
+  echo
+  echo "  export PATH=\"$TARGET_DIR/scripts:\$PATH\""
+else
+  echo "Installed at a custom location ($TARGET_DIR)."
+  echo
+  echo "Because this is not the default (\$HOME/.mavericks) or legacy"
+  echo "(\$HOME/Documents/mavericks) location, add the following to your"
+  echo "current shell session so bootstrapped projects can find it:"
+  echo
+  echo "  export MAVERICKS_HOME=\"$TARGET_DIR\""
+  echo "  export PATH=\"\$MAVERICKS_HOME/scripts:\$PATH\""
+  echo
+  echo "IMPORTANT: these exports only apply to your CURRENT shell. To make"
+  echo "them permanent, append the two lines above to your shell profile"
+  echo "(~/.bashrc, ~/.zshrc, ~/.profile, etc.) and restart your shell or"
+  echo "run 'source' on that file."
+fi
 echo "------------------------------------------------------------------"
 echo
 
@@ -313,9 +366,9 @@ case "$DEMO_MODE" in
   skip)
     ;;
   ask)
-    if [ -t 0 ]; then
-      printf "Run the demo now? [Y/n] "
-      read -r DEMO_ANSWER
+    if have_tty; then
+      read_tty "Run the demo now? [Y/n] "
+      DEMO_ANSWER="$TTY_ANSWER"
       case "$DEMO_ANSWER" in
         n|N|no|NO)
           ;;

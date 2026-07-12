@@ -1,6 +1,13 @@
 {
   "name": "mavericks",
+  "version": "0.30.0",
   "private": true,
+  "scripts": {
+    "test": "node scripts/run-tests.js",
+    "validate": "node scripts/mavp-validator.js .",
+    "demo": "./scripts/mavp-operator --demo",
+    "smoke": "node scripts/run-tests.js --filter test-install"
+  },
   "optionalDependencies": {
     "@anthropic-ai/sdk": "^0.100.1"
   }

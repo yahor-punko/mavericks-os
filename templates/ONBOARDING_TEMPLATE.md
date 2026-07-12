@@ -21,7 +21,7 @@ Before you wrap up a big piece of work, ask me to save a handoff — I'll write
 down where we are so your next session picks up without you re-explaining anything.
 
 ## The rules it follows
-Live in `CLAUDE.md` and `.claude/rules/` here in your project, plus the shared operating model in your mavericks installation ($MAVERICKS_HOME, default `~/Documents/mavericks`) under `docs/core/`.
+Live in `CLAUDE.md` and `.claude/rules/` here in your project, plus the shared operating model in your mavericks installation ($MAVERICKS_HOME, default `$HOME/.mavericks`, falling back to the legacy `~/Documents/mavericks` if that's where your checkout lives) under `docs/core/`.
 
 ## First step
 Tell your agent your project goal and what you'd like to tackle first. It takes it from there.

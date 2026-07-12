@@ -26,31 +26,37 @@ across multiple repositories.
 - **Auditable runs.** You can see — and diff — why the system did what it did, because state and decisions live in files, not model memory.
 - **Drift caught before commit.** A validator blocks out-of-sync BACKLOG/TASK_STATUS before it reaches a commit (exit 2).
 
-## See it
-
-![Validator catching backlog/task drift — exit 2, then fixed](docs/assets/validator-drift.gif)
-
-Drift between `BACKLOG.md` and `TASK_STATUS.md` is caught before it reaches a commit.
-
-![The operator dashboard — one glance at where things stand](docs/assets/operator-dashboard.gif)
-
-One glance at workflow state, context usage, runtime actors, and open waits.
-
 ## Quick start
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/yahor-punko/mavericks-os/main/install.sh | sh
-```
+There are two different things you might want to do here — try Mavericks, or adopt it into a project you already have. They're separate steps.
 
-This configures the prompt-free `bypassPermissions` default for autonomous tool execution — see **[`SECURITY.md`](SECURITY.md)** for exactly what that means and how to opt out before your first session.
+### Try the demo
 
-Then see it for yourself:
+One command, no follow-up needed:
 
 ```bash
-./scripts/mavp-operator --demo
+curl -fsSL https://raw.githubusercontent.com/yahor-punko/mavericks-os/main/install.sh | sh -s -- --demo
 ```
 
-A narrated, throwaway walkthrough of the operator loop against a disposable fixture — no docs required.
+This clones Mavericks to `$HOME/.mavericks`, prompts for consent on your terminal (the `bypassPermissions` disclosure — see **[`SECURITY.md`](SECURITY.md)** for exactly what that means and how to opt out), then runs a narrated, throwaway walkthrough of the operator loop against a disposable fixture — no docs required.
+
+To re-run the demo later without reinstalling:
+
+```bash
+"$HOME/.mavericks/scripts/mavp-operator" --demo
+```
+
+(Use the absolute path above, not a relative `./scripts/mavp-operator` — that only works from inside the Mavericks checkout itself.)
+
+### Add Mavericks to a project
+
+The one-liner above only clones the framework — it does not touch your own project. Adopting Mavericks into a project is a separate step, run against the checkout the demo just created:
+
+```bash
+node "$HOME/.mavericks/scripts/mavp-install.js" /path/to/your-project
+```
+
+See **Manual install** below (or **[`docs/core/BOOTSTRAP_GUIDE.md`](docs/core/BOOTSTRAP_GUIDE.md)** for the full step-by-step) for what this creates and how to configure it.
 
 ### Requirements
 
@@ -101,7 +107,7 @@ This creates, in `your-project/`:
 
 Core framework scripts (the operator library, dashboard, validator) are **not copied** into your project — the generated `scripts/mavp-operator` wrapper runs them directly from this Mavericks checkout.
 
-By default the wrapper looks for Mavericks at `$HOME/Documents/mavericks`. If you cloned it somewhere else, set `MAVERICKS_HOME` to that path (e.g. in your shell profile or before invoking the wrapper):
+The wrapper resolves the Mavericks install location in this order: an explicit `MAVERICKS_HOME` env var, if set, always wins; otherwise `$HOME/.mavericks` — the canonical default, and where `install.sh` clones Mavericks — is used if it exists; otherwise `$HOME/Documents/mavericks` is used as a legacy fallback. If you cloned Mavericks somewhere else entirely, set `MAVERICKS_HOME` to that path (e.g. in your shell profile or before invoking the wrapper):
 
 ```bash
 export MAVERICKS_HOME=<path-to-mavericks>
@@ -123,6 +129,16 @@ For the full step-by-step, including editing `PROCESS_STATE.json`, adding your f
 ./scripts/mavp-operator --version        # framework version
 ./scripts/mavp-operator --help           # show all flags
 ```
+
+## See more
+
+![Validator catching backlog/task drift — exit 2, then fixed](docs/assets/validator-drift.gif)
+
+Drift between `BACKLOG.md` and `TASK_STATUS.md` is caught before it reaches a commit.
+
+![The operator dashboard — one glance at where things stand](docs/assets/operator-dashboard.gif)
+
+One glance at workflow state, context usage, runtime actors, and open waits.
 
 ## Case study
 

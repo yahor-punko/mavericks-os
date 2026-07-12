@@ -8,13 +8,21 @@
 
 set -euo pipefail
 
-# Locate the validator: prefer MAVERICKS_SCRIPTS env var, then MAVERICKS_HOME, then default path.
-MAVERICKS_SCRIPT_DIR="${MAVERICKS_SCRIPTS:-${MAVERICKS_HOME:-$HOME/Documents/mavericks}/scripts}"
+# Locate the validator: prefer MAVERICKS_SCRIPTS env var, then MAVERICKS_HOME,
+# then ~/.mavericks (canonical), then ~/Documents/mavericks (legacy).
+if [ -n "${MAVERICKS_HOME:-}" ]; then
+  MAVERICKS_ROOT="$MAVERICKS_HOME"
+elif [ -d "$HOME/.mavericks" ]; then
+  MAVERICKS_ROOT="$HOME/.mavericks"
+else
+  MAVERICKS_ROOT="$HOME/Documents/mavericks"
+fi
+MAVERICKS_SCRIPT_DIR="${MAVERICKS_SCRIPTS:-$MAVERICKS_ROOT/scripts}"
 VALIDATOR="$MAVERICKS_SCRIPT_DIR/mavp-validator.js"
 
 if [[ ! -f "$VALIDATOR" ]]; then
   echo "WARNING: Mavericks validator not found at $VALIDATOR — skipping pre-commit check."
-  echo "Set MAVERICKS_HOME if mavericks is not at ~/Documents/mavericks."
+  echo "Set MAVERICKS_HOME if mavericks is not at ~/.mavericks or the legacy ~/Documents/mavericks."
   exit 0
 fi
 

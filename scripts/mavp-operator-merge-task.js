@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// MAVERICKS_VERSION: 0.3.0
 
 /**
  * mavp-operator-merge-task.js

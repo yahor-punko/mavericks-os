@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// MAVERICKS_VERSION: 0.2.1
 
 /**
  * mavp-operator-check-sync.js
