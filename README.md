@@ -1,40 +1,66 @@
-# Mavericks
+<p align="center">
+  <img src="docs/assets/mavericks-os-banner.png" alt="Mavericks OS — reliable, auditable delivery for Claude Code" width="100%">
+</p>
 
-An operating model for agent-driven development — structured handoffs, artifact-first state, and an operator dashboard for Claude Code workflows.
+# Mavericks OS for Claude Code
 
-Mavericks is not a deliverable product you run in production. It's a reusable framework that other projects **adopt**: you bootstrap it into your own repository, and it gives your human operator and your main orchestrator agent a shared language and toolset for managing agent-driven work.
+Reliable, auditable delivery for Claude Code agents.
 
-## What it is
+Mavericks persists project state across sessions, routes work through
+specialised roles, and blocks backlog/task drift before commit.
 
-- **Artifact-first truth** — state lives in `BACKLOG.md`, `TASK_STATUS.md`, `PROCESS_STATE.md`/`PROCESS_STATE.json`, not in chat history
-- **Explicit task lifecycle** — a defined state machine (see below) that every task moves through, with an artifact-sync validator catching drift
-- **Role separation** — a main orchestrator agent plus specialized sub-agents (developer, QA, UX, security-reviewer, product-docs, technical-writer, architect, analyst, and more)
-- **Artifact-sync validator** — detects drift between `BACKLOG.md` and `TASK_STATUS.md` before it causes confusion, and blocks commits when artifacts are out of sync
-- **Operator dashboard** — a terminal UI showing workflow state, context usage, runtime actors, and open waits
+Built for solo operators and small teams running agent-driven development
+across multiple repositories.
 
-## Why Mavericks
+[See it in action](#close-it-come-back-tomorrow) · [Quick start](#quick-start)
 
-Mavericks wasn't designed on a whiteboard — it was extracted from running real agent-driven development across many repos at once. Everything here earned its place by keeping that work on track.
+## Close it. Come back tomorrow.
 
-For a single operator directing a team of AI agents:
+![A wave goal and handoff written in one session, surfaced to the next](docs/assets/session-memory.gif)
 
-- **Never reconstruct where things stand.** Every session resumes from written state, not from re-reading a chat log — so your time goes to the decisions only you can make, not to status archaeology.
-- **See — and diff — why the system did what it did.** State and decisions live in versioned artifacts, not in opaque model memory. Runs are auditable and repeatable instead of "trust the context window" — the process is inspectable even when the model isn't.
-- **Drive several repos without holding it all in your head.** The full picture lives in the artifacts and a cross-repo task model, so nothing depends on you remembering it.
-- **Capture the "why we built it this way" as you ship.** Architecture rationale is a normal step in finishing a task, not a cleanup job nobody gets to.
-- **Delegate without babysitting.** An orchestrator plus specialized sub-agents — gated by an artifact-sync validator and QA / security / UX review — catch drift before it turns into rework.
+*Close Claude Code, come back tomorrow — the wave goal and handoff are handed to you, not reconstructed from chat history.*
 
-## Before you clone
+## Three results
 
-Mavericks ships with autonomous tool execution enabled by default (`permissions.defaultMode: "bypassPermissions"` in the committed `.claude/settings.json`). This means agents can read, write, and execute across your filesystem and shell without a per-action confirmation prompt once you start a session. This is deliberate — see **[`SECURITY.md`](SECURITY.md)** for exactly what it means and how to opt out before your first session.
+- **Close it, come back tomorrow — no state archaeology.** State lives in versioned artifacts; every session resumes from written state, not a chat log.
+- **Auditable runs.** You can see — and diff — why the system did what it did, because state and decisions live in files, not model memory.
+- **Drift caught before commit.** A validator blocks out-of-sync BACKLOG/TASK_STATUS before it reaches a commit (exit 2).
+
+## See it
+
+![Validator catching backlog/task drift — exit 2, then fixed](docs/assets/validator-drift.gif)
+
+Drift between `BACKLOG.md` and `TASK_STATUS.md` is caught before it reaches a commit.
+
+![The operator dashboard — one glance at where things stand](docs/assets/operator-dashboard.gif)
+
+One glance at workflow state, context usage, runtime actors, and open waits.
 
 ## Quick start
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yahor-punko/mavericks-os/main/install.sh | sh
+```
+
+This configures the prompt-free `bypassPermissions` default for autonomous tool execution — see **[`SECURITY.md`](SECURITY.md)** for exactly what that means and how to opt out before your first session.
+
+Then see it for yourself:
+
+```bash
+./scripts/mavp-operator --demo
+```
+
+A narrated, throwaway walkthrough of the operator loop against a disposable fixture — no docs required.
 
 ### Requirements
 
 - Node.js 18+
 - Claude Code CLI (`claude`)
 - git
+
+### Manual install
+
+For people who'd rather not `curl | sh`:
 
 ### Step 1 — Get Mavericks onto your machine
 
@@ -97,6 +123,16 @@ For the full step-by-step, including editing `PROCESS_STATE.json`, adding your f
 ./scripts/mavp-operator --version        # framework version
 ./scripts/mavp-operator --help           # show all flags
 ```
+
+## Case study
+
+Mavericks was extracted from running real agent-driven development across many repositories at once, not designed on a whiteboard. What hurt was reconstructing project state every session and losing the "why" behind a decision the moment the chat context rolled over. Adopting artifact-first state, strict role separation between orchestrator and sub-agents, and a validator that blocks drift before it reaches a commit kept multi-repo work on track without holding all of it in one operator's head. Everything in this repo earned its place by solving one of those problems in production.
+
+## Before you clone
+
+Mavericks ships with autonomous tool execution enabled by default (`permissions.defaultMode: "bypassPermissions"` in the committed `.claude/settings.json`). This means agents can read, write, and execute across your filesystem and shell without a per-action confirmation prompt once you start a session. This is deliberate — see **[`SECURITY.md`](SECURITY.md)** for exactly what it means and how to opt out before your first session.
+
+Mavericks is not a deliverable product you run in production — it's a reusable framework that other projects **adopt** into their own repository.
 
 ## Project artifacts
 

@@ -1200,6 +1200,47 @@ function archiveActiveWaveInBacklog(backlogPath, waveNumber) {
 }
 
 /**
+ * T-361: parse the `## Active Wave` section of BACKLOG.md and return the
+ * titles of tasks whose Status has reached a merged/deployed terminal state.
+ *
+ * Scoping the scan to the Active Wave section (rather than TASK_STATUS.md's
+ * ever-growing `## Recently completed tasks` section, which accumulates every
+ * wave back to Wave 1) is what makes the resulting wave_summary describe only
+ * the wave being closed instead of concatenating every prior wave's titles.
+ * Must run before `archiveActiveWaveInBacklog` renames the heading away.
+ *
+ * @param {string} backlogMarkdown - full contents of BACKLOG.md
+ * @returns {string[]} titles of merged/deployed tasks in the Active Wave section, in document order
+ */
+function parseActiveWaveMergedTitles(backlogMarkdown) {
+  const lines = backlogMarkdown.split(/\r?\n/);
+  const start = lines.findIndex((l) => /^##\s+Active Wave/i.test(l));
+  if (start === -1) return [];
+
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) { end = i; break; }
+  }
+
+  const section = lines.slice(start + 1, end).join('\n');
+  const blocks = section
+    .split(/\n(?=###\s+T-\d+)/)
+    .map((b) => b.trim())
+    .filter((b) => /^###\s+T-\d+/.test(b));
+
+  const terminalStatuses = new Set(['merged', 'deployed_dev', 'deployed_prod']);
+  const titles = [];
+  for (const block of blocks) {
+    const headingMatch = block.match(/^###\s+(T-\d+)\s+—\s+(.+)$/m);
+    const statusMatch = block.match(/^-\s+\*\*Status:\*\*\s+(.+)$/m);
+    if (headingMatch && statusMatch && terminalStatuses.has(statusMatch[1].trim())) {
+      titles.push(headingMatch[2]?.trim() || headingMatch[1]);
+    }
+  }
+  return titles;
+}
+
+/**
  * Atomically rename a task heading in both BACKLOG.md and TASK_STATUS.md.
  *
  * Finds lines matching `### T-NNN — <any title>` and replaces the title
@@ -2086,6 +2127,7 @@ module.exports = {
   insertIntoActiveWave,
   lookupTaskTitle,
   normalizeWhitespace,
+  parseActiveWaveMergedTitles,
   parseAllTaskBlocks,
   parseIntervalDays,
   parseTasksWithRepo,

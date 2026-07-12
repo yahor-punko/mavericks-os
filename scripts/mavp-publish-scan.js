@@ -112,6 +112,10 @@ const EMAIL_ALLOWLIST = new Set([
   // SECURITY.md (security contact) and CODE_OF_CONDUCT.md (enforcement
   // contact) so external reporters/contributors can reach a real human.
   'yahorpunko@gmail.com',
+  // RFC-2606/6761 reserved (.invalid) dummy address used as the throwaway
+  // git-commit author in mavp-operator-demo.js's session-phase fixture
+  // seeding — deliberately non-resolvable, never a real address.
+  'demo@example.invalid',
 ]);
 
 function isAllowed(categoryName, matchText) {

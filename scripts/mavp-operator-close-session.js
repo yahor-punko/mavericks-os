@@ -46,7 +46,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, classifyNextAction, readPermissionMode, readPersistedPermissionMode } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { generateProcessStateMd, archiveActiveWaveInBacklog, classifyNextAction, parseActiveWaveMergedTitles, readPermissionMode, readPersistedPermissionMode } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
@@ -128,34 +128,6 @@ function buildRenameLabel(wave, waveSession, mergedIds) {
   const prefix = `W${wave}[S${waveSession}]`;
   if (!mergedIds || mergedIds.length === 0) return prefix;
   return `${prefix} — ${mergedIds.join(', ')}`;
-}
-
-/**
- * Parse merged task titles from ## Recently completed tasks section.
- * Used for auto-generating wave_summary.
- */
-function parseMergedTaskTitles(markdown) {
-  const lines = markdown.split(/\r?\n/);
-  const start = lines.findIndex(l => /^##\s+Recently completed tasks/.test(l));
-  if (start === -1) return [];
-
-  let end = lines.length;
-  for (let i = start + 1; i < lines.length; i++) {
-    if (/^##\s+/.test(lines[i])) { end = i; break; }
-  }
-
-  const section = lines.slice(start + 1, end).join('\n');
-  const blocks = section.split(/\n(?=###\s+T-)/).map(b => b.trim()).filter(Boolean);
-
-  const titles = [];
-  for (const block of blocks) {
-    const headingMatch = block.match(/^###\s+(T-\d+)\s+—\s+(.+)$/m);
-    const statusMatch = block.match(/^- \*\*Status:\*\*\s+(.+)$/m);
-    if (headingMatch && statusMatch && statusMatch[1]?.trim() === 'merged') {
-      titles.push(headingMatch[2]?.trim() || headingMatch[1]);
-    }
-  }
-  return titles;
 }
 
 /**
@@ -586,7 +558,7 @@ function runValidator() {
   }
 }
 
-function updateProcessStateJson(nextAction, waveComplete, summaryValue, { summaryKey = 'wave_goal', explicitNextAction = false } = {}) {
+function updateProcessStateJson(nextAction, waveComplete, summaryValue, { summaryKey = 'wave_goal', explicitNextAction = false, waveSummary } = {}) {
   const today = new Date().toISOString().slice(0, 10);
   let current = {};
   try {
@@ -636,6 +608,18 @@ function updateProcessStateJson(nextAction, waveComplete, summaryValue, { summar
 
   if (summaryValue !== undefined && summaryValue !== null) {
     updated[summaryKey] = summaryValue;
+  }
+
+  // T-367: optional secondary write — lets a caller populate `wave_summary`
+  // alongside a primary summaryKey write (e.g. runInteractive writes
+  // wave_goal via the default summaryKey but, on a wave-complete close,
+  // also needs to write wave_summary in the same call — mirroring the
+  // non-interactive contract that wave_summary is written automatically
+  // at the end of each wave). No-op when omitted, so existing callers
+  // (runNonInteractive passes summaryKey:'wave_summary' with no waveSummary
+  // option; the pre-T-367 interactive call passed neither) are unaffected.
+  if (waveSummary !== undefined && waveSummary !== null) {
+    updated.wave_summary = waveSummary;
   }
 
   writeUtf8(PROCESS_STATE_JSON, JSON.stringify(updated, null, 2) + '\n');
@@ -805,12 +789,26 @@ async function runNonInteractive(args) {
     console.log(`${GREEN}✓ PROCESS_STATE.md updated${RESET}`);
   }
 
-  // Compute summary: explicit --summary wins, then --auto-summary or auto-fallback in non-interactive mode
+  // Compute summary: explicit --summary wins, otherwise auto-generate — but only once the wave is
+  // actually complete (T-361). Auto-generating on a mid-wave close would clobber the prior wave's
+  // summary with a partial one; explicit --summary is exempt from this gate and may still always
+  // write, regardless of wave completion.
+  //
+  // T-366: this function (runNonInteractive) is only ever reached via the non-interactive path
+  // resolved by resolveMode() — including the flagless, non-TTY (agent Bash) case where no explicit
+  // --non-interactive flag is passed. Gating on args.autoSummary / args.nonInteractive here was wrong:
+  // those reflect the CLI flag, not the resolved mode, so a flagless non-TTY close left the gate false
+  // and the stale wave_summary was silently preserved. Auto-summary is now the unconditional
+  // non-interactive default; args.autoSummary is still parsed for CLI backward compat but is a no-op
+  // in this condition.
   let effectiveSummary = args.summary;
 
-  if (!effectiveSummary && (args.autoSummary || args.nonInteractive)) {
-    // Auto-generate from merged tasks in recently completed section
-    const mergedTitles = parseMergedTaskTitles(updatedContent);
+  if (!effectiveSummary && allMerged) {
+    // Auto-generate from merged/deployed tasks in BACKLOG.md's Active Wave section (the wave being
+    // closed right now) — not TASK_STATUS.md's `## Recently completed tasks` section, which
+    // accumulates every wave back to Wave 1 and would make the summary grow without bound.
+    const backlogContentForSummary = fs.existsSync(BACKLOG_MD) ? readUtf8(BACKLOG_MD) : '';
+    const mergedTitles = parseActiveWaveMergedTitles(backlogContentForSummary);
     effectiveSummary = buildAutoSummary(sessionWave, mergedTitles);
   }
 
@@ -1050,8 +1048,28 @@ async function runInteractive() {
   } catch { /* use defaults */ }
 
   const waveComplete = allMerged && remainingTasks.length === 0;
-  const { wave: newWave } = updateProcessStateJson(nextAction, waveComplete, waveGoalToSave, { explicitNextAction: operatorExplicit });
+
+  // T-367: on a wave-complete interactive close, also compute the scoped
+  // wave_summary (mirrors the non-interactive T-361/T-366 contract) so
+  // "wave_summary is written automatically... at the end of each wave"
+  // holds for interactive closes too. Read BACKLOG.md's Active Wave content
+  // now, BEFORE archiveActiveWaveInBacklog() renames the heading below —
+  // parseActiveWaveMergedTitles() only matches a live "## Active Wave"
+  // heading. A mid-wave (non-complete) close must not touch wave_summary,
+  // so this is left undefined otherwise and updateProcessStateJson() skips
+  // the write, preserving whatever value is already on disk.
+  let autoWaveSummary;
+  if (waveComplete) {
+    const backlogContentForSummary = fs.existsSync(BACKLOG_MD) ? readUtf8(BACKLOG_MD) : '';
+    const mergedTitles = parseActiveWaveMergedTitles(backlogContentForSummary);
+    autoWaveSummary = buildAutoSummary(sessionWave, mergedTitles);
+  }
+
+  const { wave: newWave } = updateProcessStateJson(nextAction, waveComplete, waveGoalToSave, { explicitNextAction: operatorExplicit, waveSummary: autoWaveSummary });
   console.log(`${GREEN}✓ PROCESS_STATE.json updated${waveComplete ? ` — wave → ${newWave}` : ''}${RESET}`);
+  if (autoWaveSummary) {
+    console.log(`  ${DIM}wave_summary written: ${autoWaveSummary}${RESET}`);
+  }
 
   // Archive Active Wave heading in BACKLOG.md when wave is complete
   if (waveComplete) {

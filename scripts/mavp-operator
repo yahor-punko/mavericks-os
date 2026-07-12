@@ -44,6 +44,8 @@ if [[ "${1-}" == "--help" ]]; then
   echo "  --install        Bootstrap Mavericks into a target project directory"
   echo "  --strip          Remove all Mavericks files from a project (pre-publish)"
   echo "  --version        Print the installed Mavericks framework version"
+  echo "  --demo           Run a narrated walkthrough of the operator loop against a throwaway fixture"
+  echo "                   Usage: --demo [--phase dashboard|lifecycle|drift|all] [--step] [--keep] [--no-color] [--reveal <ms>]"
   echo "  --help           Show this help message and exit"
   echo ""
   echo "(no flag)          Open the operator dashboard"
@@ -120,6 +122,9 @@ elif [[ "${1-}" == "--strip" ]]; then
   node "$SCRIPT_DIR/mavp-install.js" --strip "$@"
 elif [[ "${1-}" == "--version" ]]; then
   node -e "const {MAVERICKS_VERSION}=require('$SCRIPT_DIR/mavp-version.js');console.log('mavericks v'+MAVERICKS_VERSION);"
+elif [[ "${1-}" == "--demo" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-demo.js" "$@"
 else
   node "$SCRIPT_DIR/mavp-operator-dashboard.js" "$@"
 fi
