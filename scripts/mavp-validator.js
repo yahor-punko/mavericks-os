@@ -26,7 +26,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { computeDueRechecks } = require('./mavp-operator-lib');
+const { computeDueRechecks, classifyNextAction } = require('./mavp-operator-lib');
 
 // Statuses that require a Repo: field (warning if absent)
 const STATUSES_REQUIRING_REPO = new Set([
@@ -225,6 +225,7 @@ function getSeverityForCheck(checkName) {
     architecture_doc_stale: 'warning',
     merged_missing_needs_fix_rounds: 'info',
     overdue_recheck: 'info',
+    next_action_volatile_facts: 'info',
   };
 
   return severityByCheckName[checkName] || 'warning';
@@ -1104,6 +1105,43 @@ function checkOverdueRechecks(processStatePath) {
   });
 }
 
+/**
+ * Check 9: next_action volatile-facts advisory.
+ * Reads next_action from PROCESS_STATE.json and classifies it with
+ * classifyNextAction() from mavp-operator-lib.js. When the classifier finds
+ * volatile facts (framework versions, unpushed-commit counts) embedded in the
+ * string, emits one info-severity finding naming the matched facts and
+ * advising to keep next_action a clean routing directive (move narrative
+ * detail to HANDOFF.md instead).
+ * Advisory only (info severity, exits 0) — mirrors the overdue_recheck
+ * precedent: PROCESS_STATE.json is informational, so this check must NEVER
+ * cause exit 1 or exit 2.
+ */
+function checkNextActionVolatileFacts(processStatePath) {
+  let nextAction;
+  try {
+    const raw = fs.readFileSync(processStatePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    nextAction = parsed.next_action;
+  } catch (_err) {
+    return [];
+  }
+
+  const { volatile_facts } = classifyNextAction(nextAction);
+  if (volatile_facts.length === 0) return [];
+
+  const factsList = volatile_facts.join(', ');
+  return [
+    createFinding({
+      checkName: 'next_action_volatile_facts',
+      taskId: '(process_state.next_action)',
+      message: `PROCESS_STATE.json next_action embeds volatile fact(s) (${factsList}) that will go stale`,
+      repairTarget: 'PROCESS_STATE.json',
+      suggestedAction: 'Keep next_action a clean routing directive (e.g. "T-NNN -> role -> short goal"); move narrative detail or point-in-time facts (versions, commit counts) to HANDOFF.md instead.',
+    }),
+  ];
+}
+
 function mergeFindings(comparison, extraFindings) {
   if (extraFindings.length === 0) return;
   comparison.findings.push(...extraFindings);
@@ -1178,6 +1216,10 @@ function parseArtifacts({ backlogPath, taskStatusPath }) {
 
   // overdue recheck advisory: info-level nudge for rechecks past their due date
   mergeFindings(comparison, checkOverdueRechecks(processStatePath));
+
+  // next_action volatile-facts advisory: info-level nudge when next_action embeds
+  // point-in-time facts (versions, commit counts) instead of a clean routing directive
+  mergeFindings(comparison, checkNextActionVolatileFacts(processStatePath));
 
   return {
     inputs: {
@@ -1360,8 +1402,10 @@ module.exports = {
   ARCHITECTURE_DOC_STALE_CHECK: 'architecture_doc_stale',
   MERGED_MISSING_NEEDS_FIX_ROUNDS_CHECK: 'merged_missing_needs_fix_rounds',
   OVERDUE_RECHECK_CHECK: 'overdue_recheck',
+  NEXT_ACTION_VOLATILE_FACTS_CHECK: 'next_action_volatile_facts',
   checkMergedNeedsFixRounds,
   checkOverdueRechecks,
+  checkNextActionVolatileFacts,
   createFinding,
   createTaskRecordIndex,
   getAcceptedEvidenceGuidance,

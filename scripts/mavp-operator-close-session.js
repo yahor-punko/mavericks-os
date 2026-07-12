@@ -46,7 +46,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, readPermissionMode, readPersistedPermissionMode } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { generateProcessStateMd, archiveActiveWaveInBacklog, classifyNextAction, readPermissionMode, readPersistedPermissionMode } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
@@ -690,6 +690,24 @@ function resolveMode({ interactive, nonInteractive, isTTY } = {}) {
   return isTTY === true ? 'interactive' : 'non-interactive';
 }
 
+/**
+ * T-350: build the (non-blocking) advisory notice text printed when
+ * --close-session preserves an existing next_action that carries volatile
+ * facts (a copied framework version, unpushed-commit count, etc. with no
+ * invalidation trigger). Pure — no I/O, no console output — so it can be
+ * unit-tested directly without exercising the rest of runNonInteractive.
+ *
+ * @param {boolean} allMerged - whether the wave is complete (no preserve happens here)
+ * @param {string|null} currentNextAction - the existing next_action being preserved
+ * @returns {string|null} the notice text, or null when no notice should print
+ */
+function buildVolatileNextActionNotice(allMerged, currentNextAction) {
+  if (allMerged || !currentNextAction) return null;
+  const { volatile_facts } = classifyNextAction(currentNextAction);
+  if (volatile_facts.length === 0) return null;
+  return `NOTE: preserving freeform next_action with volatile facts (${volatile_facts.join(', ')}) — move narrative to HANDOFF.md; keep next_action a directive`;
+}
+
 async function runNonInteractive(args) {
   const today = new Date().toISOString().slice(0, 10);
 
@@ -768,6 +786,16 @@ async function runNonInteractive(args) {
   const resolvedNextAction = allMerged
     ? (nextAction || null)
     : (currentNextAction || nextAction || null);
+
+  // T-350: when we preserved an existing next_action (rather than the freshly
+  // computed one) and that preserved value carries volatile facts (a copied
+  // framework version, unpushed-commit count, etc. with no invalidation
+  // trigger), print a one-line advisory. Non-blocking — no behavior/exit-code
+  // change; the value is still preserved as before.
+  const volatileNextActionNotice = buildVolatileNextActionNotice(allMerged, currentNextAction);
+  if (volatileNextActionNotice) {
+    console.log(`${YELLOW}${volatileNextActionNotice}${RESET}`);
+  }
 
   // Update legacy PROCESS_STATE.md using resolved value (will be overwritten by
   // generateProcessStateMd below; kept for any edge-case where JSON update fails)
@@ -1157,4 +1185,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, updateProcessStateJson, resolveMode };
+module.exports = { moveTaskToCompleted, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice };

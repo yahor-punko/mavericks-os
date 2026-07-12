@@ -41,17 +41,14 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { buildDeployQueue, computeDueRechecks, generateProcessStateMd, getDeployPendingForRepo, parseTasksWithRepo, readPermissionMode, ROOT: RESOLVED_PROJECT_ROOT } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { buildDeployQueue, classifyNextAction, computeDueRechecks, generateProcessStateMd, getDeployPendingForRepo, parseTasksWithRepo, readPermissionMode } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
 const PROCESS_STATE_MD = path.join(ROOT, 'PROCESS_STATE.md');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
-const VALIDATOR = path.join(
-  process.env.MAVERICKS_SCRIPTS || path.join(os.homedir(), 'Documents', 'mavericks', 'scripts'),
-  'mavp-validator.js'
-);
+const VALIDATOR = path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-validator.js');
 const { resolveModulesPath } = require(VALIDATOR);
 const MAVERICKS_VERSION_FILE = path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-version.js');
 
@@ -603,6 +600,15 @@ function main() {
 
   let next_action = computeNextAction(activeTasks, plannedTasks, next_action_stale ? null : staticNextAction);
 
+  // Additive-only: classify the static next_action's SHAPE (directive vs. freeform
+  // prose) so a copied volatile fact (framework version, unpushed-commit count) with
+  // no invalidation trigger is surfaced even though it can't be caught by the
+  // leading-T-NNN staleness check above (staticTaskIdMatch is null for prose).
+  // Never overrides next_action_stale or computeNextAction — see T-350.
+  const nextActionClassification = classifyNextAction(staticNextAction);
+  const next_action_unverified = Boolean(staticNextAction) && !staticTaskIdMatch;
+  const next_action_volatile_facts = nextActionClassification.volatile_facts;
+
   const { warning: validatorWarning, warningDetail: validatorWarningDetail } = runValidatorCheck();
   const updateNotice = checkFrameworkVersion(json);
   const wave = json?.wave || null;
@@ -671,8 +677,8 @@ function main() {
     });
 
   const stdinPermissionMode = readStdinPermissionModeOverride();
-  if (stdinPermissionMode) persistRuntimePermissionMode(RESOLVED_PROJECT_ROOT, stdinPermissionMode);
-  const permissionMode = stdinPermissionMode || readPermissionMode(RESOLVED_PROJECT_ROOT);
+  if (stdinPermissionMode) persistRuntimePermissionMode(ROOT, stdinPermissionMode);
+  const permissionMode = stdinPermissionMode || readPermissionMode(ROOT);
 
   const output = {
     initiative,
@@ -690,6 +696,8 @@ function main() {
     blocker,
     next_action,
     ...(next_action_stale ? { next_action_stale: true } : {}),
+    ...(next_action_unverified ? { next_action_unverified: true } : {}),
+    ...(next_action_volatile_facts.length > 0 ? { next_action_volatile_facts } : {}),
     last_updated: lastUpdated,
     ...(validatorWarning ? { WARNING: validatorWarning } : {}),
     ...(validatorWarningDetail ? { WARNING_DETAIL: validatorWarningDetail } : {}),

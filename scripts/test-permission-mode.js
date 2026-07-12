@@ -35,6 +35,20 @@ function cleanup() {
 
 process.on('exit', cleanup);
 
+// Minimal validator-clean state so agent.js's (post-T-354) MAVERICKS_PROJECT_ROOT-
+// redirected reads of PROCESS_STATE.json/BACKLOG.md/TASK_STATUS.md succeed
+// instead of throwing ENOENT. No in-flight task by default — used by fixtures
+// that only exercise permission_mode and don't care about active_slices.
+function addMinimalState(root, { initiative = 'fixture-init' } = {}) {
+  fs.writeFileSync(path.join(root, 'BACKLOG.md'), '# BACKLOG\n\n## Active Wave\n\n', 'utf8');
+  fs.writeFileSync(path.join(root, 'TASK_STATUS.md'), '# TASK_STATUS\n\n## Active tasks\n', 'utf8');
+  fs.writeFileSync(
+    path.join(root, 'PROCESS_STATE.json'),
+    JSON.stringify({ initiative, stage: 'execution', wave: 1, active_slices: [] }, null, 2) + '\n',
+    'utf8'
+  );
+}
+
 // --- Unit-level tests: readPermissionMode(root) directly ---
 
 // Test 1: settings.json sets defaultMode "acceptEdits", no local override
@@ -120,6 +134,7 @@ function runAgent(projectRoot, { input, timeout } = {}) {
   const root = makeFixture('agent-shared-only', {
     shared: { permissions: { defaultMode: 'acceptEdits' } },
   });
+  addMinimalState(root);
   const output = runAgent(root);
   assert.strictEqual(output.permission_mode, 'acceptEdits', 'Test 5 FAIL: expected "acceptEdits" in --agent JSON');
   assert.ok('initiative' in output, 'Test 5 FAIL: existing "initiative" field must still be present');
@@ -133,6 +148,7 @@ function runAgent(projectRoot, { input, timeout } = {}) {
     local: { permissions: { defaultMode: 'plan' } },
     shared: { permissions: { defaultMode: 'acceptEdits' } },
   });
+  addMinimalState(root);
   const output = runAgent(root);
   assert.strictEqual(output.permission_mode, 'plan', 'Test 6 FAIL: expected "plan" (local wins) in --agent JSON');
   console.log('Test 6 passed: --agent JSON emits "plan" when local overrides shared "acceptEdits"');
@@ -141,6 +157,7 @@ function runAgent(projectRoot, { input, timeout } = {}) {
 // Test 7: --agent JSON emits "default" when neither file sets a mode
 {
   const root = makeFixture('agent-neither', {});
+  addMinimalState(root);
   const output = runAgent(root);
   assert.strictEqual(output.permission_mode, 'default', 'Test 7 FAIL: expected "default" in --agent JSON');
   console.log('Test 7 passed: --agent JSON emits "default" when neither settings file sets a mode');
@@ -153,6 +170,7 @@ function runAgent(projectRoot, { input, timeout } = {}) {
   const root = makeFixture('agent-stdin-override', {
     shared: { permissions: { defaultMode: 'acceptEdits' } },
   });
+  addMinimalState(root);
   const hookPayload = JSON.stringify({
     hook_event_name: 'SessionStart',
     source: 'startup',
@@ -171,6 +189,7 @@ function runAgent(projectRoot, { input, timeout } = {}) {
   const root = makeFixture('agent-no-stdin-payload', {
     shared: { permissions: { defaultMode: 'acceptEdits' } },
   });
+  addMinimalState(root);
   const start = Date.now();
   let output;
   try {
@@ -267,6 +286,100 @@ function runCloseSessionPush(root) {
     `Test 11b FAIL: expected no gate message when falling back to settings-file "acceptEdits". Output was:\n${outputAccept}`
   );
   console.log('Test 11b passed: no state file — close-session falls back to settings-file "acceptEdits" (not suppressed), unchanged T-320 behavior');
+}
+
+// --- T-354: MAVERICKS_PROJECT_ROOT redirects agent.js's data-root reads, not just permission_mode ---
+
+// Test 12: a fixture project with a distinctive initiative and a single
+// distinctive in-flight task must be reflected verbatim in --agent JSON when
+// MAVERICKS_PROJECT_ROOT points at it, AND the output must contain none of the
+// real mavericks repo's own state. Before T-354, agent.js hardcoded
+// `ROOT = path.resolve(__dirname, '..')`, so this invocation would either
+// throw ENOENT (no PROCESS_STATE.json/BACKLOG.md/TASK_STATUS.md at that path
+// once __dirname is the real repo's scripts/) or, when run from within the
+// real repo, silently report the REAL repo's initiative/active_slices instead
+// of the fixture's — this is the assertion that would have caught the bug.
+{
+  const root = makeFixture('agent-project-root-redirect', {
+    shared: { permissions: { defaultMode: 'acceptEdits' } },
+  });
+  fs.writeFileSync(
+    path.join(root, 'BACKLOG.md'),
+    [
+      '# BACKLOG',
+      '',
+      '## Active Wave',
+      '',
+      '### T-001 — Zebra fixture task',
+      '- **Status:** in_progress',
+      '- **Owner role:** developer',
+      '- **Verification type:** runtime',
+      '- **Repo:** fixture-repo',
+      '',
+      '**Problem:** fixture problem statement.',
+      '',
+      '**Acceptance criteria:** fixture acceptance criteria.',
+      '',
+      '**Evidence expected:** fixture evidence.',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(root, 'TASK_STATUS.md'),
+    [
+      '# TASK_STATUS',
+      '',
+      '## Active tasks',
+      '',
+      '### T-001 — Zebra fixture task',
+      '- **Status:** in_progress',
+      '- **Owner role:** developer',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(root, 'PROCESS_STATE.json'),
+    JSON.stringify(
+      {
+        initiative: 'fixture-init',
+        stage: 'execution',
+        wave: 1,
+        active_slices: ['T-001'],
+        last_updated: '2026-07-12',
+      },
+      null,
+      2
+    ) + '\n',
+    'utf8'
+  );
+
+  const output = runAgent(root);
+  const rawOutput = JSON.stringify(output);
+
+  assert.strictEqual(output.initiative, 'fixture-init', `Test 12 FAIL: expected initiative "fixture-init" from the fixture's PROCESS_STATE.json, got ${JSON.stringify(output.initiative)}`);
+  assert.ok(
+    Array.isArray(output.active_slices) && output.active_slices.some(t => t.id === 'T-001' && t.title === 'Zebra fixture task'),
+    `Test 12 FAIL: expected active_slices to contain T-001 "Zebra fixture task", got ${JSON.stringify(output.active_slices)}`
+  );
+  assert.ok(
+    typeof output.next_action === 'string' && output.next_action.includes('T-001'),
+    `Test 12 FAIL: expected next_action to reference T-001, got ${JSON.stringify(output.next_action)}`
+  );
+
+  // The real mavericks repo's own initiative/task IDs must NOT leak through —
+  // this is the assertion that would have caught the pre-T-354 bug where
+  // agent.js silently read the real repo's state instead of the fixture's.
+  const REAL_ROOT = path.resolve(__dirname, '..');
+  const realProcessState = JSON.parse(fs.readFileSync(path.join(REAL_ROOT, 'PROCESS_STATE.json'), 'utf8'));
+  assert.ok(
+    !rawOutput.includes(realProcessState.initiative),
+    `Test 12 FAIL: --agent output leaked the real mavericks initiative ("${realProcessState.initiative}") — MAVERICKS_PROJECT_ROOT redirect failed`
+  );
+  assert.ok(!/T-3\d\d/.test(rawOutput), `Test 12 FAIL: --agent output leaked a real mavericks task ID (T-3xx range), MAVERICKS_PROJECT_ROOT redirect failed. Output: ${rawOutput}`);
+
+  console.log('Test 12 passed: MAVERICKS_PROJECT_ROOT redirects agent.js data-root reads to the fixture (initiative "fixture-init", active_slices T-001 "Zebra fixture task", next_action references T-001), with no leakage of the real mavericks repo state');
 }
 
 console.log('\nAll permission_mode tests passed.');

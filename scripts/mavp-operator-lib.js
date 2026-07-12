@@ -2022,6 +2022,50 @@ function readPersistedPermissionMode(root) {
   }
 }
 
+/**
+ * Classify a next_action string as a routing directive vs. freeform prose that
+ * may have copied volatile facts (framework version, unpushed-commit counts) with
+ * no invalidation trigger. This is a SHAPE check only — it does not fact-check
+ * prose against any external source (git, mavp-version.js, etc).
+ *
+ * - directive: true when the (trimmed) string begins with a `T-\d+` routing
+ *   directive, or when the value is empty/null. false otherwise (freeform prose).
+ * - volatile_facts: substrings matched by conservative patterns only — semver
+ *   (`v1.2.3`/`1.2.3`) and commit-count phrases (`14 commits`, `14 unpushed commits`,
+ *   `ahead 14`). Deduplicated. Empty array when nothing matches.
+ *
+ * @param {string|null|undefined} str - The next_action value to classify.
+ * @returns {{ directive: boolean, volatile_facts: string[] }}
+ */
+function classifyNextAction(str) {
+  const trimmed = typeof str === 'string' ? str.trim() : '';
+  if (trimmed.length === 0) {
+    return { directive: true, volatile_facts: [] };
+  }
+
+  const directive = /^T-\d+/.test(trimmed);
+
+  const patterns = [
+    /\bv?\d+\.\d+\.\d+\b/g,
+    /\b\d+\s+(?:unpushed\s+)?commits?\b/gi,
+    /\bahead\s+\d+\b/gi,
+  ];
+
+  const seen = new Set();
+  const volatile_facts = [];
+  for (const pattern of patterns) {
+    const matches = trimmed.match(pattern) || [];
+    for (const match of matches) {
+      if (!seen.has(match)) {
+        seen.add(match);
+        volatile_facts.push(match);
+      }
+    }
+  }
+
+  return { directive, volatile_facts };
+}
+
 module.exports = {
   ROOT,
   ackRecheck,
@@ -2029,6 +2073,7 @@ module.exports = {
   archiveActiveWaveInBacklog,
   armRecheck,
   buildDeployQueue,
+  classifyNextAction,
   clip,
   collectOperatorData,
   computeDueRechecks,
