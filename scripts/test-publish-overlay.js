@@ -148,15 +148,38 @@ function writeFile(filePath, content) {
 // ---------------------------------------------------------------------------
 // Test 4: the REAL scripts/publish-manifest.json exits 0 via the CLI
 //         (private repo tracks no .github/, so the preserve entry is safe).
+//
+// This test's invariant (manifest classifies exactly the tracked set) only
+// holds against the private canonical repo's tracked file set. In the public
+// mirror, `exclude` entries are never tracked (they're excluded from
+// publish) and `.github/ISSUE_TEMPLATE/*` is preserve-tracked there, so the
+// real-manifest check always fails there for reasons that are not bugs. Skip
+// this test outside the canonical repo; Tests 1-3 still run everywhere.
 // ---------------------------------------------------------------------------
 {
-  const result = require('node:child_process').spawnSync(process.execPath, [CHECK_SCRIPT], {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-  });
-  assert.strictEqual(result.status, 0, `Test 4 FAIL: check-publish-manifest.js exited ${result.status} on the real manifest:\n${result.stdout}\n${result.stderr}`);
-  assert.ok(result.stdout.includes('preserve: '), 'Test 4 FAIL: expected preserve count in check-publish-manifest.js output');
-  console.log('Test 4 passed: check-publish-manifest.js exits 0 on the real manifest (preserve entry does not shadow any tracked path)');
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'scripts', 'publish-manifest.json'), 'utf8'));
+
+  let isCanonical;
+  try {
+    const trackedOutput = execFileSync('git', ['ls-files'], { cwd: REPO_ROOT, encoding: 'utf8' });
+    const trackedSet = new Set(trackedOutput.split('\n').filter(Boolean));
+    isCanonical = Object.keys(manifest.exclude).every((k) => trackedSet.has(k));
+  } catch {
+    // Not a git repo (e.g. a tarball checkout) — treat as non-canonical.
+    isCanonical = false;
+  }
+
+  if (!isCanonical) {
+    console.log('Test 4 skipped: not the canonical (private) repo — the manifest completeness invariant only holds against the private tracked set');
+  } else {
+    const result = require('node:child_process').spawnSync(process.execPath, [CHECK_SCRIPT], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+    });
+    assert.strictEqual(result.status, 0, `Test 4 FAIL: check-publish-manifest.js exited ${result.status} on the real manifest:\n${result.stdout}\n${result.stderr}`);
+    assert.ok(result.stdout.includes('preserve: '), 'Test 4 FAIL: expected preserve count in check-publish-manifest.js output');
+    console.log('Test 4 passed: check-publish-manifest.js exits 0 on the real manifest (preserve entry does not shadow any tracked path)');
+  }
 }
 
 console.log('\nAll T-356 assertions passed.');
