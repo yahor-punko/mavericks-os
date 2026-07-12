@@ -102,6 +102,34 @@ function readUtf8(p) {
   catch { return null; }
 }
 
+/**
+ * Write an executable file atomically: temp file → chmod → rename.
+ *
+ * Why: when this script is invoked THROUGH the bash wrapper it is about to
+ * regenerate (e.g. `./scripts/mavp-operator --install --update .`), an
+ * in-place truncate-rewrite (fs.writeFileSync directly on the destination)
+ * mutates the very inode the running bash process has open and is reading
+ * from. Bash's read offset into that file is invalidated mid-execution,
+ * producing a spurious "syntax error" and non-zero exit even though the
+ * update itself succeeded. Writing to a temp file and renaming over the
+ * destination is atomic on POSIX filesystems — the running bash process
+ * keeps its original inode/fd untouched; only the directory entry flips.
+ *
+ * The mode is set on the temp file BEFORE the rename so there is no window
+ * where the destination is non-executable, and so the result is umask-proof.
+ */
+function writeExecutableAtomicSync(dst, content) {
+  const tmp = dst + '.tmp-' + process.pid;
+  try {
+    fs.writeFileSync(tmp, content, 'utf8');
+    fs.chmodSync(tmp, 0o755);
+    fs.renameSync(tmp, dst);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (_) { /* best-effort cleanup */ }
+    throw e;
+  }
+}
+
 function buildBashWrapper(mavericksDirHint) {
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -558,8 +586,7 @@ async function main() {
       const wrapperDst = path.join(targetDir, 'scripts', BASH_FILE);
       if (fs.existsSync(path.dirname(wrapperDst))) {
         const existedWrapper = fs.existsSync(wrapperDst);
-        fs.writeFileSync(wrapperDst, buildBashWrapper(FRAMEWORK_DIR), 'utf8');
-        fs.chmodSync(wrapperDst, 0o755);
+        writeExecutableAtomicSync(wrapperDst, buildBashWrapper(FRAMEWORK_DIR));
         const label = existedWrapper ? `${YELLOW}updated${RESET}` : `${GREEN}new${RESET}   `;
         console.log(`  ${label}  scripts/${BASH_FILE} ${DIM}(bash wrapper)${RESET}`);
         updatedCount++;
@@ -873,8 +900,7 @@ async function main() {
   // Write bash wrapper
   if (needsBash) {
     const destPath = path.join(targetScripts, BASH_FILE);
-    fs.writeFileSync(destPath, buildBashWrapper(FRAMEWORK_DIR), 'utf8');
-    fs.chmodSync(destPath, 0o755);
+    writeExecutableAtomicSync(destPath, buildBashWrapper(FRAMEWORK_DIR));
     console.log(`  ${GREEN}✓${RESET} ${BASH_FILE}`);
   }
 

@@ -97,6 +97,7 @@
     "scripts/run-tests.js",
     "scripts/test-active-wave-reinsert.js",
     "scripts/test-close-session-mode.js",
+    "scripts/test-install-atomic-wrapper.js",
     "scripts/test-install-bypass-default.js",
     "scripts/test-install-shared-settings.js",
     "scripts/test-install-wrapper-hook-resync.js",
