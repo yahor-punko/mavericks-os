@@ -16,7 +16,7 @@ specialised roles, and blocks backlog/task drift before commit.
 Built for operators and small teams running agent-driven development
 across multiple repositories.
 
-> **Production case:** 323 tasks · 25 waves · 12.5 weeks — coordinated from a central backlog across 17 of the 20 Git repositories of a live AWS system (15 active Lambda functions). Measured through 13 July 2026.
+> **323 tasks · 25 waves · 12.5 weeks** — tracked from one central backlog across **10 of the 20 Git repositories** of a live AWS system (**15 active Lambda functions**). Measured through 13 July 2026.
 
 [See it in action](#close-it-come-back-tomorrow) · [Why Mavericks is different](#why-mavericks-is-different) · [Quick start](#quick-start)
 
@@ -36,20 +36,22 @@ across multiple repositories.
 
 Synth is a production AWS system of 20 Git repositories and 15 active
 Lambda functions. Mavericks ran the operation from a single control
-repository whose central backlog coordinated work across 17 of those 20
-repositories — the coordination is production-exercised, not merely
+repository whose central backlog declared 10 of those 20 repositories as
+task targets — the coordination is production-exercised, not merely
 designed, and it comes with the honest caveats of an N=1, no-control-group
 observation.
 
 | Metric | Value |
 |---|---|
-| Synth repositories | 20 |
-| Active Lambda functions | 15 |
-| Repositories coordinated from the control backlog | 17 of 20 |
-| Tasks merged or beyond | 323 |
+| Repositories in the Synth system | 20 |
+| Repositories declared as task targets | 10 |
+| Active Lambda functions (live prod) | 15 |
+| Tasks reaching merge or beyond | 323 (242 merged + 81 deployed_prod) |
+| Multi-repo tasks (target > 1 repo) | 19 |
 | Delivery waves | 25 |
-| Control-repo commits, Mavericks era (own history, not a cross-repo total) | 523 |
-| Snapshot date | 2026-07-13 |
+| Session checkpoints | 81 |
+| Control-repo commits, Mavericks era | 523 (vs 364 baseline) |
+| Window | 17 Apr – 13 Jul 2026 (~12.5 weeks) |
 
 This is an observational, N=1 case study — one operator, one control
 backlog, no control group — so the numbers show operational continuity and
@@ -70,7 +72,7 @@ coordination — is what the table below is comparing.
 | Auditable, diffable decision history | ❌ | ❌ | ⚠️ issue/comment history, not structured | ✅ state and decisions live in files, diffable in git |
 | Automated drift detection before commit | ❌ | ❌ | ❌ | ✅ validator blocks out-of-sync backlog/task state (exit 2) |
 | Role-specialised execution & review | ❌ | ❌ | ⚠️ manual assignment | ✅ spec'd sub-agent roles (developer, QA, UX, security, docs, architect…) |
-| Multi-repository backlog coordination | ❌ | ❌ | ❌ single repo | ✅ production-exercised — 17 of 20 repos in the Synth case study |
+| Multi-repository backlog coordination | ❌ | ❌ | ❌ single repo | ✅ production-exercised — 10 of 20 repos in the Synth case study |
 
 **Legend:** ✅ built-in and shipped · ⚠️ possible, but manual or partial · ❌ not addressed
 
@@ -230,37 +232,38 @@ main agent runs the cross-repo pre-flight described in
 `./scripts/mavp-operator --check-sync` compares agent/skill files across
 known projects against the Mavericks source to catch drift between them.
 
-This is production-exercised, not a design sketch: 17 of the Synth case
-study's 20 repositories were coordinated this way from the one control
-backlog (see [Case study: Synth](#case-study-synth)).
+This is production-exercised, not a design sketch: 10 of the Synth case
+study's 20 repositories were declared as task targets from the one control
+backlog, with 19 tasks explicitly targeting more than one repository (see
+[Case study: Synth](#case-study-synth)).
 
 ```
-                    ┌───────────────────────────────────┐
-                    │      control repo (mavericks)      │
-                    │  BACKLOG.md · TASK_STATUS.md ·     │
-                    │  PROCESS_STATE.json (single copy)  │
-                    └──────────────────┬──────────────────┘
-                                       │
-                            main_agent orchestrator
-                                       │
-                    task carries `Repos: repo-a, repo-b, ...`
-                                       │
-            ┌──────────────┬──────────┴──────────┬──────────────┐
-            ▼              ▼                     ▼              ▼
-       sibling repo A  sibling repo B       sibling repo C  sibling repo N
-       (sub-agent      (sub-agent           (sub-agent      (sub-agent
-        commits code)   commits code)        commits code)   commits code)
-            │              │                     │              │
-            └──────────────┴──────────┬──────────┴──────────────┘
-                                       ▼
-                   evidence recorded back to control repo:
-            `commit: <hash> (repo-a)` · `commit: <hash> (repo-b)` · ...
-                                       │
-                                       ▼
-                validator · QA · security review gates
-                                       │
-                                       ▼
-                     AWS deployment (15 active Lambdas)
+                   ┌──────────────────────────────────┐
+                   │     control repo (mavericks)     │
+                   │  BACKLOG.md · TASK_STATUS.md ·   │
+                   │ PROCESS_STATE.json (single copy) │
+                   └──────────────────────────────────┘
+                                     │
+                          main_agent orchestrator
+                                     │
+                 task carries `Repo: repo-a, repo-b, ...`
+                                     │
+       ┌───────────────────┬─────────┴─────────┬───────────────────┐
+       ▼                   ▼                   ▼                   ▼
+sibling repo A      sibling repo B      sibling repo C      sibling repo N
+  (sub-agent          (sub-agent          (sub-agent          (sub-agent
+ commits code)       commits code)       commits code)       commits code)
+       │                   │                   │                   │
+       └───────────────────┴─────────┬─────────┴───────────────────┘
+                                     ▼
+                  evidence recorded back to control repo:
+        `commit: <hash> (repo-a)` · `commit: <hash> (repo-b)` · ...
+                                     │
+                                     ▼
+                  validator · QA · security review gates
+                                     │
+                                     ▼
+                    AWS deployment (15 active Lambdas)
 ```
 
 ## Project artifacts
