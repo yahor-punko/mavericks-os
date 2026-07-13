@@ -4,15 +4,21 @@
 
 # Mavericks OS for Claude Code
 
+[![CI](https://github.com/yahor-punko/mavericks-os/actions/workflows/ci.yml/badge.svg)](https://github.com/yahor-punko/mavericks-os/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node.js 18+](https://img.shields.io/badge/node-18%2B-brightgreen.svg)](https://nodejs.org/)
+
 Reliable, auditable delivery for Claude Code agents.
 
 Mavericks persists project state across sessions, routes work through
 specialised roles, and blocks backlog/task drift before commit.
 
-Built for solo operators and small teams running agent-driven development
+Built for operators and small teams running agent-driven development
 across multiple repositories.
 
-[See it in action](#close-it-come-back-tomorrow) · [Quick start](#quick-start)
+> **Production case:** 323 tasks · 25 waves · 12.5 weeks — coordinated from a central backlog across 17 of the 20 Git repositories of a live AWS system (15 active Lambda functions). Measured through 13 July 2026.
+
+[See it in action](#close-it-come-back-tomorrow) · [Why Mavericks is different](#why-mavericks-is-different) · [Quick start](#quick-start)
 
 ## Close it. Come back tomorrow.
 
@@ -26,7 +32,51 @@ across multiple repositories.
 - **Auditable runs.** You can see — and diff — why the system did what it did, because state and decisions live in files, not model memory.
 - **Drift caught before commit.** A validator blocks out-of-sync BACKLOG/TASK_STATUS before it reaches a commit (exit 2).
 
+## Case study: Synth
+
+Synth is a production AWS system of 20 Git repositories and 15 active
+Lambda functions. Mavericks ran the operation from a single control
+repository whose central backlog coordinated work across 17 of those 20
+repositories — the coordination is production-exercised, not merely
+designed, and it comes with the honest caveats of an N=1, no-control-group
+observation.
+
+| Metric | Value |
+|---|---|
+| Synth repositories | 20 |
+| Active Lambda functions | 15 |
+| Repositories coordinated from the control backlog | 17 of 20 |
+| Tasks merged or beyond | 323 |
+| Delivery waves | 25 |
+| Control-repo commits, Mavericks era (own history, not a cross-repo total) | 523 |
+| Snapshot date | 2026-07-13 |
+
+This is an observational, N=1 case study — one operator, one control
+backlog, no control group — so the numbers show operational continuity and
+auditability across a coordinated system, not causal productivity.
+
+[Read the full methodology, findings, and limitations →](docs/case-studies/synth.md)
+
+## Why Mavericks is different
+
+Most agent workflows fall into one of three categories below. Mavericks
+overlaps with parts of each, but its shipped combination — versioned state,
+a validator gate, specialised roles, and production-exercised multi-repo
+coordination — is what the table below is comparing.
+
+| Capability | Ad-hoc prompting | Chat-memory tools | Single-repo task boards | Mavericks |
+|---|---|---|---|---|
+| Session continuity across restarts | ❌ | ⚠️ recall, not authoritative state | ⚠️ requires manually re-reading the board | ✅ versioned artifacts (`BACKLOG.md`, `TASK_STATUS.md`, `PROCESS_STATE.json`) |
+| Auditable, diffable decision history | ❌ | ❌ | ⚠️ issue/comment history, not structured | ✅ state and decisions live in files, diffable in git |
+| Automated drift detection before commit | ❌ | ❌ | ❌ | ✅ validator blocks out-of-sync backlog/task state (exit 2) |
+| Role-specialised execution & review | ❌ | ❌ | ⚠️ manual assignment | ✅ spec'd sub-agent roles (developer, QA, UX, security, docs, architect…) |
+| Multi-repository backlog coordination | ❌ | ❌ | ❌ single repo | ✅ production-exercised — 17 of 20 repos in the Synth case study |
+
+**Legend:** ✅ built-in and shipped · ⚠️ possible, but manual or partial · ❌ not addressed
+
 ## Quick start
+
+> **Before you run this:** Mavericks defaults to autonomous tool execution (`bypassPermissions`, no per-action confirmation prompts once a session starts). See **[Security model](#security-model)** below for exactly what that means and how to opt out.
 
 There are two different things you might want to do here — try Mavericks, or adopt it into a project you already have. They're separate steps.
 
@@ -103,7 +153,7 @@ This creates, in `your-project/`:
 - `scripts/mavp-operator-close-session.js` — end-of-session ritual
 - `BACKLOG.md`, `TASK_STATUS.md`, `PROCESS_STATE.md`, `PROCESS_STATE.json` — live state artifacts, from templates
 - `.claude/agents/*.md`, `.claude/skills/*/SKILL.md`, `.claude/rules/*.md` — sub-agent specs, skills, and rules, copied from this repo
-- `.claude/settings.json` / `.claude/settings.local.json` — shared and personal Claude Code settings (see **Before you clone** above)
+- `.claude/settings.json` / `.claude/settings.local.json` — shared and personal Claude Code settings (see **[Security model](#security-model)** below)
 
 Core framework scripts (the operator library, dashboard, validator) are **not copied** into your project — the generated `scripts/mavp-operator` wrapper runs them directly from this Mavericks checkout.
 
@@ -140,15 +190,78 @@ Drift between `BACKLOG.md` and `TASK_STATUS.md` is caught before it reaches a co
 
 One glance at workflow state, context usage, runtime actors, and open waits.
 
-## Case study
+## How it works
 
-Mavericks was extracted from running real agent-driven development across many repositories at once, not designed on a whiteboard. What hurt was reconstructing project state every session and losing the "why" behind a decision the moment the chat context rolled over. Adopting artifact-first state, strict role separation between orchestrator and sub-agents, and a validator that blocks drift before it reaches a commit kept multi-repo work on track without holding all of it in one operator's head. Everything in this repo earned its place by solving one of those problems in production.
+### Why Mavericks exists
 
-## Before you clone
+Mavericks emerged from running agent-driven development across multiple
+repositories in parallel, not from a whiteboard exercise.
 
-Mavericks ships with autonomous tool execution enabled by default (`permissions.defaultMode: "bypassPermissions"` in the committed `.claude/settings.json`). This means agents can read, write, and execute across your filesystem and shell without a per-action confirmation prompt once you start a session. This is deliberate — see **[`SECURITY.md`](SECURITY.md)** for exactly what it means and how to opt out before your first session.
+The recurring failure mode was not code generation; it was continuity:
+reconstructing project state at the start of a session and losing the
+rationale behind decisions when chat context rolled over.
 
-Mavericks is not a deliverable product you run in production — it's a reusable framework that other projects **adopt** into their own repository.
+Mavericks addresses that with versioned, artifact-first state; a strict
+separation between the `main_agent` orchestrator and specialised execution
+and review roles; and validation that surfaces backlog/task-state drift
+before commit.
+
+Every mechanism in this repository was retained because it solved a
+recurring problem in active delivery.
+
+### Cross-repo coordination
+
+Mavericks runs a **direct-reference model**: one framework checkout serves
+many projects, and state is never replicated per repository. A single
+control repo holds the one `BACKLOG.md`, `TASK_STATUS.md`, and
+`PROCESS_STATE.json`; every sibling repository's `scripts/mavp-operator`
+wrapper delegates back to that one checkout via `MAVERICKS_PROJECT_ROOT`
+rather than carrying its own copy of these files.
+
+Cross-repo tasks declare a `Repos:` field in the backlog (e.g.
+`- **Repos:** repo-a, repo-b`). When a sub-agent completes work in a
+sibling repository, its evidence is recorded back into the control repo's
+`TASK_STATUS.md` as one line per repo — `commit: <hash> (repo-a)`,
+`commit: <hash> (repo-b)` — so the control backlog stays the single,
+auditable source of truth for *where* work landed even though the diffs
+live in the sibling repositories. Before dispatching a cross-repo task, the
+main agent runs the cross-repo pre-flight described in
+[`docs/core/ORCHESTRATION_RULES.md`](docs/core/ORCHESTRATION_RULES.md);
+`./scripts/mavp-operator --check-sync` compares agent/skill files across
+known projects against the Mavericks source to catch drift between them.
+
+This is production-exercised, not a design sketch: 17 of the Synth case
+study's 20 repositories were coordinated this way from the one control
+backlog (see [Case study: Synth](#case-study-synth)).
+
+```
+                    ┌───────────────────────────────────┐
+                    │      control repo (mavericks)      │
+                    │  BACKLOG.md · TASK_STATUS.md ·     │
+                    │  PROCESS_STATE.json (single copy)  │
+                    └──────────────────┬──────────────────┘
+                                       │
+                            main_agent orchestrator
+                                       │
+                    task carries `Repos: repo-a, repo-b, ...`
+                                       │
+            ┌──────────────┬──────────┴──────────┬──────────────┐
+            ▼              ▼                     ▼              ▼
+       sibling repo A  sibling repo B       sibling repo C  sibling repo N
+       (sub-agent      (sub-agent           (sub-agent      (sub-agent
+        commits code)   commits code)        commits code)   commits code)
+            │              │                     │              │
+            └──────────────┴──────────┬──────────┴──────────────┘
+                                       ▼
+                   evidence recorded back to control repo:
+            `commit: <hash> (repo-a)` · `commit: <hash> (repo-b)` · ...
+                                       │
+                                       ▼
+                validator · QA · security review gates
+                                       │
+                                       ▼
+                     AWS deployment (15 active Lambdas)
+```
 
 ## Project artifacts
 
@@ -201,6 +314,22 @@ Every sub-agent role has a spec in [`.claude/agents/`](.claude/agents/) — pass
 
 Model and effort selection policy (including the exact escalation signals) lives in [`docs/AGENT_SPEC.md`](docs/AGENT_SPEC.md) — "Model selection" — the single source of truth.
 
+## Validator
+
+```bash
+node scripts/mavp-validator.js
+```
+
+Exit codes: `0` healthy · `1` drifting · `2` repair required (blocks commit via the pre-commit hook)
+
+Run after every `BACKLOG.md` or `TASK_STATUS.md` change. The pre-commit hook at `.claude/hooks/pre-commit` runs it automatically on every `git commit` once wired up (see `docs/core/BOOTSTRAP_GUIDE.md` — "Pre-commit hook").
+
+## Security model
+
+Mavericks ships with autonomous tool execution enabled by default (`permissions.defaultMode: "bypassPermissions"` in the committed `.claude/settings.json`). This means agents can read, write, and execute across your filesystem and shell without a per-action confirmation prompt once you start a session. This is deliberate — see **[`SECURITY.md`](SECURITY.md)** for exactly what it means, how to opt out before your first session, and how to report a vulnerability.
+
+Mavericks is not a deliverable product you run in production — it's a reusable framework that other projects **adopt** into their own repository.
+
 ## Core docs
 
 All in [`docs/core/`](docs/core/):
@@ -217,20 +346,6 @@ All in [`docs/core/`](docs/core/):
 | [`OPERATOR_DASHBOARD.md`](docs/core/OPERATOR_DASHBOARD.md) | Operator dashboard panel reference |
 | [`DOC_SYNC.md`](docs/core/DOC_SYNC.md) | Doc-sync advisory (post-merge doc-update reminders) |
 | [`SECRET_LEAK_RESPONSE.md`](docs/core/SECRET_LEAK_RESPONSE.md) | Post-publish secret-leak response runbook |
-
-## Validator
-
-```bash
-node scripts/mavp-validator.js
-```
-
-Exit codes: `0` healthy · `1` drifting · `2` repair required (blocks commit via the pre-commit hook)
-
-Run after every `BACKLOG.md` or `TASK_STATUS.md` change. The pre-commit hook at `.claude/hooks/pre-commit` runs it automatically on every `git commit` once wired up (see `docs/core/BOOTSTRAP_GUIDE.md` — "Pre-commit hook").
-
-## Security
-
-Mavericks ships with `permissions.defaultMode: "bypassPermissions"` by default — see **[`SECURITY.md`](SECURITY.md)** for what that means and how to opt out, and for how to report a vulnerability.
 
 ## Contributing
 
