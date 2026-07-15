@@ -16,3 +16,6 @@ HANDOFF.md
 
 # Persisted runtime permission_mode (machine/session state, not committed)
 .mavp/permission-mode
+
+# Task context prefetch bundles (regenerated at registration/update time, not committed)
+.mavp/context/

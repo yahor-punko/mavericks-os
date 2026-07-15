@@ -24,6 +24,7 @@ const {
   updateLastTaskId,
   parseTasksWithRepo,
   getDeployPendingForRepo,
+  writeContextBundle,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -149,6 +150,14 @@ async function main() {
   const updated = updateLastTaskId(PROCESS_STATE_JSON, id);
   if (updated) {
     console.log(`${GREEN}✓ PROCESS_STATE.json — last_task_id updated to ${id.replace('T-', '')}${RESET}`);
+  }
+
+  // Write context prefetch bundle (.mavp/context/T-NNN.md) — best effort, never fatal
+  const bundleResult = writeContextBundle(id, { root: ROOT, backlogPath: BACKLOG_MD, taskStatusPath: TASK_STATUS_MD });
+  if (bundleResult.ok) {
+    console.log(`${GREEN}✓ Context bundle — .mavp/context/${id}.md${RESET}`);
+  } else {
+    console.log(`${DIM}(context bundle not written: ${bundleResult.reason})${RESET}`);
   }
 
   // Run validator — print full stdout/stderr, do not swallow output

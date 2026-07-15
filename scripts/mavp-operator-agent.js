@@ -41,7 +41,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { buildDeployQueue, classifyNextAction, computeDueRechecks, generateProcessStateMd, getDeployPendingForRepo, parseTasksWithRepo, readPermissionMode } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { buildDeployQueue, classifyNextAction, computeDueRechecks, computeMustRead, generateProcessStateMd, getDeployPendingForRepo, parseBlockedBy, parseTasksWithRepo, readPermissionMode, resolveContextBundlePath } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
@@ -178,8 +178,10 @@ function parsePlannedTasksFromActiveWave(backlogMarkdown) {
 }
 
 /**
- * Parse module, repo, and prod_prerequisites metadata from BACKLOG.md for active task IDs.
- * Returns a map of taskId → { module, repo, prodPrerequisites } from the backlog blocks.
+ * Parse module, repo, prod_prerequisites, and blocked_by metadata from
+ * BACKLOG.md for active task IDs.
+ * Returns a map of taskId → { module, repo, prodPrerequisites, blockedByRaw }
+ * from the backlog blocks.
  */
 function parseBacklogTaskMeta(backlogMarkdown) {
   const blocks = backlogMarkdown.split(/\n(?=###\s+T-)/).filter(Boolean);
@@ -191,6 +193,7 @@ function parseBacklogTaskMeta(backlogMarkdown) {
     const moduleMatch = block.match(/^- \*\*Module:\*\*\s+(.+)$/m);
     const repoMatch = block.match(/^- \*\*Repos?:\*\*\s+(.+)$/m);
     const prodPrereqMatch = block.match(/^- \*\*Prod prerequisites:\*\*\s+(.+)$/m);
+    const blockedByMatch = block.match(/^- \*\*Blocked by:\*\*\s+(.+)$/m);
     const prodPrerequisites = prodPrereqMatch
       ? prodPrereqMatch[1].split(',').map(s => s.trim()).filter(Boolean)
       : [];
@@ -198,6 +201,7 @@ function parseBacklogTaskMeta(backlogMarkdown) {
       module: moduleMatch ? normalizeWhitespace(moduleMatch[1]) : null,
       repo: repoMatch ? normalizeWhitespace(repoMatch[1]) : null,
       prodPrerequisites,
+      blockedByRaw: blockedByMatch ? normalizeWhitespace(blockedByMatch[1]) : null,
     };
   }
   return meta;
@@ -668,13 +672,29 @@ function main() {
       const contextDocs = moduleId && moduleRegistry[moduleId]
         ? moduleRegistry[moduleId].context_docs
         : [];
+      // Additive-only: surface the task's context prefetch bundle (T-394) when
+      // it exists on disk. Absent files are silently omitted — never created here.
+      const contextBundlePath = resolveContextBundlePath(t.id, ROOT);
+      const contextBundleExists = fs.existsSync(contextBundlePath);
+      // Additive-only: surface the parsed cross-repo Blocked by: refs (T-393)
+      // when the task declares them. Absent field is silently omitted.
+      const blockedBy = bm.blockedByRaw ? parseBlockedBy(bm.blockedByRaw) : [];
       return {
         ...t,
         ...(moduleId ? { module: moduleId } : {}),
         ...(contextDocs.length > 0 ? { context_docs: contextDocs } : {}),
         ...(repo ? { repo } : {}),
+        ...(contextBundleExists ? { context_bundle: path.relative(ROOT, contextBundlePath) } : {}),
+        ...(blockedBy.length > 0 ? { blocked_by: blockedBy } : {}),
       };
     });
+
+  // Additive-only: T-391 must-read set — files changed since the previous
+  // --close-session commit (via git) unioned with the context_docs already
+  // resolved onto activeSlices above. Degrades silently (empty array) when
+  // git is unavailable or ROOT isn't a git repo; field is omitted entirely
+  // below when the combined set is empty.
+  const mustRead = computeMustRead(ROOT, activeSlices);
 
   const stdinPermissionMode = readStdinPermissionModeOverride();
   if (stdinPermissionMode) persistRuntimePermissionMode(ROOT, stdinPermissionMode);
@@ -703,6 +723,7 @@ function main() {
     ...(validatorWarningDetail ? { WARNING_DETAIL: validatorWarningDetail } : {}),
     ...(updateNotice ? { UPDATE_AVAILABLE: updateNotice } : {}),
     ...(dueRechecks.length > 0 ? { due_rechecks: dueRechecks } : {}),
+    ...(mustRead.length > 0 ? { must_read: mustRead } : {}),
   };
 
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);

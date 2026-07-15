@@ -18,14 +18,21 @@
  *   node /path/to/mavericks/scripts/mavp-install.js <target-dir> --yes
  *   node /path/to/mavericks/scripts/mavp-install.js --check <target-dir>
  *   node /path/to/mavericks/scripts/mavp-install.js --update <target-dir>
+ *   node /path/to/mavericks/scripts/mavp-install.js --hooks-only <target-dir>
  *   node /path/to/mavericks/scripts/mavp-install.js --strip <target-dir> [--keep-artifacts]
  *
  * Modes:
- *   (default)  — copy project-specific templates if missing, show status
- *   --check    — report what would be done, exit 1 if not bootstrapped
- *   --update   — re-sync entire framework from mavericks: .claude/ + all scripts (overwrites existing)
- *                does NOT touch artifacts (BACKLOG.md, TASK_STATUS.md, PROCESS_STATE.*)
- *   --strip    — remove mavericks files from the project (pre-publish cleanup).
+ *   (default)    — copy project-specific templates if missing, show status
+ *   --check      — report what would be done, exit 1 if not bootstrapped
+ *   --update     — re-sync entire framework from mavericks: .claude/ + all scripts (overwrites existing)
+ *                  does NOT touch artifacts (BACKLOG.md, TASK_STATUS.md, PROCESS_STATE.*)
+ *   --hooks-only — sync ONLY the managed hooks (PostToolUse validator hook, SessionStart,
+ *                  PostCompact) into .claude/settings.local.json, plus the .mavp-hook-ts
+ *                  gitignore entry. Touches no other file — no wrapper, no agents/skills/rules,
+ *                  no project-specific script sync. This is the safe, narrow command to run
+ *                  when only hooks need to be activated/refreshed in a directory — including
+ *                  the canonical self-activation case described below.
+ *   --strip      — remove mavericks files from the project (pre-publish cleanup).
  *                WARNING: destructive. Run before pushing to a public repo or publishing a package.
  *                Prints a deletion manifest labeling each path's git-recoverability BEFORE any
  *                prompt (tracked / tracked-with-uncommitted-changes / NOT TRACKED — IRRECOVERABLE).
@@ -52,6 +59,22 @@
  * After bootstrap, the generated wrapper and hooks resolve the mavericks install location as:
  * explicit MAVERICKS_HOME env var > ~/.mavericks (canonical) > ~/Documents/mavericks (legacy).
  * Set MAVERICKS_HOME if mavericks lives somewhere else entirely.
+ *
+ * Self-install detection — if the resolved target directory (compared via fs.realpathSync on
+ * both sides, so a symlinked home like ~/.mavericks -> ~/Documents/mavericks is still caught) IS
+ * the mavericks framework's own root, --update (and a fresh install's wrapper write) skip:
+ * overwriting scripts/mavp-operator, the project-specific script sync, and the .claude/
+ * {agents,skills,rules} copy — those files ARE the source here, copying them onto themselves
+ * would be a no-op at best and a downgrade at worst. Only the hooks/config-related steps still
+ * run (mergeManagedHooks, settings backfills, the .mavp-hook-ts gitignore entry, the pre-commit
+ * hook copy). `--hooks-only <dir>` is the explicit, minimal command for this case.
+ *
+ * Content-sniff refusal guard — separately, `--update` also refuses to overwrite an EXISTING
+ * wrapper that is already in canonical self-referential form (dispatches via
+ * "$SCRIPT_DIR/mavp-operator-dashboard.js" and does not export MAVERICKS_PROJECT_ROOT), even when
+ * the target is NOT detected as self-install — e.g. running the installer from one mavericks
+ * checkout against a different mavericks checkout's directory. A warning is printed and the
+ * wrapper is left untouched instead of being downgraded to the adopter form.
  */
 
 const fs = require('node:fs');
@@ -130,6 +153,24 @@ function writeExecutableAtomicSync(dst, content) {
   }
 }
 
+/**
+ * Content-sniff identity check for the "refusal guard" (T-406): is `content` a
+ * canonical, self-referential mavericks wrapper — one that dispatches core
+ * commands via `$SCRIPT_DIR/mavp-operator-dashboard.js` directly and does NOT
+ * export MAVERICKS_PROJECT_ROOT? That shape only occurs in mavericks' own
+ * checked-in scripts/mavp-operator (this is exactly the canonical wrapper
+ * mavericks ships for itself — see scripts/mavp-operator in this repo). The
+ * adopter wrapper produced by buildBashWrapper() always exports
+ * MAVERICKS_PROJECT_ROOT, so the two forms are mutually exclusive by
+ * construction. Used to refuse downgrading a canonical wrapper found at a
+ * non-self-install target (e.g. installer run from one mavericks checkout
+ * against a different mavericks checkout's directory).
+ */
+function isCanonicalSelfReferentialWrapperContent(content) {
+  if (typeof content !== 'string') return false;
+  return content.includes('$SCRIPT_DIR/mavp-operator-dashboard.js') && !content.includes('MAVERICKS_PROJECT_ROOT');
+}
+
 function buildBashWrapper(mavericksDirHint) {
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -149,14 +190,14 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "  --agent          Print session context summary for the Main Agent"
   echo "  --watch          Dashboard watch mode (r = refresh, s = snapshot, q = quit)"
   echo "  --snapshot       Print a text snapshot of current project state"
+  echo "  --emit-bundle    Print a task's context prefetch bundle to stdout (read-only)"
+  echo "                   Usage: --emit-bundle T-NNN"
   echo "  --handoff        Write HANDOFF.md context file for cross-session continuity"
   echo "  --close-session  Run end-of-session ritual (summarise, bump wave, commit)"
   echo "  --set-strategy-note  Set wave strategy context note (persists until --close-session)"
   echo "  --new-task       Interactively create and register a new task"
   echo "  --quick-task     Quickly register a task skeleton (title + problem only)"
   echo "  --apply-decomposition [FILE]  Parse architect decomposition block and register tasks"
-  echo "  --ingest-decomposition        Ingest an architect decomposition block"
-  echo "  --absorb-task    Mark a task as superseded/absorbed by another task"
   echo "  --quick-merge    Fast-track an XS change directly to merged (title + commit hash)"
   echo "  --update-task    Interactively update an existing task"
   echo "  --merge-task     Promote a qa_passed task to merged with evidence"
@@ -172,6 +213,8 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "  --check-sync     Compare agent/skill files in known projects against mavericks source"
   echo "  --install        Bootstrap Mavericks into a target project directory"
   echo "  --strip          Remove all Mavericks files from a project (pre-publish)"
+  echo "  --demo           Run a narrated walkthrough of the operator loop against a throwaway fixture"
+  echo "                   Usage: --demo [--phase dashboard|lifecycle|drift|all] [--step] [--keep] [--no-color] [--reveal <ms>]"
   echo "  --version        Print the installed Mavericks framework version"
   echo "  --help           Show this help message and exit"
   echo ""
@@ -180,6 +223,9 @@ if [[ "\${1-}" == "--help" ]]; then
 elif [[ "\${1-}" == "--snapshot" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-snapshot.js" "$@"
+elif [[ "\${1-}" == "--emit-bundle" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-emit-bundle.js" "$@"
 elif [[ "\${1-}" == "--handoff" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-handoff.js" "$@"
@@ -201,12 +247,6 @@ elif [[ "\${1-}" == "--quick-task" ]]; then
 elif [[ "\${1-}" == "--apply-decomposition" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-apply-decomposition.js" "$@"
-elif [[ "\${1-}" == "--ingest-decomposition" ]]; then
-  shift
-  node "$MAVERICKS/mavp-operator-ingest-decomposition.js" "$@"
-elif [[ "\${1-}" == "--absorb-task" ]]; then
-  shift
-  node "$MAVERICKS/mavp-operator-absorb-task.js" "$@"
 elif [[ "\${1-}" == "--quick-merge" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-quick-merge.js" "$@"
@@ -255,6 +295,9 @@ elif [[ "\${1-}" == "--strip" ]]; then
   node "$MAVERICKS/mavp-install.js" --strip "$PROJECT_ROOT" "$@"
 elif [[ "\${1-}" == "--version" ]]; then
   node -e "const {MAVERICKS_VERSION}=require('$MAVERICKS/mavp-version.js');console.log('mavericks v'+MAVERICKS_VERSION);"
+elif [[ "\${1-}" == "--demo" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-demo.js" "$@"
 else
   node "$MAVERICKS/mavp-operator-dashboard.js" "$@"
 fi
@@ -290,6 +333,175 @@ fi
  */
 function buildPostToolUseHookCommand(targetDir) {
   return `INPUT=$(cat); FP=$(node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write((d.tool_input&&d.tool_input.file_path)||'')}catch(e){}" <<< "$INPUT"); case "$FP" in *BACKLOG.md|*TASK_STATUS.md) ;; *) exit 0 ;; esac; MAVERICKS="\${MAVERICKS_HOME:-$( [ -d "$HOME/.mavericks" ] && printf %s "$HOME/.mavericks" || printf %s "$HOME/Documents/mavericks" )}/scripts"; MAVROOT="${targetDir}"; export MAVERICKS_PROJECT_ROOT="$MAVROOT"; TS=$(node -e "process.stdout.write(String(Date.now()))"); echo "$TS" > "$MAVROOT/.mavp-hook-ts"; sleep 1.5; CURRENT_TS=$(cat "$MAVROOT/.mavp-hook-ts" 2>/dev/null); if [ "$CURRENT_TS" != "$TS" ]; then exit 0; fi; rm -f "$MAVROOT/.mavp-hook-ts"; cd "$MAVROOT"; case "$FP" in *BACKLOG.md) node "$MAVERICKS/mavp-operator-sync-status.js" 1>&2 ;; esac; VOUT=$(node "$MAVERICKS/mavp-validator.js" 2>&1); VCODE=$?; [ $VCODE -ne 0 ] && printf '%s\\n' "$VOUT" >&2 || true; exit 0`;
+}
+
+// Legacy pre-T-329 validator filename — still checked as a hook-identity signal
+// so already-bootstrapped projects on the old name get upgraded by --update.
+const OLD_VALIDATOR = 'parliamentary-validator-parser-v1.js';
+const NEW_VALIDATOR = 'mavp-validator.js';
+// Debounce timestamp filename used by the hardened PostToolUse hook (also a
+// hook-identity signal — see isManagedPostToolUseCommand()).
+const HOOK_DEBOUNCE_TOKEN = '.mavp-hook-ts';
+// Leading no-op prefix embedded in every command composePostToolUseHookCommand()
+// produces. `:` is bash's true no-op builtin — it ignores its argument and always
+// exits 0 — so this is inert at runtime, but its literal text lets future --update
+// runs recognise "this is the mavericks-managed hook" even if the composed body
+// changes shape entirely (new fragments, reordered steps, etc.).
+const MANAGED_HOOK_SENTINEL = ': mavp-managed-hook;';
+// Identity substring for the SessionStart/PostCompact lifecycle hooks — present
+// in both commands the installer writes for those two hook events.
+const LIFECYCLE_HOOK_IDENTITY_TOKEN = 'mavp-operator --agent';
+
+/**
+ * Read the `fragment` string out of a shipped hook fragment template
+ * (templates/doc-sync-hook.fragment.json, templates/manifest-guard-hook.fragment.json).
+ * These fragment files are the single source of truth for the add-on command
+ * text — this is the only place that reads them; the strings are never
+ * duplicated inline elsewhere. Returns '' if the template is missing (public
+ * mirror / adopter repo without it) or malformed — callers compose safely
+ * with an empty string in that case (no-op, not a crash).
+ */
+function readHookFragment(fragmentFileName) {
+  const fragmentPath = path.join(FRAMEWORK_DIR, '..', 'templates', fragmentFileName);
+  const raw = readUtf8(fragmentPath);
+  if (!raw) return '';
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed.fragment === 'string' ? parsed.fragment : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Compose the full managed PostToolUse command for a target project: the
+ * hardened validator base (buildPostToolUseHookCommand) with the doc-sync and
+ * manifest-guard fragments (read live from templates/ at install/update time —
+ * see readHookFragment) inserted before the trailing `exit 0`, and the whole
+ * thing prefixed with MANAGED_HOOK_SENTINEL so a future --update can always
+ * recognise and replace this exact managed entry (see isManagedPostToolUseCommand).
+ */
+function composePostToolUseHookCommand(targetDir) {
+  const base = buildPostToolUseHookCommand(targetDir);
+  const TRAILING = '; exit 0';
+  const baseBody = base.endsWith(TRAILING) ? base.slice(0, -TRAILING.length) : base;
+  const docSyncFragment = readHookFragment('doc-sync-hook.fragment.json');
+  const manifestGuardFragment = readHookFragment('manifest-guard-hook.fragment.json');
+  return `${MANAGED_HOOK_SENTINEL} ${baseBody}${docSyncFragment}${manifestGuardFragment}${TRAILING}`;
+}
+
+/**
+ * Identity check: "is this PostToolUse hook entry the mavericks-managed
+ * validator hook?" Matches on ANY of: the current validator filename, the
+ * legacy pre-T-329 filename (upgrade path), the debounce token, or the
+ * explicit sentinel emitted by composePostToolUseHookCommand. A single match
+ * is sufficient — the command only needs to be recognisable as "the mavp
+ * hook", not contain every token.
+ */
+function isManagedPostToolUseCommand(command) {
+  if (typeof command !== 'string') return false;
+  return (
+    command.includes(NEW_VALIDATOR) ||
+    command.includes(OLD_VALIDATOR) ||
+    command.includes(HOOK_DEBOUNCE_TOKEN) ||
+    command.startsWith(MANAGED_HOOK_SENTINEL)
+  );
+}
+
+/**
+ * Idempotent hooks merge for `--update` (T-404). Reads (or seeds) the target
+ * project's .claude/settings.local.json and:
+ *   (a) replaces the command of the managed PostToolUse Edit|Write entry
+ *       (identity: isManagedPostToolUseCommand) with the freshly composed one;
+ *   (b) appends a managed entry when none is found;
+ *   (c) adds SessionStart/PostCompact lifecycle hooks only if absent
+ *       (identity: command contains "mavp-operator --agent");
+ *   (d) never touches any entry that doesn't match an identity check —
+ *       operator-authored hooks (e.g. a custom Bash-matcher entry) survive
+ *       byte-identical, in original order;
+ *   (e) ensures `.mavp-hook-ts` is gitignored;
+ *   (f) prints one console line per change made, and a visible warning
+ *       (never a silent skip) when settings.local.json exists but is
+ *       malformed JSON.
+ * Returns the number of individual hook changes made (0 if none, or skipped
+ * due to malformed JSON).
+ */
+function mergeManagedHooks(targetDir) {
+  const settingsLocalPath = path.join(targetDir, '.claude', 'settings.local.json');
+  let settingsLocal = {};
+  if (fs.existsSync(settingsLocalPath)) {
+    const raw = fs.readFileSync(settingsLocalPath, 'utf8');
+    try {
+      settingsLocal = JSON.parse(raw);
+    } catch (e) {
+      console.log(`  ${RED}${BOLD}WARNING:${RESET} ${RED}.claude/settings.local.json is malformed JSON — hooks merge skipped (${e.message})${RESET}`);
+      return 0;
+    }
+  }
+  if (!settingsLocal || typeof settingsLocal !== 'object' || Array.isArray(settingsLocal)) {
+    console.log(`  ${RED}${BOLD}WARNING:${RESET} ${RED}.claude/settings.local.json is not a JSON object — hooks merge skipped${RESET}`);
+    return 0;
+  }
+
+  let changeCount = 0;
+  if (!settingsLocal.hooks || typeof settingsLocal.hooks !== 'object' || Array.isArray(settingsLocal.hooks)) {
+    settingsLocal.hooks = {};
+  }
+
+  // --- PostToolUse: replace the managed entry's command, or append if absent ---
+  if (!Array.isArray(settingsLocal.hooks.PostToolUse)) settingsLocal.hooks.PostToolUse = [];
+  const newCommand = composePostToolUseHookCommand(targetDir);
+  let foundManaged = false;
+  for (const entry of settingsLocal.hooks.PostToolUse) {
+    if (!entry || !Array.isArray(entry.hooks)) continue;
+    for (const h of entry.hooks) {
+      if (h && isManagedPostToolUseCommand(h.command)) {
+        foundManaged = true;
+        if (h.command !== newCommand) {
+          h.command = newCommand;
+          changeCount++;
+          console.log(`  ${YELLOW}updated${RESET}  .claude/settings.local.json ${DIM}(hooks.PostToolUse managed validator hook command refreshed)${RESET}`);
+        }
+      }
+    }
+  }
+  if (!foundManaged) {
+    settingsLocal.hooks.PostToolUse.push({
+      matcher: 'Edit|Write',
+      hooks: [{ type: 'command', command: newCommand }],
+    });
+    changeCount++;
+    console.log(`  ${GREEN}new${RESET}     .claude/settings.local.json ${DIM}(hooks.PostToolUse managed validator hook appended)${RESET}`);
+  }
+
+  // --- SessionStart / PostCompact: add only if absent ---
+  const ensureLifecycleHook = (hookName, command) => {
+    if (!Array.isArray(settingsLocal.hooks[hookName])) settingsLocal.hooks[hookName] = [];
+    const present = settingsLocal.hooks[hookName].some(
+      entry => entry && Array.isArray(entry.hooks) &&
+        entry.hooks.some(h => h && typeof h.command === 'string' && h.command.includes(LIFECYCLE_HOOK_IDENTITY_TOKEN))
+    );
+    if (!present) {
+      settingsLocal.hooks[hookName].push({ hooks: [{ type: 'command', command }] });
+      changeCount++;
+      console.log(`  ${GREEN}new${RESET}     .claude/settings.local.json ${DIM}(hooks.${hookName} added)${RESET}`);
+    }
+  };
+  ensureLifecycleHook('SessionStart', `cd ${targetDir} && ./scripts/mavp-operator --agent`);
+  ensureLifecycleHook('PostCompact', `cd ${targetDir} && echo '=== STATE RESTORED AFTER COMPACTION ===' && ./scripts/mavp-operator --agent`);
+
+  if (changeCount > 0) {
+    const claudeDirForHooks = path.dirname(settingsLocalPath);
+    if (!fs.existsSync(claudeDirForHooks)) fs.mkdirSync(claudeDirForHooks, { recursive: true });
+    fs.writeFileSync(settingsLocalPath, JSON.stringify(settingsLocal, null, 2) + '\n', 'utf8');
+  }
+
+  const gitignoreResult = ensureHookDebounceGitignoreEntry(targetDir);
+  if (gitignoreResult !== 'exists') {
+    console.log(`  ${GREEN}✓${RESET} .gitignore ${DIM}(.mavp-hook-ts debounce file ${gitignoreResult})${RESET}`);
+  }
+
+  return changeCount;
 }
 
 /**
@@ -469,7 +681,9 @@ async function main() {
   const checkOnly = args.includes('--check');
   const updateOnly = args.includes('--update');
   const stripMode = args.includes('--strip');
+  const hooksOnlyMode = args.includes('--hooks-only');
   const yesFlag = args.includes('--yes') || args.includes('-y');
+  const noHooksFlag = args.includes('--no-hooks');
   const targetArg = args.find(a => !a.startsWith('-'));
   const targetDir = targetArg ? path.resolve(targetArg) : process.cwd();
   const targetScripts = path.join(targetDir, 'scripts');
@@ -484,6 +698,31 @@ async function main() {
   if (!fs.existsSync(targetDir)) {
     console.error(`${RED}Target directory not found: ${targetDir}${RESET}`);
     process.exitCode = 1;
+    return;
+  }
+
+  // Self-install detection (T-406): is targetDir actually the mavericks framework's
+  // own root (FRAMEWORK_DIR's parent)? Compared via fs.realpathSync on BOTH sides so
+  // a symlinked home (e.g. ~/.mavericks -> ~/Documents/mavericks) is still caught.
+  // Degrades to false (never throws) on any realpath failure.
+  let selfInstall = false;
+  try {
+    selfInstall = fs.realpathSync(targetDir) === fs.realpathSync(path.join(FRAMEWORK_DIR, '..'));
+  } catch {
+    selfInstall = false;
+  }
+  if (selfInstall) {
+    console.log(`${CYAN}self-install detected: framework files are the source here; syncing config/hooks only${RESET}\n`);
+  }
+
+  // --hooks-only (T-406): sync ONLY the managed hooks (+ their .mavp-hook-ts gitignore
+  // step) into .claude/settings.local.json. Touches no other file — the safe, narrow
+  // command for activating/refreshing hooks, and the canonical command for the
+  // self-install case above.
+  if (hooksOnlyMode) {
+    console.log(`${BOLD}Hooks-only mode${RESET} — syncing managed hooks only\n`);
+    const hookChanges = mergeManagedHooks(targetDir);
+    console.log(`\n${GREEN}✓ Hooks-only sync complete.${RESET} ${hookChanges} change(s) made to .claude/settings.local.json.\n`);
     return;
   }
 
@@ -518,32 +757,38 @@ async function main() {
     const CLAUDE_DIRS = ['agents', 'skills', 'rules'];
     let updatedCount = 0;
 
-    for (const dir of CLAUDE_DIRS) {
-      const srcDir = path.join(CLAUDE_SOURCE, dir);
-      if (!fs.existsSync(srcDir)) continue;
-      const dstDir = path.join(CLAUDE_TARGET, dir);
+    // Self-install (T-406): .claude/{agents,skills,rules} ARE the source here —
+    // copying them onto themselves is a misleading no-op at best. Skip entirely.
+    if (selfInstall) {
+      console.log(`  ${DIM}skipped${RESET}  .claude/{${CLAUDE_DIRS.join(',')}} ${DIM}(self-install — framework files are the source)${RESET}`);
+    } else {
+      for (const dir of CLAUDE_DIRS) {
+        const srcDir = path.join(CLAUDE_SOURCE, dir);
+        if (!fs.existsSync(srcDir)) continue;
+        const dstDir = path.join(CLAUDE_TARGET, dir);
 
-      function updateDirRecursive(src, dst, relBase) {
-        if (!fs.existsSync(dst)) fs.mkdirSync(dst, { recursive: true });
-        for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-          if (entry.name === '.DS_Store') continue;
-          const srcPath = path.join(src, entry.name);
-          const dstPath = path.join(dst, entry.name);
-          const relPath = relBase ? `${relBase}/${entry.name}` : entry.name;
-          const isDir = entry.isDirectory() || (entry.isSymbolicLink() && fs.statSync(srcPath).isDirectory());
-          if (isDir) {
-            updateDirRecursive(srcPath, dstPath, relPath);
-          } else {
-            const existed = fs.existsSync(dstPath);
-            fs.copyFileSync(srcPath, dstPath);
-            const label = existed ? `${YELLOW}updated${RESET}` : `${GREEN}new${RESET}   `;
-            console.log(`  ${label}  .claude/${dir}/${relPath}`);
-            updatedCount++;
+        function updateDirRecursive(src, dst, relBase) {
+          if (!fs.existsSync(dst)) fs.mkdirSync(dst, { recursive: true });
+          for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+            if (entry.name === '.DS_Store') continue;
+            const srcPath = path.join(src, entry.name);
+            const dstPath = path.join(dst, entry.name);
+            const relPath = relBase ? `${relBase}/${entry.name}` : entry.name;
+            const isDir = entry.isDirectory() || (entry.isSymbolicLink() && fs.statSync(srcPath).isDirectory());
+            if (isDir) {
+              updateDirRecursive(srcPath, dstPath, relPath);
+            } else {
+              const existed = fs.existsSync(dstPath);
+              fs.copyFileSync(srcPath, dstPath);
+              const label = existed ? `${YELLOW}updated${RESET}` : `${GREEN}new${RESET}   `;
+              console.log(`  ${label}  .claude/${dir}/${relPath}`);
+              updatedCount++;
+            }
           }
         }
-      }
 
-      updateDirRecursive(srcDir, dstDir, '');
+        updateDirRecursive(srcDir, dstDir, '');
+      }
     }
 
     // Re-sync .claude/hooks/
@@ -563,17 +808,22 @@ async function main() {
       'mavp-operator-agent.js',
       'mavp-operator-close-session.js',
     ];
-    for (const scriptFile of SYNC_SCRIPTS) {
-      const srcScript = path.join(FRAMEWORK_DIR, scriptFile);
-      const dstScript = path.join(targetDir, 'scripts', scriptFile);
-      if (!fs.existsSync(srcScript)) continue;
-      if (!fs.existsSync(path.dirname(dstScript))) continue;
-      const existed = fs.existsSync(dstScript);
-      fs.copyFileSync(srcScript, dstScript);
-      const label = existed ? `${YELLOW}updated${RESET}` : `${GREEN}new${RESET}   `;
-      const versionSuffix = scriptFile === 'mavp-version.js' ? ` ${DIM}(→ ${MAVERICKS_VERSION})${RESET}` : '';
-      console.log(`  ${label}  scripts/${scriptFile}${versionSuffix}`);
-      updatedCount++;
+    // Self-install (T-406): these ARE the framework source files — skip the copy.
+    if (selfInstall) {
+      console.log(`  ${DIM}skipped${RESET}  scripts/{${SYNC_SCRIPTS.join(',')}} ${DIM}(self-install — framework files are the source)${RESET}`);
+    } else {
+      for (const scriptFile of SYNC_SCRIPTS) {
+        const srcScript = path.join(FRAMEWORK_DIR, scriptFile);
+        const dstScript = path.join(targetDir, 'scripts', scriptFile);
+        if (!fs.existsSync(srcScript)) continue;
+        if (!fs.existsSync(path.dirname(dstScript))) continue;
+        const existed = fs.existsSync(dstScript);
+        fs.copyFileSync(srcScript, dstScript);
+        const label = existed ? `${YELLOW}updated${RESET}` : `${GREEN}new${RESET}   `;
+        const versionSuffix = scriptFile === 'mavp-version.js' ? ` ${DIM}(→ ${MAVERICKS_VERSION})${RESET}` : '';
+        console.log(`  ${label}  scripts/${scriptFile}${versionSuffix}`);
+        updatedCount++;
+      }
     }
 
     // Re-sync the generated bash wrapper (scripts/mavp-operator) from the current
@@ -582,14 +832,31 @@ async function main() {
     // This is what brings restored flags + correct validator routing (mavp-validator.js
     // with "$PROJECT_ROOT") to already-bootstrapped projects, which fresh-install-only
     // wiring never reached.
-    {
+    //
+    // Self-install (T-406): scripts/mavp-operator IS the canonical wrapper here — skip
+    // the rewrite entirely (it would downgrade the canonical form to the adopter form).
+    //
+    // Content-sniff refusal guard (T-406, non-self targets): if an EXISTING wrapper is
+    // already in canonical self-referential form (dispatches via
+    // "$SCRIPT_DIR/mavp-operator-dashboard.js", no MAVERICKS_PROJECT_ROOT export), refuse
+    // to overwrite it — this catches the installer being run from one mavericks checkout
+    // against a *different* mavericks checkout's directory (not self-install by realpath,
+    // but still a canonical wrapper that must not be downgraded).
+    if (selfInstall) {
+      console.log(`  ${DIM}skipped${RESET}  scripts/${BASH_FILE} ${DIM}(self-install — this IS the canonical wrapper)${RESET}`);
+    } else {
       const wrapperDst = path.join(targetDir, 'scripts', BASH_FILE);
       if (fs.existsSync(path.dirname(wrapperDst))) {
         const existedWrapper = fs.existsSync(wrapperDst);
-        writeExecutableAtomicSync(wrapperDst, buildBashWrapper(FRAMEWORK_DIR));
-        const label = existedWrapper ? `${YELLOW}updated${RESET}` : `${GREEN}new${RESET}   `;
-        console.log(`  ${label}  scripts/${BASH_FILE} ${DIM}(bash wrapper)${RESET}`);
-        updatedCount++;
+        const existingWrapperContent = existedWrapper ? readUtf8(wrapperDst) : null;
+        if (existedWrapper && isCanonicalSelfReferentialWrapperContent(existingWrapperContent)) {
+          console.log(`  ${RED}${BOLD}WARNING:${RESET} ${RED}scripts/${BASH_FILE} is in canonical self-referential form (dispatches via $SCRIPT_DIR, no MAVERICKS_PROJECT_ROOT export) — refusing to downgrade it to the adopter form. If this directory is really meant to be an adopter project, remove the existing wrapper first.${RESET}`);
+        } else {
+          writeExecutableAtomicSync(wrapperDst, buildBashWrapper(FRAMEWORK_DIR));
+          const label = existedWrapper ? `${YELLOW}updated${RESET}` : `${GREEN}new${RESET}   `;
+          console.log(`  ${label}  scripts/${BASH_FILE} ${DIM}(bash wrapper)${RESET}`);
+          updatedCount++;
+        }
       }
     }
 
@@ -648,43 +915,18 @@ async function main() {
       // malformed or missing settings.local.json — skip silently
     }
 
-    // Refresh the mavp PostToolUse validator hook command in settings.local.json.
-    // The hook is written only at fresh-install time (buildPostToolUseHookCommand),
-    // so already-bootstrapped projects still reference the pre-T-329 validator name
-    // (parliamentary-validator-parser-v1.js) in their PostToolUse hook command.
-    //
-    // Surgical rewrite: parse the JSON, walk ONLY hooks.PostToolUse[].hooks[].command
-    // strings, and replace the stale validator filename token with mavp-validator.js.
-    // Every other key (permissions, effortLevel, fallbackModel, alwaysThinkingEnabled,
-    // any non-mavp hooks) is preserved untouched. The inert stale permission allow-list
-    // entries (permissions.allow) are deliberately NOT rewritten — they are out of scope
-    // (T-336) and scoping the replacement to PostToolUse commands leaves them intact.
-    try {
-      if (fs.existsSync(settingsLocalPath)) {
-        const settingsLocal = JSON.parse(fs.readFileSync(settingsLocalPath, 'utf8'));
-        const OLD_VALIDATOR = 'parliamentary-validator-parser-v1.js';
-        const NEW_VALIDATOR = 'mavp-validator.js';
-        let hookChanged = false;
-        const postToolUse = settingsLocal.hooks && settingsLocal.hooks.PostToolUse;
-        if (Array.isArray(postToolUse)) {
-          for (const entry of postToolUse) {
-            if (!entry || !Array.isArray(entry.hooks)) continue;
-            for (const h of entry.hooks) {
-              if (h && typeof h.command === 'string' && h.command.includes(OLD_VALIDATOR)) {
-                h.command = h.command.split(OLD_VALIDATOR).join(NEW_VALIDATOR);
-                hookChanged = true;
-              }
-            }
-          }
-        }
-        if (hookChanged) {
-          fs.writeFileSync(settingsLocalPath, JSON.stringify(settingsLocal, null, 2) + '\n', 'utf8');
-          console.log(`  ${YELLOW}updated${RESET}  .claude/settings.local.json ${DIM}(PostToolUse validator hook → mavp-validator.js)${RESET}`);
-          updatedCount++;
-        }
-      }
-    } catch {
-      // malformed or missing settings.local.json — skip silently
+    // Merge managed hooks into settings.local.json (T-404) — idempotent: replaces
+    // the managed PostToolUse validator hook command (composed fresh from
+    // buildPostToolUseHookCommand + the doc-sync/manifest-guard fragments, so this
+    // single step also upgrades pre-T-329 validator-name references and picks up
+    // fragment additions), appends it if absent, adds SessionStart/PostCompact only
+    // if absent, and never touches any other hook entry (operator-authored hooks
+    // survive byte-identical). Skipped entirely with --no-hooks.
+    if (noHooksFlag) {
+      console.log(`  ${DIM}--no-hooks — skipping hooks merge into .claude/settings.local.json${RESET}`);
+    } else {
+      const hookChanges = mergeManagedHooks(targetDir);
+      updatedCount += hookChanges;
     }
 
     // Backfill/migrate permissions.defaultMode into shared .claude/settings.json.
@@ -897,8 +1139,12 @@ async function main() {
     fs.mkdirSync(targetScripts, { recursive: true });
   }
 
-  // Write bash wrapper
-  if (needsBash) {
+  // Write bash wrapper (skipped on self-install — T-406: the canonical wrapper here
+  // IS the framework source, not a copy target; needsBash should normally be false
+  // for the framework's own checkout anyway, but guard defensively).
+  if (needsBash && selfInstall) {
+    console.log(`  ${DIM}skipped${RESET}  ${BASH_FILE} ${DIM}(self-install — this IS the canonical wrapper)${RESET}`);
+  } else if (needsBash) {
     const destPath = path.join(targetScripts, BASH_FILE);
     writeExecutableAtomicSync(destPath, buildBashWrapper(FRAMEWORK_DIR));
     console.log(`  ${GREEN}✓${RESET} ${BASH_FILE}`);
@@ -929,6 +1175,8 @@ async function main() {
     { template: 'PROCESS_STATE_TEMPLATE.md', target: 'PROCESS_STATE.md' },
     // MODULES.md goes in docs/ — project declares its own module types
     { template: 'MODULES.md', target: path.join('docs', 'MODULES.md') },
+    // REPO_MAP.md goes in docs/ — project declares its own repo entries
+    { template: 'REPO_MAP_TEMPLATE.md', target: path.join('docs', 'REPO_MAP.md') },
     // ARCHITECTURE.md goes in docs/ — project fills in its own architecture details
     { template: 'ARCHITECTURE.md', target: path.join('docs', 'ARCHITECTURE.md') },
   ];
@@ -1045,7 +1293,7 @@ async function main() {
           matcher: 'Edit|Write',
           hooks: [{
             type: 'command',
-            command: buildPostToolUseHookCommand(targetDir),
+            command: composePostToolUseHookCommand(targetDir),
           }],
         }],
       },

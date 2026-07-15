@@ -153,6 +153,41 @@ node "$HOME/.mavericks/scripts/mavp-install.js" --update /path/to/your-project
 
 This re-copies `.claude/hooks/pre-commit` from the mavericks source along with agents, skills, and rules.
 
+## Claude Code hooks activation
+
+Separate from the git pre-commit hook above, mavericks manages three Claude Code hooks in `.claude/settings.local.json`: `SessionStart`, `PostCompact`, and `PostToolUse` (the hardened validator hook, composed with the doc-sync and manifest-guard fragments).
+
+**Default-on activation.** Both a fresh install and `--update` activate all three hooks automatically — no manual JSON editing or template copying required:
+- **Fresh install** seeds `.claude/settings.local.json` from scratch with all three hooks already wired in (see "What gets installed" above).
+- **`--update`** merges hooks into an existing `.claude/settings.local.json` idempotently (`mergeManagedHooks()` in `scripts/mavp-install.js`): it replaces the command of the installer-managed `PostToolUse` entry with the freshly composed one — picking up new fragments (e.g. doc-sync, manifest-guard) and any validator-filename migrations — appends that entry if none is found, and adds `SessionStart`/`PostCompact` only if they are absent.
+
+**Managed-entry identity and ownership.** The installer recognizes "its" `PostToolUse` entry by matching the command against known identity signals (current/legacy validator filename, the debounce token, or an explicit sentinel prefix every composed command carries). Any hook entry that does **not** match — for example, a custom Bash-matcher entry an operator wrote by hand — is left byte-identical, in its original position, on every `--update`. **Rule of thumb: never hand-edit the installer-managed `PostToolUse` entry** — its `command` is overwritten on the next `--update`. If you need additional behavior, add it as a **separate** `PostToolUse` hook entry; the installer only ever touches the one entry it recognizes as its own.
+
+**Opt-out: `--no-hooks`.** Pass `--no-hooks` to `--update` to skip the hooks merge for that run — everything else `--update` does still runs:
+
+```bash
+node "$HOME/.mavericks/scripts/mavp-install.js" --update /path/to/your-project --no-hooks
+```
+
+**Narrow activation: `--hooks-only`.** Pass `--hooks-only <target-dir>` to sync ONLY the managed hooks (`PostToolUse` validator hook, `SessionStart`, `PostCompact`) into `.claude/settings.local.json`, plus the `.mavp-hook-ts` gitignore entry — no wrapper, no `.claude/{agents,skills,rules}` copy, no project-specific script sync:
+
+```bash
+node "$HOME/.mavericks/scripts/mavp-install.js" --hooks-only /path/to/your-project
+```
+
+Use this when a project already has its wrapper/agents/rules in place and only the hooks need activating or refreshing — this is the recommended command for the canonical self-activation case below.
+
+**Canonical self-activation step.** `.claude/settings.local.json` is personal and gitignored, so it is never populated by cloning mavericks itself. To activate hooks locally on a mavericks checkout, run the installer's `--hooks-only` mode against the framework root:
+
+```bash
+cd "$HOME/.mavericks"   # or wherever your mavericks checkout lives
+node scripts/mavp-install.js --hooks-only .
+```
+
+This is the recommended, narrowest command: it touches only `.claude/settings.local.json` (gitignored) and the `.mavp-hook-ts` gitignore entry, producing **no repo diff**, and turns on the hardened validator hook plus the doc-sync and manifest-guard fragments locally. Run it once after cloning, and again any time you want to pick up new fragment additions.
+
+Running the broader `node scripts/mavp-install.js --update .` against the framework root is **also safe** (self-install detection makes `--update` skip the wrapper/`.claude/{agents,skills,rules}` sync when the target IS the mavericks framework's own root — see the installer's header comment and DR-003 in `docs/core/DECISIONS.md`), but it does more work than needed for hook activation alone; `--hooks-only` is the recommended command.
+
 ## Deploy CI: skipping framework-only commits
 
 When the framework is synced into an adopting project, the commit touches only framework-owned artifacts — no deployable application code. If your CI pipeline deploys on branch push, these framework-sync commits will trigger the full pipeline (e.g. terraform plan/apply) unnecessarily.

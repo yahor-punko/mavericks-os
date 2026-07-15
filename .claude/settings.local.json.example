@@ -51,7 +51,7 @@
       { "hooks": [ { "type": "command", "command": "cd \"$(git rev-parse --show-toplevel)\" && echo '=== STATE RESTORED AFTER COMPACTION ===' && ./scripts/mavp-operator --agent" } ] }
     ],
     "PostToolUse": [
-      { "matcher": "Edit|Write", "hooks": [ { "type": "command", "command": "<PostToolUse validator hook — see CLAUDE.md; use repo-relative paths via $(git rev-parse --show-toplevel), no absolute /Users paths>" } ] }
+      { "matcher": "Edit|Write", "hooks": [ { "type": "command", "command": "<composed automatically by scripts/mavp-install.js on fresh install and --update (see CLAUDE.md and docs/core/BOOTSTRAP_GUIDE.md — 'Claude Code hooks activation'); the real command is the hardened validator hook prefixed with the sentinel ': mavp-managed-hook;' plus the doc-sync and manifest-guard fragments — do not hand-author this string, and do not hand-edit it once installed, since --update overwrites it; use repo-relative paths via $(git rev-parse --show-toplevel), no absolute /Users paths>" } ] }
     ],
     "UserPromptSubmit": [
       { "hooks": [ { "type": "command", "command": "<UserPromptSubmit hook command — repo-relative paths only>" } ] }

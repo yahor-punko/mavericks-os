@@ -23,6 +23,16 @@
 // entries, no preserve entry shadows a tracked path).
 // Exit code 1 = one or more problems found (see stdout for details).
 //
+// `--if-canonical` flag (T-401): gates the whole check on being run inside
+// the canonical (private) repo, using the same "every `exclude` key is
+// git-tracked" heuristic as scripts/test-publish-overlay.js's Test 4. In the
+// canonical repo, behaves exactly as the default (unflagged) invocation. In
+// a non-canonical repo (public mirror / adopter fork — an exclude key is not
+// tracked) OR a repo with no manifest at all, prints a short skip message
+// and exits 0. This lets `--if-canonical` be wired unconditionally into a
+// shared pre-commit hook without breaking non-canonical checkouts. Default
+// (no flag) behavior is completely unchanged.
+//
 // No external dependencies — uses only Node's `child_process` + `fs`/`path`.
 
 'use strict';
@@ -147,16 +157,37 @@ function validateManifest(manifest, trackedList) {
   };
 }
 
+// Canonical iff every `exclude` key is git-tracked (same heuristic used by
+// scripts/test-publish-overlay.js Test 4 and scripts/mavp-manifest-guard.js
+// — do not invent a new one).
+function isCanonicalRepo(manifest, trackedList) {
+  const exclude = manifest.exclude && typeof manifest.exclude === 'object' ? manifest.exclude : {};
+  const trackedSet = new Set(trackedList);
+  return Object.keys(exclude).every((k) => trackedSet.has(k));
+}
+
 function main() {
+  const ifCanonical = process.argv.slice(2).includes('--if-canonical');
+
   let manifest;
   try {
     manifest = loadManifest();
   } catch (err) {
+    if (ifCanonical) {
+      console.log(`SKIP: no manifest found at ${MANIFEST_PATH} — --if-canonical treats a repo with no manifest as non-canonical.`);
+      process.exit(0);
+    }
     console.error(`ERROR: could not read/parse manifest at ${MANIFEST_PATH}: ${err.message}`);
     process.exit(1);
   }
 
   const tracked = getTrackedFiles();
+
+  if (ifCanonical && !isCanonicalRepo(manifest, tracked)) {
+    console.log('SKIP: non-canonical repo (an exclude key is not git-tracked) — --if-canonical only enforces in the canonical private repo.');
+    process.exit(0);
+  }
+
   const result = validateManifest(manifest, tracked);
 
   for (const problem of result.problems) {
@@ -178,7 +209,7 @@ function main() {
   process.exit(0);
 }
 
-module.exports = { validateManifest, findPreserveShadowsTracked };
+module.exports = { validateManifest, findPreserveShadowsTracked, isCanonicalRepo };
 
 if (require.main === module) {
   main();

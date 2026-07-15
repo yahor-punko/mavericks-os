@@ -14,7 +14,6 @@
 - **Owner:** developer
 - **Depends on:** —
 - **Root cause:** [optional — T-NNN of the task that closes the underlying structural cause]
-- **Repo:** [optional — repo name(s) this task touches, e.g. example-service]
 - **Touches:** [optional — comma-separated file paths this task modifies, e.g. scripts/mavp-operator-lib.js, CLAUDE.md]
 - **Stale risk:** false
 - **Update architecture:** false

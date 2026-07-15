@@ -35,6 +35,9 @@ One sentence describing the outcome. No implementation details — those belong 
 ### work_dir
 Absolute path to the target repository. **Omit for same-repo (mavericks) tasks.** Only include when the task modifies a different repository. Developer agents use CWD (worktree root) by default.
 
+### Context prefetch bundle — inject content, never reference the path
+The context prefetch bundle (see CLAUDE.md — "Context prefetch bundle") is a **Main-Agent-only** brief-composition input. Retrieve it with `./scripts/mavp-operator --emit-bundle T-NNN` and paste the relevant CONTENT directly into the brief text. `.mavp/context/` is gitignored and does not exist inside a worktree checkout, so a brief must never instruct a worktree sub-agent to read a `.mavp/context/T-NNN.md` path — that read will silently fail.
+
 ### Module
 Optional. Module ID from `docs/MODULES.md`. When provided, the sub-agent should load the module's `context_docs` before starting. The `--agent` JSON includes this field for each in-flight task.
 

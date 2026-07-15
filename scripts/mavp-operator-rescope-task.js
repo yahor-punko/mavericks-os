@@ -45,7 +45,7 @@ const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
 const VALIDATOR = path.join(__dirname, 'mavp-validator.js');
 
-const { insertIntoActiveWave, insertIntoActiveTasks } = require('./mavp-operator-lib.js');
+const { insertIntoActiveWave, insertIntoActiveTasks, writeContextBundle } = require('./mavp-operator-lib.js');
 
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -361,6 +361,14 @@ function main() {
   writeUtf8(BACKLOG_MD, backlog);
   if (taskStatusChanged) {
     writeUtf8(TASK_STATUS_MD, taskStatus);
+  }
+
+  // Regenerate context prefetch bundle (.mavp/context/T-NNN.md) — best effort, never fatal
+  const bundleResult = writeContextBundle(taskId, { root: ROOT, backlogPath: BACKLOG_MD, taskStatusPath: TASK_STATUS_MD });
+  if (bundleResult.ok) {
+    console.log(`${GREEN}Context bundle regenerated: .mavp/context/${taskId}.md${RESET}`);
+  } else {
+    console.log(`${DIM}(context bundle not regenerated: ${bundleResult.reason})${RESET}`);
   }
 
   // --- Report ---

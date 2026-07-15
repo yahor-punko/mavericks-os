@@ -31,6 +31,8 @@ Read the JSON above. Key fields:
 - `wave` — current wave number
 - `wave_session` — session counter within the wave (may be absent or null)
 - `permission_mode` — the configured Claude Code permission mode
+- `UPDATE_AVAILABLE` — framework-version notice, a self-describing sentence (may be absent when versions match)
+- `must_read` — files changed since the previous close-session commit, plus context_docs declared by in-flight tasks (may be absent when empty)
 
 Always render the wave digest header:
 
@@ -45,6 +47,15 @@ Immediately after the wave digest header, render the permission mode:
 ```
 Permission mode: {permission_mode}
 ```
+
+If `UPDATE_AVAILABLE` is present, surface a callout immediately after the permission mode line and before the task list:
+
+```
+> [!NOTE] Framework version
+> {UPDATE_AVAILABLE}
+```
+
+Render the value verbatim — it is a self-describing sentence covering both the update-available and version-divergence cases, so no case-specific logic is needed. Render nothing when the field is absent.
 
 If `wave_summary` is present, show it as one line of context:
 
@@ -67,6 +78,16 @@ If `due_rechecks` is present and non-empty, surface a callout immediately after 
 ```
 
 Where `{overdue_marker}` is ` ⚠ OVERDUE` when the entry's `overdue` field is `true`, and empty otherwise. List overdue entries before due-today entries (the array is already in this order). This callout must be visible before the task list so the operator sees it at session start.
+
+If `must_read` is present and non-empty, render it as a list immediately after the rechecks callout (or after the wave digest/strategy note if no rechecks are due):
+
+```
+Must read:
+- {path}
+- ...
+```
+
+This is the set of files changed since the previous close-session commit plus context_docs declared by any in-flight task — read them before making changes this session. Omit this block entirely when `must_read` is absent.
 
 **If `active_slices` is non-empty OR `planned_tasks` is non-empty:**
 

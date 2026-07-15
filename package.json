@@ -1,6 +1,6 @@
 {
   "name": "mavericks",
-  "version": "0.30.6",
+  "version": "0.32.2",
   "private": true,
   "scripts": {
     "test": "node scripts/run-tests.js",

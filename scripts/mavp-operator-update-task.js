@@ -16,6 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
 const { execSync } = require('node:child_process');
+const { writeContextBundle } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -169,6 +170,14 @@ async function main() {
 
   writeUtf8(BACKLOG_MD, backlog);
   writeUtf8(TASK_STATUS_MD, status);
+
+  // Regenerate context prefetch bundle (.mavp/context/T-NNN.md) — best effort, never fatal
+  const bundleResult = writeContextBundle(taskId, { root: ROOT, backlogPath: BACKLOG_MD, taskStatusPath: TASK_STATUS_MD });
+  if (bundleResult.ok) {
+    console.log(`${GREEN}✓ Context bundle regenerated — .mavp/context/${taskId}.md${RESET}`);
+  } else {
+    console.log(`${DIM}(context bundle not regenerated: ${bundleResult.reason})${RESET}`);
+  }
 
   // Update last_updated in PROCESS_STATE.json
   try {

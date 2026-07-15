@@ -2107,21 +2107,503 @@ function classifyNextAction(str) {
   return { directive, volatile_facts };
 }
 
+/**
+ * Resolve the path to docs/REPO_MAP.md for the current context.
+ * Mirrors resolveModulesPath() in mavp-validator.js — respects
+ * MAVERICKS_PROJECT_ROOT (via the ROOT constant above) when running against a
+ * bootstrapped project, falling back to the mavericks repo root in self-mode.
+ *
+ * @param {string} [root] - Optional root override (used by tests). Defaults to ROOT.
+ * @returns {string|null} Absolute path to docs/REPO_MAP.md, or null if absent.
+ */
+function resolveRepoMapPath(root) {
+  const base = root || ROOT;
+  const p = path.join(base, 'docs', 'REPO_MAP.md');
+  return fs.existsSync(p) ? p : null;
+}
+
+/**
+ * Parse the repo-map registry from docs/REPO_MAP.md.
+ * Same project-owns-instance pattern as parseModuleRegistry() (mavp-operator-agent.js)
+ * for docs/MODULES.md — the framework only defines the schema (see docs/REPO_MAP.md);
+ * each project maintains its own registry instance.
+ *
+ * Returns an empty object when the file is absent — never throws.
+ *
+ * @param {string} [root] - Optional root override (used by tests). Defaults to ROOT.
+ * @returns {Object<string, {label: string, path: string|null, domain: string|null,
+ *   deploy_path: string|null, downstream: string[], docs: string[]}>}
+ */
+function parseRepoMap(root) {
+  try {
+    const repoMapPath = resolveRepoMapPath(root);
+    if (!repoMapPath) return {};
+    const content = fs.readFileSync(repoMapPath, 'utf8');
+    const registry = {};
+    // Split on ## <id> headings (skip meta headings used in the schema spec)
+    const sections = content.split(/^(?=##\s+\S)/m).filter(Boolean);
+    const META_HEADINGS = new Set(['What', 'Required', 'Example', 'How']);
+    for (const section of sections) {
+      const headingMatch = section.match(/^##\s+(\S+)/);
+      if (!headingMatch) continue;
+      const id = headingMatch[1].trim();
+      if (META_HEADINGS.has(id)) continue;
+
+      const labelMatch = section.match(/^- \*\*label:\*\*\s+(.+)$/m);
+      const pathMatch = section.match(/^- \*\*path:\*\*\s+(.+)$/m);
+      const domainMatch = section.match(/^- \*\*domain:\*\*\s+(.+)$/m);
+      const deployPathMatch = section.match(/^- \*\*deploy_path:\*\*\s+(.+)$/m);
+      const downstreamMatch = section.match(/^- \*\*downstream:\*\*\s+(.+)$/m);
+      const docsMatch = section.match(/^- \*\*docs:\*\*\s+(.+)$/m);
+
+      const downstream = downstreamMatch
+        ? downstreamMatch[1].split(',').map((s) => s.trim()).filter(Boolean)
+        : [];
+      const docs = docsMatch
+        ? docsMatch[1].split(',').map((s) => s.trim()).filter(Boolean)
+        : [];
+
+      registry[id] = {
+        label: labelMatch ? labelMatch[1].trim() : id,
+        path: pathMatch ? pathMatch[1].trim() : null,
+        domain: domainMatch ? domainMatch[1].trim() : null,
+        deploy_path: deployPathMatch ? deployPathMatch[1].trim() : null,
+        downstream,
+        docs,
+      };
+    }
+    return registry;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Parse a `- **Blocked by:** <repo>/T-NNN[, <repo>/T-MMM ...]` field value into
+ * structured {repo, taskId} pairs (T-393 — cross-repo Blocked by relation).
+ *
+ * Distinct from `Depends on:` parsing (same-repo `T-NNN` tokens, parsed inline
+ * in `computeNextAction()` in mavp-operator-agent.js) — that behavior is a
+ * separate field and is untouched by this function. `Blocked by:` always
+ * requires a `<repo>/` prefix; a bare `T-NNN` token here is silently dropped,
+ * matching the existing `Depends on:` precedent of dropping unparsable tokens.
+ *
+ * @param {string|null} raw - Raw field value, e.g. "repo-a/T-100, repo-b/T-200"
+ * @returns {Array<{repo: string, taskId: string}>}
+ */
+function parseBlockedBy(raw) {
+  if (!raw) return [];
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === '—' || trimmed === '-') return [];
+  return trimmed
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((token) => {
+      const m = token.match(/^([^\/\s]+)\/(T-\d+)$/);
+      return m ? { repo: m[1], taskId: m[2] } : null;
+    })
+    .filter(Boolean);
+}
+
+/**
+ * Resolve the path to docs/MODULES.md for the current context.
+ * Mirrors resolveRepoMapPath() — used only by buildContextBundle() below.
+ * The canonical module-registry resolution consumed by --agent output lives
+ * in mavp-operator-agent.js / mavp-validator.js's resolveModulesPath(); this
+ * is a root-parameterized sibling so the context-bundle builder (T-394) can
+ * work against an arbitrary root (used by tests and cross-project runs).
+ *
+ * @param {string} [root] - Optional root override (used by tests). Defaults to ROOT.
+ * @returns {string|null} Absolute path to docs/MODULES.md, or null if absent.
+ */
+function resolveModuleRegistryPath(root) {
+  const base = root || ROOT;
+  const p = path.join(base, 'docs', 'MODULES.md');
+  return fs.existsSync(p) ? p : null;
+}
+
+/**
+ * Parse the module registry from docs/MODULES.md, parameterized by root.
+ * Mirrors parseModuleRegistry() in mavp-operator-agent.js (same field set:
+ * label, repos, context_docs, default_owner, qa_checklist). Returns {}
+ * (never throws) when the file is absent — module enrichment degrades
+ * gracefully.
+ *
+ * @param {string} [root] - Optional root override (used by tests). Defaults to ROOT.
+ * @returns {Object<string, {label:string, repos:string[], context_docs:string[],
+ *   default_owner:string, qa_checklist:string[]}>}
+ */
+function parseModuleRegistry(root) {
+  try {
+    const modulesPath = resolveModuleRegistryPath(root);
+    if (!modulesPath) return {};
+    const content = fs.readFileSync(modulesPath, 'utf8');
+    const registry = {};
+    const sections = content.split(/^(?=##\s+\S)/m).filter(Boolean);
+    const META_HEADINGS = new Set(['How', 'Module', 'What', 'Required', 'Example']);
+    for (const section of sections) {
+      const headingMatch = section.match(/^##\s+(\S+)/);
+      if (!headingMatch) continue;
+      const id = headingMatch[1].trim();
+      if (META_HEADINGS.has(id)) continue;
+
+      const labelMatch = section.match(/^- \*\*label:\*\*\s+(.+)$/m);
+      const reposMatch = section.match(/^- \*\*repos:\*\*\s+(.+)$/m);
+      const contextDocsMatch = section.match(/^- \*\*context_docs:\*\*\s+(.+)$/m);
+      const ownerMatch = section.match(/^- \*\*default_owner:\*\*\s+(.+)$/m);
+
+      const contextDocs = contextDocsMatch
+        ? contextDocsMatch[1].split(',').map((s) => s.trim()).filter(Boolean)
+        : [];
+      const repos = reposMatch
+        ? reposMatch[1].split(',').map((s) => s.trim()).filter(Boolean)
+        : [];
+
+      const qaLines = [];
+      let inQa = false;
+      for (const line of section.split(/\r?\n/)) {
+        if (/^- \*\*qa_checklist:\*\*/.test(line)) { inQa = true; continue; }
+        if (inQa) {
+          if (/^-\s+/.test(line)) {
+            qaLines.push(line.replace(/^-\s+/, '').trim());
+          } else if (/^##/.test(line) || (/^- \*\*/.test(line) && !line.startsWith('  '))) {
+            inQa = false;
+          }
+        }
+      }
+
+      registry[id] = {
+        label: labelMatch ? labelMatch[1].trim() : id,
+        repos,
+        context_docs: contextDocs,
+        default_owner: ownerMatch ? ownerMatch[1].trim() : 'developer',
+        qa_checklist: qaLines,
+      };
+    }
+    return registry;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Locate the raw ### T-NNN task block for a given ID inside a BACKLOG.md or
+ * TASK_STATUS.md markdown string, using parseAllTaskBlocks(). Returns null
+ * when not found.
+ *
+ * @param {string} markdown - Raw file content (may be '')
+ * @param {string} taskId - e.g. "T-394"
+ * @returns {string|null}
+ */
+function findTaskBlockById(markdown, taskId) {
+  const blocks = parseAllTaskBlocks(markdown || '');
+  const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^###\\s+${escaped}\\b`);
+  return blocks.find((b) => re.test(b)) || null;
+}
+
+/**
+ * Read a single-line `- **Field:** value` bullet from a raw task block.
+ * Returns null when the block is absent or the field is not present.
+ * Placeholder values ("—" / "-") are also treated as absent.
+ *
+ * @param {string|null} block
+ * @param {string} fieldName
+ * @returns {string|null}
+ */
+function extractBlockField(block, fieldName) {
+  if (!block) return null;
+  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = block.match(new RegExp(`^- \\*\\*${escaped}:\\*\\*\\s*(.+)$`, 'm'));
+  if (!m) return null;
+  const value = m[1].trim();
+  if (!value || value === '—' || value === '-') return null;
+  return value;
+}
+
+/**
+ * Resolve the path to a task's context prefetch bundle (.mavp/context/T-NNN.md).
+ * The bundle itself is gitignored — regenerated at registration/update time.
+ *
+ * @param {string} taskId - e.g. "T-394"
+ * @param {string} [root] - Optional root override (used by tests). Defaults to ROOT.
+ * @returns {string} Absolute path (the file may not exist yet).
+ */
+function resolveContextBundlePath(taskId, root) {
+  const base = root || ROOT;
+  return path.join(base, '.mavp', 'context', `${taskId}.md`);
+}
+
+/**
+ * Truncate a raw ### T-NNN task block at the first level-2 (`## `) heading.
+ *
+ * parseAllTaskBlocks() / findTaskBlockById() only split on `### T-NNN`
+ * boundaries, so a task block that happens to be the last one under a
+ * `## Wave NN` section runs straight through into the NEXT level-2 heading
+ * (e.g. `## Wave NN — Archived`) before hitting another `###` block. Level-2
+ * headings never legitimately occur inside a task block's own content, so
+ * cutting there is always safe. This is applied only to the copy embedded in
+ * the context bundle (T-402) — it does not alter parseAllTaskBlocks() or
+ * findTaskBlockById() themselves, which have other consumers.
+ *
+ * @param {string|null} block - Raw task block starting with `### T-NNN`
+ * @returns {string|null}
+ */
+function truncateTaskBlockAtLevel2Heading(block) {
+  if (!block) return block;
+  const lines = block.split('\n');
+  // Start at 1 -- line 0 is the block's own `### T-NNN` heading line.
+  for (let i = 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) {
+      return lines.slice(0, i).join('\n').trimEnd();
+    }
+  }
+  return block;
+}
+
+/**
+ * Build the markdown content of a task's context prefetch bundle: the raw
+ * task block, its module's context_docs (from docs/MODULES.md), its Touches
+ * list, the repo-map entry (or entries) for its Repo/Repos field, and its
+ * Depends on / Blocked by references. Written to .mavp/context/T-NNN.md at
+ * task registration/update time (T-394) so agent spawns don't have to
+ * reconstruct this context by hand.
+ *
+ * Degrades gracefully: an absent repo map, absent module registry, or an
+ * unknown module/repo id simply omits the corresponding section — this
+ * function never throws.
+ *
+ * @param {string} taskId - e.g. "T-394"
+ * @param {object} [options]
+ * @param {string} [options.root] - Root override (defaults to ROOT)
+ * @param {string} [options.backlogPath] - Override path to BACKLOG.md
+ * @param {string} [options.taskStatusPath] - Override path to TASK_STATUS.md
+ * @returns {string|null} The bundle markdown, or null when the task ID is not
+ *   found in either BACKLOG.md or TASK_STATUS.md.
+ */
+function buildContextBundle(taskId, options = {}) {
+  const root = options.root || ROOT;
+  const backlogPath = options.backlogPath || path.join(root, 'BACKLOG.md');
+  const taskStatusPath = options.taskStatusPath || path.join(root, 'TASK_STATUS.md');
+
+  const backlogContent = fs.existsSync(backlogPath) ? readUtf8(backlogPath) : '';
+  const taskStatusContent = fs.existsSync(taskStatusPath) ? readUtf8(taskStatusPath) : '';
+
+  const backlogBlock = findTaskBlockById(backlogContent, taskId);
+  const statusBlock = findTaskBlockById(taskStatusContent, taskId);
+  const taskBlock = backlogBlock || statusBlock;
+  if (!taskBlock) return null;
+
+  const moduleId = extractBlockField(backlogBlock, 'Module') || extractBlockField(statusBlock, 'Module');
+  const repoField = extractBlockField(backlogBlock, 'Repo')
+    || extractBlockField(backlogBlock, 'Repos')
+    || extractBlockField(statusBlock, 'Repo')
+    || extractBlockField(statusBlock, 'Repos');
+  const touchesField = extractBlockField(backlogBlock, 'Touches');
+  const dependsOn = extractBlockField(backlogBlock, 'Depends on');
+  const blockedBy = extractBlockField(backlogBlock, 'Blocked by');
+
+  const sections = [];
+  sections.push(`# Context Bundle — ${taskId}`);
+  sections.push('');
+  sections.push(
+    'Auto-generated by mavp-operator at task registration/update (T-394). ' +
+    'Regenerate via `--update-task` / `--rescope-task`, or by re-running registration. ' +
+    'Do not hand-edit — it will be overwritten.'
+  );
+  sections.push('');
+  sections.push('## Task block');
+  sections.push('');
+  sections.push(truncateTaskBlockAtLevel2Heading(taskBlock.trim()));
+  sections.push('');
+
+  if (moduleId) {
+    const registry = parseModuleRegistry(root);
+    const entry = registry[moduleId];
+    if (entry && entry.context_docs.length > 0) {
+      sections.push('## Module context docs');
+      sections.push('');
+      sections.push(`Module: ${moduleId}`);
+      sections.push('');
+      for (const doc of entry.context_docs) sections.push(`- ${doc}`);
+      sections.push('');
+    }
+  }
+
+  if (touchesField) {
+    const files = touchesField.split(',').map((s) => s.trim()).filter(Boolean);
+    if (files.length > 0) {
+      sections.push('## Touches');
+      sections.push('');
+      for (const f of files) sections.push(`- ${f}`);
+      sections.push('');
+    }
+  }
+
+  if (repoField) {
+    const repoIds = repoField.split(',').map((s) => s.trim()).filter(Boolean);
+    const repoMap = parseRepoMap(root);
+    const matched = repoIds.filter((id) => repoMap[id]);
+    if (matched.length > 0) {
+      sections.push('## Repo map entry');
+      sections.push('');
+      for (const id of matched) {
+        const entry = repoMap[id];
+        sections.push(`### ${id}`);
+        sections.push('');
+        sections.push(`- **label:** ${entry.label}`);
+        if (entry.path) sections.push(`- **path:** ${entry.path}`);
+        if (entry.domain) sections.push(`- **domain:** ${entry.domain}`);
+        if (entry.deploy_path) sections.push(`- **deploy_path:** ${entry.deploy_path}`);
+        if (entry.downstream.length > 0) sections.push(`- **downstream:** ${entry.downstream.join(', ')}`);
+        if (entry.docs.length > 0) sections.push(`- **docs:** ${entry.docs.join(', ')}`);
+        sections.push('');
+      }
+    }
+  }
+
+  if (dependsOn || blockedBy) {
+    sections.push('## Dependencies');
+    sections.push('');
+    if (dependsOn) sections.push(`- **Depends on:** ${dependsOn}`);
+    if (blockedBy) sections.push(`- **Blocked by:** ${blockedBy}`);
+    sections.push('');
+  }
+
+  return sections.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+}
+
+/**
+ * Write a task's context prefetch bundle to .mavp/context/T-NNN.md.
+ * Best-effort: catches and reports failures instead of throwing, so
+ * registration/update flows never break because of a bundle-write problem.
+ *
+ * @param {string} taskId - e.g. "T-394"
+ * @param {object} [options] - Same options as buildContextBundle().
+ * @returns {{ok: boolean, path: (string|null), reason: (string|null)}}
+ */
+function writeContextBundle(taskId, options = {}) {
+  try {
+    const root = options.root || ROOT;
+    const bundle = buildContextBundle(taskId, options);
+    if (bundle == null) {
+      return { ok: false, path: null, reason: 'task_not_found' };
+    }
+    const bundlePath = resolveContextBundlePath(taskId, root);
+    fs.mkdirSync(path.dirname(bundlePath), { recursive: true });
+    fs.writeFileSync(bundlePath, bundle, 'utf8');
+    return { ok: true, path: bundlePath, reason: null };
+  } catch (err) {
+    return { ok: false, path: null, reason: err.message };
+  }
+}
+
+/**
+ * Find the most recent commit (walking back from HEAD, inclusive) whose
+ * subject line matches the `--close-session` commit marker
+ * (`chore: close session YYYY-MM-DD`, written by
+ * mavp-operator-close-session.js). Used as the reference point for "what
+ * changed this session" (T-391 must-read set).
+ *
+ * Degrades silently (returns null, never throws) when: `root` is not a git
+ * repository, git is not installed, or no commit in history matches the
+ * marker pattern (e.g. a brand-new project that has never closed a session).
+ *
+ * @param {string} root - Absolute path to the git working tree.
+ * @returns {string|null} The commit hash, or null.
+ */
+function findPreviousCloseSessionCommit(root) {
+  try {
+    const output = cp.execSync('git log --format=%H%x1f%s -n 500', {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const lines = output.split('\n').filter(Boolean);
+    for (const line of lines) {
+      const sepIdx = line.indexOf('\x1f');
+      if (sepIdx === -1) continue;
+      const hash = line.slice(0, sepIdx);
+      const subject = line.slice(sepIdx + 1);
+      if (/^chore: close session /.test(subject)) return hash;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * List files changed (committed) since the previous `--close-session` commit
+ * (see findPreviousCloseSessionCommit()), relative to `root`. Part of the
+ * T-391 must-read set.
+ *
+ * Degrades silently (returns [], never throws) when git is unavailable, the
+ * marker commit can't be found, or the diff itself fails for any reason.
+ *
+ * @param {string} root - Absolute path to the git working tree.
+ * @returns {string[]} Relative file paths, possibly empty.
+ */
+function getFilesChangedSincePreviousCloseSession(root) {
+  try {
+    const commit = findPreviousCloseSessionCommit(root);
+    if (!commit) return [];
+    const output = cp.execSync(`git diff --name-only ${commit} HEAD`, {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return output.split('\n').map((s) => s.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Compute the T-391 must-read set: files changed since the previous
+ * close-session commit (via git), unioned with the context_docs already
+ * resolved onto each in-flight active slice (see mavp-operator-agent.js,
+ * which attaches `context_docs` per module registry lookup before calling
+ * this). Deduplicated; order is changed-files first, then context_docs, each
+ * in first-seen order.
+ *
+ * Never throws. Returns [] when both sources are empty (caller omits the
+ * `must_read` field entirely in that case — additive-only, see CLAUDE.md).
+ *
+ * @param {string} root - Absolute path to the git working tree.
+ * @param {Array<{context_docs?: string[]}>} activeSlices - Active slices,
+ *   already enriched with `context_docs` where applicable.
+ * @returns {string[]}
+ */
+function computeMustRead(root, activeSlices) {
+  const changedFiles = getFilesChangedSincePreviousCloseSession(root);
+  const contextDocs = [];
+  for (const slice of activeSlices || []) {
+    if (Array.isArray(slice.context_docs)) contextDocs.push(...slice.context_docs);
+  }
+  return Array.from(new Set([...changedFiles, ...contextDocs]));
+}
+
 module.exports = {
   ROOT,
   ackRecheck,
   addDays,
   archiveActiveWaveInBacklog,
   armRecheck,
+  buildContextBundle,
   buildDeployQueue,
   classifyNextAction,
   clip,
   collectOperatorData,
   computeDueRechecks,
+  computeMustRead,
   extractTrajectories,
+  findPreviousCloseSessionCommit,
   formatIsoTime,
   generateProcessStateMd,
   getDeployPendingForRepo,
+  getFilesChangedSincePreviousCloseSession,
   getNextTaskId,
   insertIntoActiveTasks,
   insertIntoActiveWave,
@@ -2129,7 +2611,10 @@ module.exports = {
   normalizeWhitespace,
   parseActiveWaveMergedTitles,
   parseAllTaskBlocks,
+  parseBlockedBy,
   parseIntervalDays,
+  parseModuleRegistry,
+  parseRepoMap,
   parseTasksWithRepo,
   parseTouchesConflicts,
   parseWaveTasks,
@@ -2139,10 +2624,15 @@ module.exports = {
   renameTask,
   renderThinSnapshot,
   readUtf8,
+  resolveContextBundlePath,
+  resolveModuleRegistryPath,
+  resolveRepoMapPath,
   scoreTrajectory,
   shortenSessionKey,
   summarizeTrajectories,
+  truncateTaskBlockAtLevel2Heading,
   updateLastTaskId,
+  writeContextBundle,
   writeTrajectories,
   writeUtf8,
 };

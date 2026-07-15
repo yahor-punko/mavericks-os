@@ -1,5 +1,5 @@
 {
-  "_comment": "Add this case to the *TASK_STATUS.md) branch of your PostToolUse hook command, after the validator step.",
+  "_comment": "PRIMARY PATH: the installer composes this fragment into the managed PostToolUse hook automatically, on fresh install and on every --update (composePostToolUseHookCommand() in scripts/mavp-install.js reads this file's `fragment` field directly) — no manual editing needed for installer-managed projects; see docs/core/BOOTSTRAP_GUIDE.md — 'Claude Code hooks activation'. FALLBACK for non-installer setups: add this case to the *TASK_STATUS.md) branch of your PostToolUse hook command, after the validator step.",
   "fragment": "; case \"$FP\" in *TASK_STATUS.md) node \"$MAVERICKS/mavp-operator-doc-sync-check.js\" 2>&1 >&2 || true ;; esac",
   "requires": "scripts/mavp-operator-doc-sync-check.js from mavericks >= 0.17.x"
 }

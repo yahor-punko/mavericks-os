@@ -10,6 +10,8 @@ if [[ "${1-}" == "--help" ]]; then
   echo "  --agent          Print session context summary for the Main Agent"
   echo "  --watch          Dashboard watch mode (r = refresh, s = snapshot, q = quit)"
   echo "  --snapshot       Print a text snapshot of current project state"
+  echo "  --emit-bundle    Print a task's context prefetch bundle to stdout (read-only)"
+  echo "                   Usage: --emit-bundle T-NNN"
   echo "  --handoff        Write HANDOFF.md context file for cross-session continuity"
   echo "  --close-session  Run end-of-session ritual (summarise, bump wave, commit)"
   echo "  --set-strategy-note  Set wave strategy context note (persists in PROCESS_STATE.json until --close-session)"
@@ -56,6 +58,9 @@ elif [[ "${1-}" == "--snapshot" ]]; then
 elif [[ "${1-}" == "--handoff" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-handoff.js" "$@"
+elif [[ "${1-}" == "--emit-bundle" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-emit-bundle.js" "$@"
 elif [[ "${1-}" == "--agent" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-agent.js" "$@"

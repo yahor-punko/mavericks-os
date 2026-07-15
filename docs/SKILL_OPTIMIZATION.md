@@ -2,6 +2,8 @@
 
 Skill reflection loop contract for Mavericks — defines the SkillOpt-inspired system that mines past task outcomes, scores them, and proposes bounded edits to agent role specs. Developer agents implementing T-178 through T-182 and the main agent running the loop should read this document in full before starting.
 
+**Upstream entry point:** an RCA's role-spec proposal (mechanism (b) in `docs/core/RCA_CODIFICATION.md`) files through the process below, not as a direct edit to `.claude/agents/<role>.md`.
+
 ---
 
 ## 1. Overview

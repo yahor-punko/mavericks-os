@@ -232,6 +232,17 @@ main agent runs the cross-repo pre-flight described in
 `./scripts/mavp-operator --check-sync` compares agent/skill files across
 known projects against the Mavericks source to catch drift between them.
 
+Cross-repo *ordering* is enforced, not just recorded: a task may declare
+`- **Blocked by:** <repo>/T-NNN` (comma-separated for multiple references;
+distinct from the same-repo `Depends on:` field). The validator resolves
+`<repo>` to a local working copy via the repo-map registry
+([`docs/REPO_MAP.md`](docs/REPO_MAP.md)) and reads the blocker task's status
+from that repo's own artifacts: a task promoted to `merged` or `qa_passed`
+while its blocker is not yet `merged` is a blocking failure (exit 2), a task
+at `ready_for_qa` gets a warning, and an unresolvable reference (unknown repo
+id or missing blocker task) surfaces as an info-level advisory rather than a
+block.
+
 This is production-exercised, not a design sketch: 10 of the Synth case
 study's 20 repositories were declared as task targets from the one control
 backlog, with 19 tasks explicitly targeting more than one repository (see
@@ -348,6 +359,8 @@ All in [`docs/core/`](docs/core/):
 | [`NEW_PROJECT_CHECKLIST.md`](docs/core/NEW_PROJECT_CHECKLIST.md) | Bootstrap checklist |
 | [`OPERATOR_DASHBOARD.md`](docs/core/OPERATOR_DASHBOARD.md) | Operator dashboard panel reference |
 | [`DOC_SYNC.md`](docs/core/DOC_SYNC.md) | Doc-sync advisory (post-merge doc-update reminders) |
+| [`DECISIONS.md`](docs/core/DECISIONS.md) | Framework decision records (`DR-NNN`) with greppable lineage fields (`Informed by:` / `Supersedes:` / `Tasks:`) |
+| [`RCA_CODIFICATION.md`](docs/core/RCA_CODIFICATION.md) | RCA-to-codification — every root-cause analysis must route each root cause to exactly one durable fix mechanism, with a tracked follow-up task |
 | [`SECRET_LEAK_RESPONSE.md`](docs/core/SECRET_LEAK_RESPONSE.md) | Post-publish secret-leak response runbook |
 
 ## Contributing

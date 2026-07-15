@@ -26,7 +26,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { computeDueRechecks, classifyNextAction } = require('./mavp-operator-lib');
+const { computeDueRechecks, classifyNextAction, parseBlockedBy, parseRepoMap } = require('./mavp-operator-lib');
 
 // Statuses that require a Repo: field (warning if absent)
 const STATUSES_REQUIRING_REPO = new Set([
@@ -118,10 +118,30 @@ function getTaskBlocks(sectionMarkdown) {
   });
 }
 
+// getField = single-line scalar fields (Status, Type, Module, etc.);
+// getFieldMultiline = block fields that may span multiple sub-bullets (Evidence, Notes).
 function getField(block, fieldLabel) {
   const escaped = fieldLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const match = block.match(new RegExp(`^- \\*\\*${escaped}:\\*\\*\\s*(.+)$`, 'm'));
   return normalizeWhitespace(match ? match[1] : null);
+}
+
+function getFieldMultiline(block, fieldLabel) {
+  const escaped = fieldLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const labelRe = new RegExp(`^- \\*\\*${escaped}:\\*\\*\\s*(.*)$`);
+  const nextFieldRe = /^- \*\*[^*]+:\*\*/;   // top-level (non-indented) bold field bullet
+  const lines = block.split(/\r?\n/);
+  const startIdx = lines.findIndex((l) => labelRe.test(l));
+  if (startIdx === -1) return null;
+  const collected = [];
+  const inline = lines[startIdx].match(labelRe)[1].trim();
+  if (inline) collected.push(inline);
+  for (let i = startIdx + 1; i < lines.length; i += 1) {
+    if (nextFieldRe.test(lines[i]) || /^###\s/.test(lines[i])) break;
+    const content = lines[i].replace(/^\s*-\s*/, '').trim();  // strip sub-bullet prefix
+    if (content) collected.push(content);
+  }
+  return collected.length ? collected.join('\n') : null;
 }
 
 function parseTaskBlock({ block, source, sourceSection }) {
@@ -148,10 +168,16 @@ function parseTaskBlock({ block, source, sourceSection }) {
     module: getField(block, 'Module'),
     staleRisk: getField(block, 'Stale risk'),
     requiresConfigCheck: getField(block, 'Requires config check'),
-    repo: getField(block, 'Repo') || getField(block, 'Repos'),
+    // T-412: normalize a bracket-wrapped placeholder value (e.g. from BACKLOG_TEMPLATE.md)
+    // to null before any downstream comma-split — a placeholder must not be parsed as repo ids.
+    repo: (() => {
+      const repoRaw = getField(block, 'Repo') || getField(block, 'Repos');
+      return repoRaw && /^\[.*\]$/.test(repoRaw.trim()) ? null : repoRaw;
+    })(),
     taskType: getField(block, 'Type'),
     outputDoc: getField(block, 'Output doc'),
     supersededBy: getField(block, 'Superseded by'),
+    blockedBy: getField(block, 'Blocked by'),
     rawBlock: block,
   };
 }
@@ -220,6 +246,7 @@ function getSeverityForCheck(checkName) {
     merged_missing_commit_format: 'warning',
     stale_risk_unverified: 'warning',
     unknown_module_id: 'warning',
+    unknown_repo_id: 'warning',
     missing_repo_field: 'warning',
     exploration_missing_output_doc: 'warning',
     cross_repo_missing_evidence: 'warning',
@@ -231,6 +258,10 @@ function getSeverityForCheck(checkName) {
     merged_missing_needs_fix_rounds: 'info',
     overdue_recheck: 'info',
     next_action_volatile_facts: 'info',
+    artifact_size_budget: 'info',
+    state_in_claude_md: 'info',
+    blocked_by_open: 'failure',
+    blocked_by_unresolvable: 'info',
   };
 
   return severityByCheckName[checkName] || 'warning';
@@ -268,9 +299,9 @@ function getAcceptedEvidenceGuidance(verificationType) {
   };
 }
 
-function createFinding({ checkName, taskId, message, repairTarget, suggestedAction, details }) {
+function createFinding({ checkName, severity, taskId, message, repairTarget, suggestedAction, details }) {
   return {
-    severity: getSeverityForCheck(checkName),
+    severity: severity || getSeverityForCheck(checkName),
     taskId,
     checkName,
     message,
@@ -452,7 +483,7 @@ function compareRecords({ backlogRecords, taskStatusRecords }) {
   // Only checks tasks in TASK_STATUS.md (active + recently completed sections) — not archived wave sections in BACKLOG.md.
   for (const record of taskStatusRecords) {
     if (TERMINAL_TASK_STATUSES.has(record.status)) {
-      const evidence = getField(record.rawBlock, 'Evidence');
+      const evidence = getFieldMultiline(record.rawBlock, 'Evidence');
       const infraMatch = evidence && evidence.match(/infra:\s*(.+)/i);
       const hasValidInfra = infraMatch && /arn:[a-z][a-z0-9:\/\-.*]+|[a-f0-9]{7,40}|serial[\/:\-]\d+|@v\d+/i.test(infraMatch[1]);
       // artifact: is accepted for artifact-verification tasks without code diff (exploration/initiative/audit tasks)
@@ -498,7 +529,7 @@ function compareRecords({ backlogRecords, taskStatusRecords }) {
         const tsMatches = taskStatusIndex2.get(record.taskId) || [];
         const tsRecord = tsMatches[0] || null;
         if (tsRecord) {
-          const evidence = getField(tsRecord.rawBlock, 'Evidence');
+          const evidence = getFieldMultiline(tsRecord.rawBlock, 'Evidence');
           const hasStaleVerified = evidence && evidence.includes('stale_verified:');
           if (!hasStaleVerified) {
             findings.push(
@@ -789,6 +820,91 @@ function checkModuleIds(backlogRecords, modulesPath) {
 }
 
 /**
+ * Resolve the path to docs/REPO_MAP.md for the current context.
+ * Resolution order mirrors resolveModulesPath():
+ *   1. MAVERICKS_PROJECT_ROOT env var (set by bash wrapper in project-mode)
+ *   2. process.cwd() (self-mode: running directly against mavericks repo)
+ * Returns null if neither location has the file.
+ */
+function resolveRepoMapPath() {
+  const projectRoot = process.env.MAVERICKS_PROJECT_ROOT;
+  if (projectRoot) {
+    const p = path.join(projectRoot, 'docs', 'REPO_MAP.md');
+    if (fs.existsSync(p)) return p;
+    // env var set but no REPO_MAP.md in project — graceful skip
+    return null;
+  }
+  const cwdPath = path.join(process.cwd(), 'docs', 'REPO_MAP.md');
+  if (fs.existsSync(cwdPath)) return cwdPath;
+  return null;
+}
+
+/**
+ * Parse known repo IDs from docs/REPO_MAP.md.
+ * Reads from MAVERICKS_PROJECT_ROOT/docs/REPO_MAP.md when in project context,
+ * falling back to <cwd>/docs/REPO_MAP.md.
+ * Returns a Set of repo IDs (e.g. 'repo-a', 'repo-b', ...).
+ * Returns empty set if the file doesn't exist (or declares no real entries) —
+ * repo-id validation is skipped gracefully, matching parseKnownModuleIds().
+ */
+function parseKnownRepoIds(repoMapPath) {
+  try {
+    const resolvedPath = repoMapPath || resolveRepoMapPath();
+    if (!resolvedPath || !fs.existsSync(resolvedPath)) return new Set();
+    const content = fs.readFileSync(resolvedPath, 'utf8');
+    const ids = new Set();
+    // Match ## <id> headings — these are the repo IDs
+    const matches = content.match(/^##\s+(\S+)/gm) || [];
+    for (const match of matches) {
+      const m = match.match(/^##\s+(\S+)/);
+      if (m) ids.add(m[1].trim());
+    }
+    // Remove meta-sections that are not repo IDs
+    ids.delete('What');
+    ids.delete('Required');
+    ids.delete('Example');
+    ids.delete('How');
+    return ids;
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Warn when a task declares a Repo:/Repos: field with an ID not present in
+ * docs/REPO_MAP.md. Skips all checks when the repo map is empty (file not
+ * found, or present with no real entries) — not an error condition.
+ */
+function checkRepoIds(backlogRecords, repoMapPath) {
+  const knownIds = parseKnownRepoIds(repoMapPath);
+  // Skip entirely when no repo map exists — not an error condition
+  if (knownIds.size === 0) return [];
+
+  const findings = [];
+  for (const record of backlogRecords) {
+    if (record.repo) {
+      // record.repo combines Repo: (single) and Repos: (comma-separated) fields
+      const repoNames = record.repo.split(',').map((r) => r.trim()).filter(Boolean);
+      for (const repoName of repoNames) {
+        if (!knownIds.has(repoName)) {
+          findings.push(
+            createFinding({
+              checkName: 'unknown_repo_id',
+              taskId: record.taskId,
+              message: `${record.taskId} declares Repo: ${repoName} which is not in docs/REPO_MAP.md`,
+              repairTarget: 'BACKLOG.md or docs/REPO_MAP.md',
+              suggestedAction: `Either add "${repoName}" to docs/REPO_MAP.md or correct the Repo: field in BACKLOG.md.`,
+              details: { repoName, knownIds: [...knownIds] },
+            })
+          );
+        }
+      }
+    }
+  }
+  return findings;
+}
+
+/**
  * Check 1: exploration tasks must have output_doc: field declared.
  * Warns when a backlog task has Type: exploration but no Output doc: field.
  */
@@ -838,7 +954,7 @@ function checkCrossRepoEvidence(backlogRecords, taskStatusRecords) {
     const tsRecord = tsMatches[0] || null;
     if (!tsRecord) continue;
 
-    const evidence = getField(tsRecord.rawBlock, 'Evidence');
+    const evidence = getFieldMultiline(tsRecord.rawBlock, 'Evidence');
     if (!evidence) {
       // Missing evidence entirely — already caught by merged_missing_commit_field
       continue;
@@ -883,7 +999,7 @@ function checkConfigCheck(backlogRecords, taskStatusRecords) {
     const tsRecord = tsMatches[0] || null;
     if (!tsRecord) continue;
 
-    const evidence = getField(tsRecord.rawBlock, 'Evidence');
+    const evidence = getFieldMultiline(tsRecord.rawBlock, 'Evidence');
     const hasConfigCheck = evidence && evidence.toLowerCase().includes('config_check:');
     if (!hasConfigCheck) {
       findings.push(
@@ -912,7 +1028,7 @@ function checkDevDoneBranch(taskStatusRecords) {
   for (const record of taskStatusRecords) {
     if (record.status !== 'dev_done') continue;
 
-    const evidence = getField(record.rawBlock, 'Evidence');
+    const evidence = getFieldMultiline(record.rawBlock, 'Evidence');
     if (!evidence) continue;
 
     const hasCommit = evidence.includes('commit:');
@@ -950,7 +1066,7 @@ function checkDocsRefs(taskStatusRecords) {
 
     const fieldsToScan = ['Evidence', 'Notes'];
     for (const fieldLabel of fieldsToScan) {
-      const fieldValue = getField(record.rawBlock, fieldLabel);
+      const fieldValue = getFieldMultiline(record.rawBlock, fieldLabel);
       if (!fieldValue) continue;
 
       const matches = fieldValue.match(DOCS_REF_PATTERN) || [];
@@ -1055,7 +1171,7 @@ function checkMergedNeedsFixRounds(taskStatusRecords) {
     if (!record.verificationType) continue;
     if (!TARGET_VERIFICATION_TYPES.has(record.verificationType.toLowerCase())) continue;
 
-    const evidence = getField(record.rawBlock, 'Evidence');
+    const evidence = getFieldMultiline(record.rawBlock, 'Evidence');
     const hasNeedsFixRounds = evidence && evidence.includes('needs_fix_rounds:');
     if (!hasNeedsFixRounds) {
       findings.push(
@@ -1147,6 +1263,312 @@ function checkNextActionVolatileFacts(processStatePath) {
   ];
 }
 
+/**
+ * Default line budgets for artifact_size_budget. Overridable per-field via an
+ * `artifact_budgets` object in PROCESS_STATE.json (any subset of keys; missing
+ * keys fall back to these defaults).
+ */
+const DEFAULT_ARTIFACT_BUDGETS = {
+  claude_md_max_lines: 400,
+  handoff_md_max_lines: 300,
+  backlog_active_wave_max_lines: 200,
+  task_status_active_tasks_max_lines: 150,
+};
+
+function resolveArtifactBudgets(processStatePath) {
+  let overrides = {};
+  try {
+    const raw = fs.readFileSync(processStatePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed.artifact_budgets && typeof parsed.artifact_budgets === 'object') {
+      overrides = parsed.artifact_budgets;
+    }
+  } catch (_err) {
+    // PROCESS_STATE.json missing/unreadable — fall back to defaults silently.
+  }
+  return { ...DEFAULT_ARTIFACT_BUDGETS, ...overrides };
+}
+
+function countLines(text) {
+  if (!text) return 0;
+  return text.split(/\r?\n/).length;
+}
+
+/**
+ * Check 10: artifact_size_budget (info severity, NEVER blocks — exit 0 always
+ * for this check on its own).
+ * Fires when:
+ *   - CLAUDE.md whole-file line count exceeds claude_md_max_lines, or
+ *   - HANDOFF.md whole-file line count exceeds handoff_md_max_lines, or
+ *   - the BACKLOG.md `## Active Wave` section exceeds backlog_active_wave_max_lines, or
+ *   - the TASK_STATUS.md `## Active tasks` section exceeds task_status_active_tasks_max_lines.
+ * Archived wave sections are never counted: getSectionContent() stops at the
+ * next top-level `## ` heading, so anything archived outside the current
+ * Active Wave / Active tasks section is excluded by construction. Budgets are
+ * overridable via an `artifact_budgets` object in PROCESS_STATE.json.
+ * HANDOFF.md and CLAUDE.md are optional files — silently skipped if absent.
+ */
+function checkArtifactSizeBudget({ backlogMarkdown, taskStatusMarkdown, backlogPath, processStatePath }) {
+  const budgets = resolveArtifactBudgets(processStatePath);
+  const repoRoot = path.dirname(backlogPath);
+  const findings = [];
+
+  const claudeMdPath = path.join(repoRoot, 'CLAUDE.md');
+  if (fs.existsSync(claudeMdPath)) {
+    const lineCount = countLines(readUtf8(claudeMdPath));
+    if (lineCount > budgets.claude_md_max_lines) {
+      findings.push(
+        createFinding({
+          checkName: 'artifact_size_budget',
+          taskId: null,
+          message: `CLAUDE.md is ${lineCount} lines, exceeding the budget of ${budgets.claude_md_max_lines}`,
+          repairTarget: 'CLAUDE.md',
+          suggestedAction: 'Trim CLAUDE.md toward the line budget, or raise claude_md_max_lines in PROCESS_STATE.json artifact_budgets if the growth is intentional.',
+        })
+      );
+    }
+  }
+
+  const handoffMdPath = path.join(repoRoot, 'HANDOFF.md');
+  if (fs.existsSync(handoffMdPath)) {
+    const lineCount = countLines(readUtf8(handoffMdPath));
+    if (lineCount > budgets.handoff_md_max_lines) {
+      findings.push(
+        createFinding({
+          checkName: 'artifact_size_budget',
+          taskId: null,
+          message: `HANDOFF.md is ${lineCount} lines, exceeding the budget of ${budgets.handoff_md_max_lines}`,
+          repairTarget: 'HANDOFF.md',
+          suggestedAction: 'Trim HANDOFF.md toward the line budget, or raise handoff_md_max_lines in PROCESS_STATE.json artifact_budgets if the growth is intentional.',
+        })
+      );
+    }
+  }
+
+  const backlogActiveWaveSection = getSectionContent(backlogMarkdown, /^##\s+Active Wave/mi, '## Active Wave', { optional: true });
+  if (backlogActiveWaveSection) {
+    const lineCount = countLines(backlogActiveWaveSection);
+    if (lineCount > budgets.backlog_active_wave_max_lines) {
+      findings.push(
+        createFinding({
+          checkName: 'artifact_size_budget',
+          taskId: null,
+          message: `BACKLOG.md Active Wave section is ${lineCount} lines, exceeding the budget of ${budgets.backlog_active_wave_max_lines}`,
+          repairTarget: 'BACKLOG.md',
+          suggestedAction: 'Archive merged/completed tasks out of the Active Wave section, or raise backlog_active_wave_max_lines in PROCESS_STATE.json artifact_budgets.',
+        })
+      );
+    }
+  }
+
+  const taskStatusActiveSection = getSectionContent(taskStatusMarkdown, /^##\s+Active tasks\s*$/m, '## Active tasks', { optional: true });
+  if (taskStatusActiveSection) {
+    const lineCount = countLines(taskStatusActiveSection);
+    if (lineCount > budgets.task_status_active_tasks_max_lines) {
+      findings.push(
+        createFinding({
+          checkName: 'artifact_size_budget',
+          taskId: null,
+          message: `TASK_STATUS.md Active tasks section is ${lineCount} lines, exceeding the budget of ${budgets.task_status_active_tasks_max_lines}`,
+          repairTarget: 'TASK_STATUS.md',
+          suggestedAction: 'Archive completed tasks out of the Active tasks section, or raise task_status_active_tasks_max_lines in PROCESS_STATE.json artifact_budgets.',
+        })
+      );
+    }
+  }
+
+  return findings;
+}
+
+/**
+ * Check 11: state_in_claude_md (info severity, NEVER blocks).
+ * Fires when CLAUDE.md contains task-state-shaped lines: `### T-NNN` headings
+ * or `- **Status:**` fields. CLAUDE.md is process/convention guidance, not a
+ * task-state ledger — live task state belongs only in BACKLOG.md /
+ * TASK_STATUS.md. Silently skipped when CLAUDE.md does not exist.
+ */
+function checkStateInClaudeMd(backlogPath) {
+  const repoRoot = path.dirname(backlogPath);
+  const claudeMdPath = path.join(repoRoot, 'CLAUDE.md');
+  if (!fs.existsSync(claudeMdPath)) return [];
+
+  const content = readUtf8(claudeMdPath);
+  const lines = content.split(/\r?\n/);
+  const matchedLines = [];
+
+  lines.forEach((line, idx) => {
+    if (/^###\s+T-\d+\b/.test(line) || /^-\s+\*\*Status:\*\*/.test(line)) {
+      matchedLines.push({ lineNumber: idx + 1, text: line.trim() });
+    }
+  });
+
+  if (matchedLines.length === 0) return [];
+
+  return [
+    createFinding({
+      checkName: 'state_in_claude_md',
+      taskId: null,
+      message: `CLAUDE.md contains ${matchedLines.length} task-state-shaped line(s) (### T-NNN headings or - **Status:** fields) — task state belongs only in BACKLOG.md / TASK_STATUS.md`,
+      repairTarget: 'CLAUDE.md',
+      suggestedAction: 'Move task-state content out of CLAUDE.md into BACKLOG.md / TASK_STATUS.md; CLAUDE.md should contain process guidance only.',
+      details: { matchedLines: matchedLines.slice(0, 5) },
+    }),
+  ];
+}
+
+/**
+ * Resolve the root used to locate docs/REPO_MAP.md for the blocked-by check.
+ * Mirrors resolveRepoMapPath()'s resolution order (MAVERICKS_PROJECT_ROOT env
+ * var, falling back to process.cwd()) so parseRepoMap() (mavp-operator-lib.js)
+ * looks in the same place the rest of the validator does.
+ */
+function getBlockedByRepoMapRoot() {
+  return process.env.MAVERICKS_PROJECT_ROOT || process.cwd();
+}
+
+/**
+ * Read a task's Status field directly out of a sibling repo's BACKLOG.md or
+ * TASK_STATUS.md, without throwing. Returns null when the file is absent, the
+ * task heading isn't found, or the Status field is missing. Reuses
+ * getTaskBlocks()/getField() so heading/field parsing stays identical to the
+ * rest of the validator.
+ *
+ * @param {string} filePath - Absolute path to a BACKLOG.md or TASK_STATUS.md
+ * @param {string} taskId - e.g. "T-100"
+ * @returns {string|null}
+ */
+function findTaskStatusInFile(filePath, taskId) {
+  if (!filePath || !fs.existsSync(filePath)) return null;
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    const blocks = getTaskBlocks(content);
+    const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`^###\\s+${escaped}\\b`);
+    const block = blocks.find((b) => re.test(b));
+    if (!block) return null;
+    return getField(block, 'Status');
+  } catch (_err) {
+    return null;
+  }
+}
+
+// Statuses gated by the cross-repo Blocked by check, mapped to the severity
+// used when their blocker is not merged: failure for merged/qa_passed
+// (already promoted, or about to be), warning for ready_for_qa (about to be
+// promoted). Any other status is not gated.
+const BLOCKED_BY_GATE_STATUSES = {
+  merged: 'failure',
+  qa_passed: 'failure',
+  ready_for_qa: 'warning',
+};
+
+/**
+ * Check 12: cross-repo Blocked by relation with validator merge gate (T-393).
+ *
+ * Tasks may declare `- **Blocked by:** <repo>/T-NNN[, <repo>/T-MMM ...]`.
+ * For every backlog task currently `merged`, `qa_passed`, or `ready_for_qa`
+ * with a `Blocked by:` field, each `<repo>/T-NNN` reference is resolved via
+ * the repo map (`docs/REPO_MAP.md`'s `path` field, through parseRepoMap()),
+ * then that repo's BACKLOG.md/TASK_STATUS.md is read to find the blocker
+ * task's Status:
+ *   - `blocked_by_open` at FAILURE severity when the blocked task is `merged`
+ *     or `qa_passed` and the blocker is not `merged`;
+ *   - `blocked_by_open` at WARNING severity when the blocked task is
+ *     `ready_for_qa` and the blocker is not `merged`;
+ *   - `blocked_by_unresolvable` at INFO severity when the `Blocked by:` value
+ *     can't be parsed, the repo id/path can't be resolved, or the blocker
+ *     task can't be found in either of the resolved repo's artifact files.
+ *
+ * Entirely separate from `Depends on:` (same-repo, parsed inline in
+ * mavp-operator-agent.js's computeNextAction()) — that parsing and behavior
+ * is untouched. Tasks with no `Blocked by:` field (the mavericks-repo default)
+ * produce no findings — this check is a silent no-op for them.
+ *
+ * @param {Array} records - Backlog records (parseBacklogAllActiveWaveTasks()
+ *   output, so merged tasks are included).
+ * @param {object} [options]
+ * @param {object} [options.repoMap] - Pre-parsed repo-map registry (test
+ *   injection); when absent, resolved via parseRepoMap(repoMapRoot).
+ * @param {string} [options.repoMapRoot] - Root passed to parseRepoMap() when
+ *   options.repoMap is not supplied (test injection); defaults to
+ *   getBlockedByRepoMapRoot().
+ * @returns {Array} findings
+ */
+function checkBlockedBy(records, options = {}) {
+  const findings = [];
+  const repoMap = options.repoMap || parseRepoMap(options.repoMapRoot || getBlockedByRepoMapRoot());
+
+  for (const record of records) {
+    const gateSeverity = BLOCKED_BY_GATE_STATUSES[record.status];
+    if (!gateSeverity) continue;
+
+    const blockedByRaw = record.blockedBy;
+    if (!blockedByRaw) continue;
+
+    const refs = parseBlockedBy(blockedByRaw);
+    if (refs.length === 0) {
+      findings.push(
+        createFinding({
+          checkName: 'blocked_by_unresolvable',
+          taskId: record.taskId,
+          message: `${record.taskId} declares Blocked by: "${blockedByRaw}" but it could not be parsed as <repo>/T-NNN`,
+          repairTarget: 'BACKLOG.md',
+          suggestedAction: 'Use the format "- **Blocked by:** <repo>/T-NNN" (comma-separated for multiple references).',
+        })
+      );
+      continue;
+    }
+
+    for (const ref of refs) {
+      const entry = repoMap[ref.repo];
+      if (!entry || !entry.path || !fs.existsSync(entry.path)) {
+        findings.push(
+          createFinding({
+            checkName: 'blocked_by_unresolvable',
+            taskId: record.taskId,
+            message: `${record.taskId} declares Blocked by: ${ref.repo}/${ref.taskId} but repo "${ref.repo}" has no resolvable path in docs/REPO_MAP.md`,
+            repairTarget: 'docs/REPO_MAP.md',
+            suggestedAction: `Add a "${ref.repo}" entry with a valid "path:" to docs/REPO_MAP.md, or correct the Blocked by: field in BACKLOG.md.`,
+          })
+        );
+        continue;
+      }
+
+      const blockerStatus =
+        findTaskStatusInFile(path.join(entry.path, 'TASK_STATUS.md'), ref.taskId) ||
+        findTaskStatusInFile(path.join(entry.path, 'BACKLOG.md'), ref.taskId);
+
+      if (!blockerStatus) {
+        findings.push(
+          createFinding({
+            checkName: 'blocked_by_unresolvable',
+            taskId: record.taskId,
+            message: `${record.taskId} declares Blocked by: ${ref.repo}/${ref.taskId} but ${ref.taskId} could not be found in ${ref.repo}'s BACKLOG.md/TASK_STATUS.md`,
+            repairTarget: 'BACKLOG.md',
+            suggestedAction: `Verify ${ref.taskId} exists in ${ref.repo} and that docs/REPO_MAP.md "path:" for "${ref.repo}" points at the correct working copy.`,
+          })
+        );
+        continue;
+      }
+
+      if (blockerStatus !== 'merged') {
+        findings.push(
+          createFinding({
+            checkName: 'blocked_by_open',
+            severity: gateSeverity,
+            taskId: record.taskId,
+            message: `${record.taskId} is ${record.status} but its blocker ${ref.repo}/${ref.taskId} is not merged (status: ${blockerStatus})`,
+            repairTarget: 'BACKLOG.md',
+            suggestedAction: `Wait for ${ref.repo}/${ref.taskId} to reach merged before ${record.taskId} can stay ${record.status}, or remove the Blocked by: relation if it no longer applies.`,
+          })
+        );
+      }
+    }
+  }
+
+  return findings;
+}
+
 function mergeFindings(comparison, extraFindings) {
   if (extraFindings.length === 0) return;
   comparison.findings.push(...extraFindings);
@@ -1197,6 +1619,9 @@ function parseArtifacts({ backlogPath, taskStatusPath }) {
   // Module check: resolve project-level MODULES.md (respects MAVERICKS_PROJECT_ROOT)
   mergeFindings(comparison, checkModuleIds(backlogRecords, null));
 
+  // Repo map check: resolve project-level REPO_MAP.md (respects MAVERICKS_PROJECT_ROOT)
+  mergeFindings(comparison, checkRepoIds(backlogRecords, null));
+
   // Exploration task must declare output_doc (check all wave tasks, including planned)
   mergeFindings(comparison, checkExplorationOutputDoc(backlogAllWaveRecords));
 
@@ -1225,6 +1650,19 @@ function parseArtifacts({ backlogPath, taskStatusPath }) {
   // next_action volatile-facts advisory: info-level nudge when next_action embeds
   // point-in-time facts (versions, commit counts) instead of a clean routing directive
   mergeFindings(comparison, checkNextActionVolatileFacts(processStatePath));
+
+  // artifact size budget advisory: info-level nudge when CLAUDE.md/HANDOFF.md or the
+  // BACKLOG.md Active Wave / TASK_STATUS.md Active tasks sections exceed line budgets
+  mergeFindings(comparison, checkArtifactSizeBudget({ backlogMarkdown, taskStatusMarkdown, backlogPath, processStatePath }));
+
+  // state-in-CLAUDE.md advisory: info-level nudge when CLAUDE.md contains
+  // task-state-shaped lines (### T-NNN headings or - **Status:** fields)
+  mergeFindings(comparison, checkStateInClaudeMd(backlogPath));
+
+  // Cross-repo Blocked by gate: failure/warning when a merged/qa_passed/
+  // ready_for_qa task's Blocked by: reference resolves to a non-merged
+  // blocker task in another repo; info when the reference is unresolvable.
+  mergeFindings(comparison, checkBlockedBy(backlogAllWaveRecords));
 
   return {
     inputs: {
@@ -1382,6 +1820,7 @@ module.exports = {
   checkLastTaskId,
   checkActiveSlices,
   checkModuleIds,
+  checkRepoIds,
   checkExplorationOutputDoc,
   checkCrossRepoEvidence,
   checkConfigCheck,
@@ -1389,7 +1828,9 @@ module.exports = {
   checkDocsRefs,
   checkArchitectureDocStale,
   parseKnownModuleIds,
+  parseKnownRepoIds,
   resolveModulesPath,
+  resolveRepoMapPath,
   mergeFindings,
   DEV_DONE_WITHOUT_QA_CHECK: 'dev_done_without_qa',
   MERGED_WITHOUT_COMMIT_HASH_CHECK: 'merged_without_commit_hash',
@@ -1397,6 +1838,7 @@ module.exports = {
   MERGED_MISSING_COMMIT_FORMAT_CHECK: 'merged_missing_commit_format',
   STALE_RISK_UNVERIFIED_CHECK: 'stale_risk_unverified',
   UNKNOWN_MODULE_ID_CHECK: 'unknown_module_id',
+  UNKNOWN_REPO_ID_CHECK: 'unknown_repo_id',
   MISSING_REPO_FIELD_CHECK: 'missing_repo_field',
   EXPLORATION_MISSING_OUTPUT_DOC_CHECK: 'exploration_missing_output_doc',
   CROSS_REPO_MISSING_EVIDENCE_CHECK: 'cross_repo_missing_evidence',
@@ -1408,14 +1850,26 @@ module.exports = {
   MERGED_MISSING_NEEDS_FIX_ROUNDS_CHECK: 'merged_missing_needs_fix_rounds',
   OVERDUE_RECHECK_CHECK: 'overdue_recheck',
   NEXT_ACTION_VOLATILE_FACTS_CHECK: 'next_action_volatile_facts',
+  ARTIFACT_SIZE_BUDGET_CHECK: 'artifact_size_budget',
+  STATE_IN_CLAUDE_MD_CHECK: 'state_in_claude_md',
+  BLOCKED_BY_OPEN_CHECK: 'blocked_by_open',
+  BLOCKED_BY_UNRESOLVABLE_CHECK: 'blocked_by_unresolvable',
+  DEFAULT_ARTIFACT_BUDGETS,
   checkMergedNeedsFixRounds,
   checkOverdueRechecks,
   checkNextActionVolatileFacts,
+  checkArtifactSizeBudget,
+  checkStateInClaudeMd,
+  checkBlockedBy,
+  findTaskStatusInFile,
+  getBlockedByRepoMapRoot,
+  resolveArtifactBudgets,
   createFinding,
   createTaskRecordIndex,
   getAcceptedEvidenceGuidance,
   getExitCode,
   getField,
+  getFieldMultiline,
   getOperatorTakeaway,
   getOverallResultLabel,
   getSectionContent,

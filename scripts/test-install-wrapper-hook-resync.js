@@ -1,6 +1,13 @@
 'use strict';
 // Regression test: T-336 — --update re-syncs generated wiring
 // (bash wrapper + PostToolUse validator hook) with wrapper flag parity.
+// Updated for T-404: the PostToolUse hook merge is no longer a surgical
+// string-replace of the stale validator filename token — it fully replaces
+// the managed entry's command with a freshly composed one (hardened base +
+// doc-sync + manifest-guard fragments + sentinel, via mergeManagedHooks /
+// composePostToolUseHookCommand). Assertion 4 below reflects that: the
+// updated command is a wholesale rebuild, not a token-only diff from the
+// stale command.
 //
 // Seeds a scratch target project with:
 //   (i)  a STALE scripts/mavp-operator whose --validate line calls the pre-T-329
@@ -13,7 +20,9 @@
 //   2. wrapper no longer references parliamentary-validator-parser-v1.js;
 //   3. settings.local.json PostToolUse hook command references mavp-validator.js
 //      and no longer references the old name;
-//   4. all other settings.local.json keys are unchanged (deep-equal);
+//   4. all other settings.local.json keys are unchanged (deep-equal), and the
+//      rebuilt PostToolUse command is the mavericks-managed sentinel-prefixed
+//      composition (not merely the stale command with one token swapped);
 //   5. the regenerated wrapper's flag set is a superset of a representative
 //      live downstream wrapper's baseline flags.
 // Plain node, no npm deps.
@@ -31,9 +40,13 @@ const NEW_VALIDATOR = 'mavp-validator.js';
 // Baseline wrapper flag set from a representative live downstream wrapper
 // (see BACKLOG T-336 criterion 3). The regenerated template must be a
 // superset of these.
+// T-407: --ingest-decomposition and --absorb-task removed from the baseline —
+// they dispatched to scripts that never existed in scripts/ (phantom
+// commands, MODULE_NOT_FOUND in every adopter); --emit-bundle and --demo
+// added to the template as shipped, adopter-compatible replacements.
 const BASELINE_WRAPPER_FLAGS = [
   '--snapshot', '--handoff', '--agent', '--close-session', '--new-task',
-  '--quick-task', '--apply-decomposition', '--ingest-decomposition', '--absorb-task',
+  '--quick-task', '--apply-decomposition', '--emit-bundle', '--demo',
   '--quick-merge', '--update-task', '--merge-task', '--update-status', '--set-status',
   '--rename-task', '--sync-status', '--reflect-skill', '--validate', '--install',
   '--strip', '--version',
@@ -147,13 +160,20 @@ try {
     updatedSettings.permissions.allow.includes(`Bash(node scripts/${OLD_VALIDATOR}:*)`),
     'FAIL: inert stale permission allow-list entry was rewritten (out of scope)'
   );
-  // The updated hook command must differ from the stale one ONLY by the filename token.
-  assert.strictEqual(
+  // T-404: the managed PostToolUse command is now a full rebuild (hardened base +
+  // fragments + sentinel), not a token-only diff from the stale command — assert
+  // it is the mavericks-managed composition rather than the naive stale command
+  // with the validator name swapped in place.
+  assert.ok(
+    updatedHookCmd.startsWith(': mavp-managed-hook;'),
+    'FAIL: rebuilt hook command missing the mavp-managed sentinel prefix'
+  );
+  assert.notStrictEqual(
     staleHookCommand.split(OLD_VALIDATOR).join(NEW_VALIDATOR),
     updatedHookCmd,
-    'FAIL: hook command changed by more than the validator filename token'
+    'FAIL: hook command was only token-swapped, not fully rebuilt (T-404 supersedes the T-336 surgical replace)'
   );
-  console.log('Assertion 4 passed: all other settings.local.json keys unchanged (incl. inert allow-list entry)');
+  console.log('Assertion 4 passed: all other settings.local.json keys unchanged (incl. inert allow-list entry); managed hook fully rebuilt');
 
   // --- Assertion 5: wrapper flag set is a superset of the baseline ---
   const missing = BASELINE_WRAPPER_FLAGS.filter(flag => !newWrapper.includes(`"${flag}"`));

@@ -37,6 +37,7 @@ const {
   insertIntoActiveWave,
   insertIntoActiveTasks,
   updateLastTaskId,
+  writeContextBundle,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -320,6 +321,16 @@ async function applyDecompositionFromString(input, repoName) {
   const updated = updateLastTaskId(PROCESS_STATE_JSON, lastNumericId);
   if (updated) {
     console.log(`${GREEN}✓ PROCESS_STATE.json — last_task_id updated to ${lastNumericId}${RESET}`);
+  }
+
+  // Write context prefetch bundles (.mavp/context/T-NNN.md) — best effort, never fatal
+  for (const entry of entries) {
+    const bundleResult = writeContextBundle(entry.id, { root: ROOT, backlogPath: BACKLOG_MD, taskStatusPath: TASK_STATUS_MD });
+    if (bundleResult.ok) {
+      console.log(`${GREEN}✓ Context bundle — .mavp/context/${entry.id}.md${RESET}`);
+    } else {
+      console.log(`${DIM}(context bundle not written for ${entry.id}: ${bundleResult.reason})${RESET}`);
+    }
   }
 
   // Print registered tasks

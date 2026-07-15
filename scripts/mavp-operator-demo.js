@@ -148,11 +148,14 @@ function buildFixture(label) {
   );
 
   // The validator's Repo check only reads BACKLOG.md (TASK_STATUS template has
-  // no Repo field at all) — fill in the placeholder so the lifecycle phase's
-  // in_progress/ready_for_qa/qa_passed transitions stay clean.
+  // no Repo field at all) — insert one after "Depends on:" so the lifecycle
+  // phase's in_progress/ready_for_qa/qa_passed transitions stay clean. T-412
+  // removed the template's own Repo: placeholder line (it produced a false
+  // unknown_repo_id finding on a fresh install), so the demo fixture inserts
+  // its own line instead of replacing a placeholder that no longer exists.
   backlog = backlog.replace(
-    '- **Repo:** [optional — repo name(s) this task touches, e.g. example-service]',
-    '- **Repo:** demo-service'
+    '- **Depends on:** —',
+    '- **Depends on:** —\n- **Repo:** demo-service'
   );
 
   // PROCESS_STATE.md placeholders — otherwise the dashboard phase leaks raw

@@ -12,3 +12,4 @@ paths:
 - After any edit to these files, the validator runs automatically via PostToolUse hook — check its output before proceeding.
 - Archived tasks in `## Wave N — Archived` are not compared by the validator; do not put active tasks there.
 - Task IDs are sequential integers (T-NNN). Never reuse a retired ID.
+- `- **Blocked by:** <repo>/T-NNN` declares a cross-repo merge gate: the validator resolves `<repo>` via `docs/REPO_MAP.md` and blocks (or warns) merge until the referenced task in that repo is `merged`. Do not confuse with same-repo `Depends on:`.
