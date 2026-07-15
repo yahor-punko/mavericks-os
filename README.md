@@ -182,6 +182,28 @@ For the full step-by-step, including editing `PROCESS_STATE.json`, adding your f
 ./scripts/mavp-operator --help           # show all flags
 ```
 
+### Updating Mavericks
+
+Updating is two steps — one for the shared framework checkout, one per project.
+
+**1. Update the framework checkout.** Bootstrapped projects run core scripts directly from the checkout, so this one step updates the framework for every project at once:
+
+```bash
+git -C "$HOME/.mavericks" pull --ff-only    # use your <path-to-mavericks> if you cloned elsewhere
+```
+
+Re-running the `curl | sh` installer does the same thing — it is idempotent and pulls an existing checkout instead of re-cloning.
+
+**2. Re-sync each bootstrapped project.** The files the installer *copied* into your project (`.claude/` agents, skills, rules, hooks, and the wrapper and project scripts) don't update themselves. From each project's directory:
+
+```bash
+./scripts/mavp-operator --install --update .
+```
+
+This overwrites the copied framework files with the latest versions and records the new framework version in `PROCESS_STATE.json`. It never touches your task state — `BACKLOG.md`, `TASK_STATUS.md`, and the rest of `PROCESS_STATE.json` are left alone. Pass `--no-hooks` to skip the hooks refresh, or use `--hooks-only` to refresh only the hooks.
+
+You don't need to watch for releases: when a project's recorded framework version falls behind the checkout, the session-start brief prints an `UPDATE_AVAILABLE` notice with the exact re-sync command.
+
 ## See more
 
 ![Validator catching backlog/task drift — exit 2, then fixed](docs/assets/validator-drift.gif)
