@@ -157,6 +157,8 @@ This creates, in `your-project/`:
 - `.claude/agents/*.md`, `.claude/skills/*/SKILL.md`, `.claude/rules/*.md` — sub-agent specs, skills, and rules, copied from this repo
 - `.claude/settings.json` / `.claude/settings.local.json` — shared and personal Claude Code settings (see **[Security model](#security-model)** below)
 
+Pass `--transcript-archive` to opt into a gitignored session-transcript archive at `.mavp/transcripts/`, with retention bounded via the `MAVP_TRANSCRIPT_RETENTION_DAYS` env var — off by default. See **[`docs/core/BOOTSTRAP_GUIDE.md`](docs/core/BOOTSTRAP_GUIDE.md)** for details.
+
 Core framework scripts (the operator library, dashboard, validator) are **not copied** into your project — the generated `scripts/mavp-operator` wrapper runs them directly from this Mavericks checkout.
 
 The wrapper resolves the Mavericks install location in this order: an explicit `MAVERICKS_HOME` env var, if set, always wins; otherwise `$HOME/.mavericks` — the canonical default, and where `install.sh` clones Mavericks — is used if it exists; otherwise `$HOME/Documents/mavericks` is used as a legacy fallback. If you cloned Mavericks somewhere else entirely, set `MAVERICKS_HOME` to that path (e.g. in your shell profile or before invoking the wrapper):
@@ -178,6 +180,7 @@ For the full step-by-step, including editing `PROCESS_STATE.json`, adding your f
 ./scripts/mavp-operator --snapshot       # text snapshot for agent context
 ./scripts/mavp-operator --close-session  # end-of-session ritual (results review + optional git push)
 ./scripts/mavp-operator --new-task       # interactive task creation
+./scripts/mavp-operator --archive-merged # archive merged tasks mid-wave
 ./scripts/mavp-operator --version        # framework version
 ./scripts/mavp-operator --help           # show all flags
 ```
@@ -381,7 +384,7 @@ All in [`docs/core/`](docs/core/):
 | [`NEW_PROJECT_CHECKLIST.md`](docs/core/NEW_PROJECT_CHECKLIST.md) | Bootstrap checklist |
 | [`OPERATOR_DASHBOARD.md`](docs/core/OPERATOR_DASHBOARD.md) | Operator dashboard panel reference |
 | [`DOC_SYNC.md`](docs/core/DOC_SYNC.md) | Doc-sync advisory (post-merge doc-update reminders) |
-| [`DECISIONS.md`](docs/core/DECISIONS.md) | Framework decision records (`DR-NNN`) with greppable lineage fields (`Informed by:` / `Supersedes:` / `Tasks:`) |
+| [`DECISIONS.md`](docs/core/DECISIONS.md) | Framework decision records (`DR-NNN`) with greppable lineage fields (`Informed by:` / `Supersedes:` / `Tasks:` / `Session:`) |
 | [`RCA_CODIFICATION.md`](docs/core/RCA_CODIFICATION.md) | RCA-to-codification — every root-cause analysis must route each root cause to exactly one durable fix mechanism, with a tracked follow-up task |
 | [`SECRET_LEAK_RESPONSE.md`](docs/core/SECRET_LEAK_RESPONSE.md) | Post-publish secret-leak response runbook |
 

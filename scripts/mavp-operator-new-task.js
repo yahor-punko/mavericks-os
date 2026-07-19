@@ -24,6 +24,7 @@ const {
   parseTasksWithRepo,
   getDeployPendingForRepo,
   writeContextBundle,
+  buildTaskStatusEntry,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -53,16 +54,6 @@ function buildBacklogEntry(id, title, owner, repo, dependsOn, requiresUx, criter
 - **Acceptance criteria:** ${criteria || '[fill in]'}
 - **Verification type:** ${verificationType}
 - **Evidence expected:** —
-`;
-}
-
-function buildTaskStatusEntry(id, title, owner, verificationType) {
-  return `\n### ${id} — ${title}
-- **Status:** planned
-- **Owner role:** ${owner}
-- **Verification type:** ${verificationType}
-- **Last verified by:** —
-- **Evidence:** —
 `;
 }
 

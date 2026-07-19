@@ -27,6 +27,8 @@ Create or update documentation artifacts as specified by the slice acceptance cr
 
 **User-facing documentation** (READMEs, Getting Started guides, API reference, tutorials intended for external users) belongs to the **technical-writer** role. If your brief describes user-facing docs, defer to technical-writer unless the brief explicitly assigns this to product-docs.
 
+Task registration is never delegated to this role — if a brief asks you to register or edit BACKLOG/TASK_STATUS entries, report a blocker rather than attempting it (see the Escalation section below).
+
 ## Rules
 
 - Read the slice entry in BACKLOG.md. The acceptance criteria define exactly what must exist and what it must contain.

@@ -16,9 +16,10 @@
  * Usage:
  *   node /path/to/mavericks/scripts/mavp-install.js <target-dir>
  *   node /path/to/mavericks/scripts/mavp-install.js <target-dir> --yes
+ *   node /path/to/mavericks/scripts/mavp-install.js <target-dir> --transcript-archive
  *   node /path/to/mavericks/scripts/mavp-install.js --check <target-dir>
- *   node /path/to/mavericks/scripts/mavp-install.js --update <target-dir>
- *   node /path/to/mavericks/scripts/mavp-install.js --hooks-only <target-dir>
+ *   node /path/to/mavericks/scripts/mavp-install.js --update <target-dir> [--transcript-archive]
+ *   node /path/to/mavericks/scripts/mavp-install.js --hooks-only <target-dir> [--transcript-archive]
  *   node /path/to/mavericks/scripts/mavp-install.js --strip <target-dir> [--keep-artifacts]
  *
  * Modes:
@@ -47,6 +48,25 @@
  *              asking (works at a real TTY too). Ignored (no effect, prints a notice) in
  *              --strip mode — it never bypasses the strip refuse/confirm gates. Accepted and
  *              ignored by --update / --check, which have no prompts.
+ *
+ * --transcript-archive (T-422) — opt-in, default OFF. When set, merges a sentinel-identified
+ *              managed SessionStart hook that sweeps this project's Claude Code session
+ *              transcripts (~/.claude/projects/<cwd-slug>/*.jsonl) into
+ *              <project>/.mavp/transcripts/<session-id>.jsonl on every session start — see
+ *              scripts/mavp-transcript-archive.js and docs/core/BOOTSTRAP_GUIDE.md —
+ *              "Transcript archive". Also adds `.mavp/transcripts/` to the target project's
+ *              .gitignore (transcripts are privacy-sensitive full session content — never
+ *              git-tracked). Fresh install wires the hook in at seed time; --update and
+ *              --hooks-only merge it into an already-bootstrapped project via the same
+ *              mergeManagedHooks() machinery used for the validator/lifecycle hooks.
+ *              Installing WITHOUT this flag adds no such entry. Once added, a later --update
+ *              run (with or without the flag) preserves and refreshes the existing entry —
+ *              only a fresh, never-flagged install/update skips adding it in the first place.
+ *              To disable: remove the managed SessionStart entry from
+ *              .claude/settings.local.json by hand (identifiable by the
+ *              `: mavp-transcript-archive-hook;` sentinel prefix or the
+ *              `mavp-transcript-archive.js` filename in its command) — a subsequent --update
+ *              without --transcript-archive will not re-add it.
  *
  * Non-TTY contract — asymmetric by design:
  *   default install — when stdin is not a TTY, the file-creation prompt is skipped and the
@@ -335,6 +355,40 @@ function buildPostToolUseHookCommand(targetDir) {
   return `INPUT=$(cat); FP=$(node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write((d.tool_input&&d.tool_input.file_path)||'')}catch(e){}" <<< "$INPUT"); case "$FP" in *BACKLOG.md|*TASK_STATUS.md) ;; *) exit 0 ;; esac; MAVERICKS="\${MAVERICKS_HOME:-$( [ -d "$HOME/.mavericks" ] && printf %s "$HOME/.mavericks" || printf %s "$HOME/Documents/mavericks" )}/scripts"; MAVROOT="${targetDir}"; export MAVERICKS_PROJECT_ROOT="$MAVROOT"; TS=$(node -e "process.stdout.write(String(Date.now()))"); echo "$TS" > "$MAVROOT/.mavp-hook-ts"; sleep 1.5; CURRENT_TS=$(cat "$MAVROOT/.mavp-hook-ts" 2>/dev/null); if [ "$CURRENT_TS" != "$TS" ]; then exit 0; fi; rm -f "$MAVROOT/.mavp-hook-ts"; cd "$MAVROOT"; case "$FP" in *BACKLOG.md) node "$MAVERICKS/mavp-operator-sync-status.js" 1>&2 ;; esac; VOUT=$(node "$MAVERICKS/mavp-validator.js" 2>&1); VCODE=$?; [ $VCODE -ne 0 ] && printf '%s\\n' "$VOUT" >&2 || true; exit 0`;
 }
 
+// Sentinel-prefixed identity token for the opt-in transcript-archive SessionStart
+// hook (T-422) — same pattern as MANAGED_HOOK_SENTINEL below: `:` is bash's
+// true no-op builtin, so this is inert at runtime but lets isManagedTranscriptArchiveCommand()
+// always recognise "this is the mavericks-managed transcript-archive hook" even if the
+// composed command body changes shape. Also matched on the sweep script's own filename
+// so a hand-written or pre-sentinel entry is still recognised.
+const TRANSCRIPT_ARCHIVE_HOOK_SENTINEL = ': mavp-transcript-archive-hook;';
+const TRANSCRIPT_ARCHIVE_IDENTITY_TOKEN = 'mavp-transcript-archive.js';
+
+/**
+ * Build the managed SessionStart command that sweeps this project's Claude
+ * Code transcripts into .mavp/transcripts/ (T-422). Resolves the mavericks
+ * scripts dir the same way every other managed/lifecycle hook command does
+ * (MAVERICKS_HOME env var > ~/.mavericks > ~/Documents/mavericks), `cd`s into
+ * the target project (mavp-transcript-archive.js derives both the source
+ * transcript dir and the destination archive dir from its own cwd), and
+ * always exits 0 — the sweep script itself never exits non-zero, but the
+ * trailing `; exit 0` also guards against a `cd` failure (e.g. the project
+ * directory having been moved/deleted since bootstrap).
+ */
+function buildTranscriptArchiveHookCommand(targetDir) {
+  return `${TRANSCRIPT_ARCHIVE_HOOK_SENTINEL} MAVERICKS="\${MAVERICKS_HOME:-$( [ -d "$HOME/.mavericks" ] && printf %s "$HOME/.mavericks" || printf %s "$HOME/Documents/mavericks" )}/scripts"; cd "${targetDir}" && node "$MAVERICKS/mavp-transcript-archive.js"; exit 0`;
+}
+
+/**
+ * Identity check: "is this SessionStart hook entry the mavericks-managed
+ * transcript-archive sweep hook?" Matches on either the sweep script's
+ * filename or the explicit sentinel prefix — mirrors isManagedPostToolUseCommand().
+ */
+function isManagedTranscriptArchiveCommand(command) {
+  if (typeof command !== 'string') return false;
+  return command.includes(TRANSCRIPT_ARCHIVE_IDENTITY_TOKEN) || command.startsWith(TRANSCRIPT_ARCHIVE_HOOK_SENTINEL);
+}
+
 // Legacy pre-T-329 validator filename — still checked as a hook-identity signal
 // so already-bootstrapped projects on the old name get upgraded by --update.
 const OLD_VALIDATOR = 'parliamentary-validator-parser-v1.js';
@@ -422,11 +476,19 @@ function isManagedPostToolUseCommand(command) {
  *   (e) ensures `.mavp-hook-ts` is gitignored;
  *   (f) prints one console line per change made, and a visible warning
  *       (never a silent skip) when settings.local.json exists but is
- *       malformed JSON.
+ *       malformed JSON;
+ *   (g) opt-in only (T-422): when `opts.transcriptArchive` is true, also
+ *       merges the sentinel-identified transcript-archive SessionStart hook
+ *       (identity: isManagedTranscriptArchiveCommand) — appended only if
+ *       absent AND the flag is set; if the entry is already present from a
+ *       prior run, its command is refreshed on every call regardless of the
+ *       flag (an already-opted-in project is never silently opted back out),
+ *       and `.mavp/transcripts/` is ensured in .gitignore whenever the entry
+ *       exists or is being newly added.
  * Returns the number of individual hook changes made (0 if none, or skipped
  * due to malformed JSON).
  */
-function mergeManagedHooks(targetDir) {
+function mergeManagedHooks(targetDir, opts = {}) {
   const settingsLocalPath = path.join(targetDir, '.claude', 'settings.local.json');
   let settingsLocal = {};
   if (fs.existsSync(settingsLocalPath)) {
@@ -489,6 +551,41 @@ function mergeManagedHooks(targetDir) {
   };
   ensureLifecycleHook('SessionStart', `cd ${targetDir} && ./scripts/mavp-operator --agent`);
   ensureLifecycleHook('PostCompact', `cd ${targetDir} && echo '=== STATE RESTORED AFTER COMPACTION ===' && ./scripts/mavp-operator --agent`);
+
+  // --- SessionStart: opt-in transcript-archive sweep hook (T-422) ---
+  // Unlike the lifecycle hooks above (always added if absent), this entry is
+  // ONLY appended when opts.transcriptArchive is true — installing without
+  // --transcript-archive must add no such entry. Once present, though, its
+  // command is refreshed on every call regardless of the flag (an
+  // already-opted-in project is never silently opted back out by a plain
+  // `--update`).
+  if (!Array.isArray(settingsLocal.hooks.SessionStart)) settingsLocal.hooks.SessionStart = [];
+  const newTranscriptArchiveCommand = buildTranscriptArchiveHookCommand(targetDir);
+  let foundTranscriptArchive = false;
+  for (const entry of settingsLocal.hooks.SessionStart) {
+    if (!entry || !Array.isArray(entry.hooks)) continue;
+    for (const h of entry.hooks) {
+      if (h && isManagedTranscriptArchiveCommand(h.command)) {
+        foundTranscriptArchive = true;
+        if (h.command !== newTranscriptArchiveCommand) {
+          h.command = newTranscriptArchiveCommand;
+          changeCount++;
+          console.log(`  ${YELLOW}updated${RESET}  .claude/settings.local.json ${DIM}(hooks.SessionStart transcript-archive hook command refreshed)${RESET}`);
+        }
+      }
+    }
+  }
+  if (!foundTranscriptArchive && opts.transcriptArchive) {
+    settingsLocal.hooks.SessionStart.push({ hooks: [{ type: 'command', command: newTranscriptArchiveCommand }] });
+    changeCount++;
+    console.log(`  ${GREEN}new${RESET}     .claude/settings.local.json ${DIM}(hooks.SessionStart transcript-archive sweep hook appended — --transcript-archive)${RESET}`);
+  }
+  if (foundTranscriptArchive || opts.transcriptArchive) {
+    const transcriptGitignoreResult = ensureGitignoreEntry(targetDir, '.mavp/transcripts/');
+    if (transcriptGitignoreResult !== 'exists') {
+      console.log(`  ${GREEN}✓${RESET} .gitignore ${DIM}(.mavp/transcripts/ archive dir ${transcriptGitignoreResult})${RESET}`);
+    }
+  }
 
   if (changeCount > 0) {
     const claudeDirForHooks = path.dirname(settingsLocalPath);
@@ -684,6 +781,7 @@ async function main() {
   const hooksOnlyMode = args.includes('--hooks-only');
   const yesFlag = args.includes('--yes') || args.includes('-y');
   const noHooksFlag = args.includes('--no-hooks');
+  const transcriptArchiveFlag = args.includes('--transcript-archive');
   const targetArg = args.find(a => !a.startsWith('-'));
   const targetDir = targetArg ? path.resolve(targetArg) : process.cwd();
   const targetScripts = path.join(targetDir, 'scripts');
@@ -721,7 +819,7 @@ async function main() {
   // self-install case above.
   if (hooksOnlyMode) {
     console.log(`${BOLD}Hooks-only mode${RESET} — syncing managed hooks only\n`);
-    const hookChanges = mergeManagedHooks(targetDir);
+    const hookChanges = mergeManagedHooks(targetDir, { transcriptArchive: transcriptArchiveFlag });
     console.log(`\n${GREEN}✓ Hooks-only sync complete.${RESET} ${hookChanges} change(s) made to .claude/settings.local.json.\n`);
     return;
   }
@@ -925,7 +1023,7 @@ async function main() {
     if (noHooksFlag) {
       console.log(`  ${DIM}--no-hooks — skipping hooks merge into .claude/settings.local.json${RESET}`);
     } else {
-      const hookChanges = mergeManagedHooks(targetDir);
+      const hookChanges = mergeManagedHooks(targetDir, { transcriptArchive: transcriptArchiveFlag });
       updatedCount += hookChanges;
     }
 
@@ -1298,6 +1396,14 @@ async function main() {
         }],
       },
     };
+    // --transcript-archive (T-422, opt-in, default off): wire the transcript-archive
+    // sweep hook in at seed time. Fresh install has no existing hooks to merge, so
+    // this is added directly rather than via mergeManagedHooks().
+    if (transcriptArchiveFlag) {
+      settings.hooks.SessionStart.push({
+        hooks: [{ type: 'command', command: buildTranscriptArchiveHookCommand(targetDir) }],
+      });
+    }
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
     console.log(`  ${GREEN}✓${RESET} .claude/settings.local.json ${DIM}(hooks: SessionStart, PostCompact, PostToolUse [hardened: file-filter + debounce + auto-sync]; fallbackModel: opus)${RESET}`);
     artifactsCreated++;
@@ -1305,6 +1411,14 @@ async function main() {
     const gitignoreResult = ensureHookDebounceGitignoreEntry(targetDir);
     if (gitignoreResult !== 'exists') {
       console.log(`  ${GREEN}✓${RESET} .gitignore ${DIM}(.mavp-hook-ts debounce file ${gitignoreResult})${RESET}`);
+    }
+
+    if (transcriptArchiveFlag) {
+      console.log(`  ${GREEN}✓${RESET} .claude/settings.local.json ${DIM}(hooks.SessionStart: transcript-archive sweep hook — --transcript-archive)${RESET}`);
+      const transcriptGitignoreResult = ensureGitignoreEntry(targetDir, '.mavp/transcripts/');
+      if (transcriptGitignoreResult !== 'exists') {
+        console.log(`  ${GREEN}✓${RESET} .gitignore ${DIM}(.mavp/transcripts/ archive dir ${transcriptGitignoreResult})${RESET}`);
+      }
     }
   }
 

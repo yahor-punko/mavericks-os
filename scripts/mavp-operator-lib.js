@@ -106,6 +106,29 @@ function insertIntoActiveTasks(markdown, entry) {
 }
 
 /**
+ * Render a skeleton TASK_STATUS.md Active-tasks entry — the shape written by
+ * --new-task. Shared so any caller that needs to create a TASK_STATUS entry
+ * (interactive --new-task, or the sync-status auto-create path — T-419)
+ * produces byte-identical structure instead of hand-rolling it.
+ *
+ * @param {string} id - Task id, e.g. "T-123"
+ * @param {string} title - Task title
+ * @param {string} owner - Owner role, e.g. "developer"
+ * @param {string} verificationType - Verification type, e.g. "runtime"
+ * @param {string} [status='planned'] - Status to seed the entry with
+ * @returns {string} Rendered entry block (leading newline, trailing newline)
+ */
+function buildTaskStatusEntry(id, title, owner, verificationType, status = 'planned') {
+  return `\n### ${id} — ${title}
+- **Status:** ${status}
+- **Owner role:** ${owner}
+- **Verification type:** ${verificationType}
+- **Last verified by:** —
+- **Evidence:** —
+`;
+}
+
+/**
  * Update last_task_id in PROCESS_STATE.json to the highest registered ID.
  * Only updates if numericId is greater than the current last_task_id.
  *
@@ -1199,6 +1222,61 @@ function archiveActiveWaveInBacklog(backlogPath, waveNumber) {
   return { ok: true, archived: true, warning: null };
 }
 
+// Terminal statuses considered "archivable" — same set used by
+// parseActiveWaveMergedTitles / archiveMergedTasksFromActiveWave /
+// parseMidWaveArchivedTasks below.
+const ARCHIVABLE_TERMINAL_STATUSES = new Set(['merged', 'deployed_dev', 'deployed_prod']);
+
+/**
+ * T-420: heading text for the mid-wave archive destination BACKLOG.md
+ * section — distinct from the final `## Wave N — Archived` heading that
+ * archiveActiveWaveInBacklog() produces at wave close, so a mid-wave
+ * --archive-merged run never collides with the eventual wave-close rename.
+ *
+ * @param {number|string} waveNumber
+ * @returns {string}
+ */
+function midWaveArchivedHeading(waveNumber) {
+  return `## Wave ${waveNumber} — Archived (mid-wave)`;
+}
+
+/**
+ * Split a slice of BACKLOG.md lines (already scoped to one section's body)
+ * into a leading preamble (any lines before the first `### T-NNN` heading)
+ * and an array of task blocks, each carrying its raw lines plus parsed
+ * id/title/status.
+ *
+ * @param {string[]} sectionLines
+ * @returns {{ preamble: string[], blocks: Array<{ lines: string[], id: string|null, title: string|null, status: string|null }> }}
+ */
+function extractTaskBlocksFromLines(sectionLines) {
+  const blockStartIdxs = [];
+  for (let i = 0; i < sectionLines.length; i++) {
+    if (/^###\s+T-\d+/.test(sectionLines[i])) blockStartIdxs.push(i);
+  }
+
+  const preamble = blockStartIdxs.length ? sectionLines.slice(0, blockStartIdxs[0]) : sectionLines.slice();
+
+  const blocks = [];
+  for (let k = 0; k < blockStartIdxs.length; k++) {
+    const s = blockStartIdxs[k];
+    const e = blockStartIdxs[k + 1] !== undefined ? blockStartIdxs[k + 1] : sectionLines.length;
+    const blockLines = sectionLines.slice(s, e);
+    const text = blockLines.join('\n');
+    const idMatch = text.match(/^###\s+(T-\d+)/);
+    const titleMatch = text.match(/^###\s+T-\d+\s+—\s+(.+)$/m);
+    const statusMatch = text.match(/^-\s+\*\*Status:\*\*\s+(.+)$/m);
+    blocks.push({
+      lines: blockLines,
+      id: idMatch ? idMatch[1] : null,
+      title: titleMatch ? titleMatch[1].trim() : null,
+      status: statusMatch ? statusMatch[1].trim() : null,
+    });
+  }
+
+  return { preamble, blocks };
+}
+
 /**
  * T-361: parse the `## Active Wave` section of BACKLOG.md and return the
  * titles of tasks whose Status has reached a merged/deployed terminal state.
@@ -1209,35 +1287,196 @@ function archiveActiveWaveInBacklog(backlogPath, waveNumber) {
  * the wave being closed instead of concatenating every prior wave's titles.
  * Must run before `archiveActiveWaveInBacklog` renames the heading away.
  *
+ * T-420: when `waveNumber` is provided, the result additionally includes
+ * titles from that wave's mid-wave archive section (`## Wave <waveNumber> —
+ * Archived (mid-wave)`, written by `--archive-merged`) — so tasks archived
+ * out of the Active Wave section mid-wave are not lost from the wave_summary
+ * once the wave finally closes. Omitting `waveNumber` preserves the exact
+ * pre-T-420 behavior (Active Wave section only).
+ *
  * @param {string} backlogMarkdown - full contents of BACKLOG.md
- * @returns {string[]} titles of merged/deployed tasks in the Active Wave section, in document order
+ * @param {number|string} [waveNumber] - current open wave number; when given, also unions
+ *   titles from that wave's mid-wave archive section
+ * @returns {string[]} titles of merged/deployed tasks in the Active Wave section (and,
+ *   when waveNumber given, its mid-wave archive section), in document order
  */
-function parseActiveWaveMergedTitles(backlogMarkdown) {
+function parseActiveWaveMergedTitles(backlogMarkdown, waveNumber) {
   const lines = backlogMarkdown.split(/\r?\n/);
   const start = lines.findIndex((l) => /^##\s+Active Wave/i.test(l));
-  if (start === -1) return [];
+
+  let titles = [];
+  if (start !== -1) {
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i++) {
+      if (/^##\s+/.test(lines[i])) { end = i; break; }
+    }
+
+    const section = lines.slice(start + 1, end).join('\n');
+    const blocks = section
+      .split(/\n(?=###\s+T-\d+)/)
+      .map((b) => b.trim())
+      .filter((b) => /^###\s+T-\d+/.test(b));
+
+    for (const block of blocks) {
+      const headingMatch = block.match(/^###\s+(T-\d+)\s+—\s+(.+)$/m);
+      const statusMatch = block.match(/^-\s+\*\*Status:\*\*\s+(.+)$/m);
+      if (headingMatch && statusMatch && ARCHIVABLE_TERMINAL_STATUSES.has(statusMatch[1].trim())) {
+        titles.push(headingMatch[2]?.trim() || headingMatch[1]);
+      }
+    }
+  }
+
+  if (waveNumber === undefined || waveNumber === null) return titles;
+
+  const archivedTitles = parseMidWaveArchivedTasks(backlogMarkdown, waveNumber)
+    .filter((t) => t.status && ARCHIVABLE_TERMINAL_STATUSES.has(t.status))
+    .map((t) => t.title);
+
+  return [...archivedTitles, ...titles];
+}
+
+/**
+ * T-420: parse the mid-wave archive section (`## Wave <waveNumber> —
+ * Archived (mid-wave)`) written by `--archive-merged`, returning the task
+ * blocks found there. Returns `[]` when the heading does not exist (the
+ * common case — most waves never run --archive-merged).
+ *
+ * @param {string} backlogMarkdown - full contents of BACKLOG.md
+ * @param {number|string} waveNumber
+ * @returns {Array<{ id: string, title: string, status: string|null }>}
+ */
+function parseMidWaveArchivedTasks(backlogMarkdown, waveNumber) {
+  const lines = backlogMarkdown.split(/\r?\n/);
+  const heading = midWaveArchivedHeading(waveNumber);
+  const idx = lines.findIndex((l) => l.trim() === heading);
+  if (idx === -1) return [];
 
   let end = lines.length;
-  for (let i = start + 1; i < lines.length; i++) {
+  for (let i = idx + 1; i < lines.length; i++) {
     if (/^##\s+/.test(lines[i])) { end = i; break; }
   }
 
-  const section = lines.slice(start + 1, end).join('\n');
-  const blocks = section
-    .split(/\n(?=###\s+T-\d+)/)
-    .map((b) => b.trim())
-    .filter((b) => /^###\s+T-\d+/.test(b));
+  const { blocks } = extractTaskBlocksFromLines(lines.slice(idx + 1, end));
+  return blocks
+    .filter((b) => b.id)
+    .map((b) => ({ id: b.id, title: b.title || b.id, status: b.status }));
+}
 
-  const terminalStatuses = new Set(['merged', 'deployed_dev', 'deployed_prod']);
-  const titles = [];
-  for (const block of blocks) {
-    const headingMatch = block.match(/^###\s+(T-\d+)\s+—\s+(.+)$/m);
-    const statusMatch = block.match(/^-\s+\*\*Status:\*\*\s+(.+)$/m);
-    if (headingMatch && statusMatch && terminalStatuses.has(statusMatch[1].trim())) {
-      titles.push(headingMatch[2]?.trim() || headingMatch[1]);
-    }
+/**
+ * T-420: move `merged`/`deployed_dev`/`deployed_prod` task blocks out of
+ * BACKLOG.md's `## Active Wave` section into that wave's mid-wave archive
+ * section (`## Wave <waveNumber> — Archived (mid-wave)`, created on demand,
+ * appended to on repeat runs), leaving all other (in-flight) task blocks
+ * untouched in place under `## Active Wave`.
+ *
+ * Mirrors archiveActiveWaveInBacklog()'s "exactly one Active Wave heading"
+ * precondition and warning shape, but — unlike that function — does NOT
+ * rename the Active Wave heading and does NOT require the wave to be
+ * complete; it is designed to run mid-wave, any number of times.
+ *
+ * @param {string} backlogPath - Absolute path to BACKLOG.md
+ * @param {number|string} waveNumber - the currently open wave number
+ * @returns {{ ok: boolean, archivedIds: string[], archivedTitles: string[], remainingIds: string[], warning: string|null }}
+ */
+function archiveMergedTasksFromActiveWave(backlogPath, waveNumber) {
+  const content = fs.readFileSync(backlogPath, 'utf8');
+  const lines = content.split(/\r?\n/);
+
+  const activeWaveLineIdxs = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (/^##\s+Active Wave/i.test(lines[i])) activeWaveLineIdxs.push(i);
   }
-  return titles;
+
+  if (activeWaveLineIdxs.length === 0) {
+    return {
+      ok: true,
+      archivedIds: [],
+      archivedTitles: [],
+      remainingIds: [],
+      warning: 'No ## Active Wave heading found in BACKLOG.md — nothing to archive.',
+    };
+  }
+
+  if (activeWaveLineIdxs.length > 1) {
+    const warning =
+      `Multiple ## Active Wave headings detected in BACKLOG.md at line(s): ${activeWaveLineIdxs.map((i) => i + 1).join(', ')}.\n` +
+      'Repair required: manually archive older Active Wave sections before running --archive-merged.';
+    return { ok: false, archivedIds: [], archivedTitles: [], remainingIds: [], warning };
+  }
+
+  const activeWaveIdx = activeWaveLineIdxs[0];
+  let sectionEnd = lines.length;
+  for (let i = activeWaveIdx + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) { sectionEnd = i; break; }
+  }
+
+  const sectionLines = lines.slice(activeWaveIdx + 1, sectionEnd);
+  const { preamble, blocks } = extractTaskBlocksFromLines(sectionLines);
+
+  const archivedBlocks = blocks.filter((b) => b.status && ARCHIVABLE_TERMINAL_STATUSES.has(b.status));
+  const remainingBlocks = blocks.filter((b) => !(b.status && ARCHIVABLE_TERMINAL_STATUSES.has(b.status)));
+
+  if (archivedBlocks.length === 0) {
+    return {
+      ok: true,
+      archivedIds: [],
+      archivedTitles: [],
+      remainingIds: blocks.map((b) => b.id).filter(Boolean),
+      warning: null,
+    };
+  }
+
+  const newSectionLines = [...preamble, ...remainingBlocks.flatMap((b) => b.lines)];
+
+  let updated = [
+    ...lines.slice(0, activeWaveIdx + 1),
+    ...newSectionLines,
+    ...lines.slice(sectionEnd),
+  ];
+
+  // Position right after the (now shrunk) Active Wave section in `updated`.
+  const newSectionEnd = activeWaveIdx + 1 + newSectionLines.length;
+
+  const heading = midWaveArchivedHeading(waveNumber);
+  const existingHeadingIdx = updated.findIndex((l) => l.trim() === heading);
+  const archivedLines = archivedBlocks.flatMap((b) => b.lines);
+
+  if (existingHeadingIdx !== -1) {
+    // Append to the existing mid-wave archive section (a prior --archive-merged
+    // run already created it for this wave).
+    let archEnd = updated.length;
+    for (let i = existingHeadingIdx + 1; i < updated.length; i++) {
+      if (/^##\s+/.test(updated[i])) { archEnd = i; break; }
+    }
+    let insertAt = archEnd;
+    while (insertAt > existingHeadingIdx + 1 && updated[insertAt - 1].trim() === '') insertAt--;
+    updated = [
+      ...updated.slice(0, insertAt),
+      '',
+      ...archivedLines,
+      ...updated.slice(insertAt),
+    ];
+  } else {
+    // Create a fresh mid-wave archive section right after the Active Wave section.
+    updated = [
+      ...updated.slice(0, newSectionEnd),
+      heading,
+      '',
+      ...archivedLines,
+      '',
+      ...updated.slice(newSectionEnd),
+    ];
+  }
+
+  fs.writeFileSync(backlogPath, updated.join('\n'), 'utf8');
+
+  return {
+    ok: true,
+    archivedIds: archivedBlocks.map((b) => b.id).filter(Boolean),
+    archivedTitles: archivedBlocks.map((b) => b.title).filter(Boolean),
+    remainingIds: remainingBlocks.map((b) => b.id).filter(Boolean),
+    warning: null,
+  };
 }
 
 /**
@@ -2590,9 +2829,11 @@ module.exports = {
   ackRecheck,
   addDays,
   archiveActiveWaveInBacklog,
+  archiveMergedTasksFromActiveWave,
   armRecheck,
   buildContextBundle,
   buildDeployQueue,
+  buildTaskStatusEntry,
   classifyNextAction,
   clip,
   collectOperatorData,
@@ -2613,6 +2854,7 @@ module.exports = {
   parseAllTaskBlocks,
   parseBlockedBy,
   parseIntervalDays,
+  parseMidWaveArchivedTasks,
   parseModuleRegistry,
   parseRepoMap,
   parseTasksWithRepo,

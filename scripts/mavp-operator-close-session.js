@@ -46,7 +46,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, classifyNextAction, parseActiveWaveMergedTitles, readPermissionMode, readPersistedPermissionMode } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { generateProcessStateMd, archiveActiveWaveInBacklog, classifyNextAction, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
@@ -808,7 +808,10 @@ async function runNonInteractive(args) {
     // closed right now) — not TASK_STATUS.md's `## Recently completed tasks` section, which
     // accumulates every wave back to Wave 1 and would make the summary grow without bound.
     const backlogContentForSummary = fs.existsSync(BACKLOG_MD) ? readUtf8(BACKLOG_MD) : '';
-    const mergedTitles = parseActiveWaveMergedTitles(backlogContentForSummary);
+    // T-420: pass sessionWave so titles archived mid-wave via --archive-merged
+    // (moved out of Active Wave into "## Wave <N> — Archived (mid-wave)")
+    // are still included in the wave-complete summary.
+    const mergedTitles = parseActiveWaveMergedTitles(backlogContentForSummary, sessionWave);
     effectiveSummary = buildAutoSummary(sessionWave, mergedTitles);
   }
 
@@ -878,6 +881,17 @@ async function runNonInteractive(args) {
   const sessionCompletedIds = [...sessionMergedIds];
   for (const id of advancedIds) {
     if (!sessionCompletedIds.includes(id)) sessionCompletedIds.push(id);
+  }
+
+  // T-420: union in tasks archived mid-wave via --archive-merged (moved out
+  // of TASK_STATUS.md's "## Active tasks" already, so they no longer appear
+  // in `activeTasks` above) so their evidence/repo still surface in the
+  // results table. Scoped to the currently open wave number — the mid-wave
+  // archive heading for a wave only exists while that wave is open.
+  const backlogContentForArchiveUnion = fs.existsSync(BACKLOG_MD) ? readUtf8(BACKLOG_MD) : '';
+  const midWaveArchivedTasks = parseMidWaveArchivedTasks(backlogContentForArchiveUnion, sessionWave);
+  for (const t of midWaveArchivedTasks) {
+    if (t.id && !sessionCompletedIds.includes(t.id)) sessionCompletedIds.push(t.id);
   }
 
   // Read deploy_contours for deploy status column
@@ -1061,7 +1075,9 @@ async function runInteractive() {
   let autoWaveSummary;
   if (waveComplete) {
     const backlogContentForSummary = fs.existsSync(BACKLOG_MD) ? readUtf8(BACKLOG_MD) : '';
-    const mergedTitles = parseActiveWaveMergedTitles(backlogContentForSummary);
+    // T-420: pass sessionWave so titles archived mid-wave via --archive-merged
+    // are still included in the wave-complete summary.
+    const mergedTitles = parseActiveWaveMergedTitles(backlogContentForSummary, sessionWave);
     autoWaveSummary = buildAutoSummary(sessionWave, mergedTitles);
   }
 
@@ -1139,6 +1155,14 @@ async function runInteractive() {
   const sessionCompletedIds = [...sessionMergedIds];
   for (const id of advancedIds) {
     if (!sessionCompletedIds.includes(id)) sessionCompletedIds.push(id);
+  }
+
+  // T-420: union in tasks archived mid-wave via --archive-merged (see the
+  // matching comment in runNonInteractive above for the full rationale).
+  const backlogContentForArchiveUnion = fs.existsSync(BACKLOG_MD) ? readUtf8(BACKLOG_MD) : '';
+  const midWaveArchivedTasks = parseMidWaveArchivedTasks(backlogContentForArchiveUnion, sessionWave);
+  for (const t of midWaveArchivedTasks) {
+    if (t.id && !sessionCompletedIds.includes(t.id)) sessionCompletedIds.push(t.id);
   }
 
   // Read deploy_contours for deploy status column

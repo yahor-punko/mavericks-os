@@ -34,6 +34,9 @@ if [[ "${1-}" == "--help" ]]; then
   echo "                   BACKLOG.md's Deferred Tasks <-> Active Wave sections)"
   echo "                   Usage: --rescope-task T-NNN [--status <s>] [--owner <role>] [--title \"...\"]"
   echo "  --sync-status    Sync TASK_STATUS.md Status lines from BACKLOG.md Active Wave"
+  echo "  --archive-merged Mid-wave: move merged task blocks out of BACKLOG.md's Active Wave /"
+  echo "                   TASK_STATUS.md's Active tasks into the wave-close archive destinations,"
+  echo "                   without closing the wave; leaves in-flight tasks untouched"
   echo "  --arm-recheck T-NNN --due YYYY-MM-DD [--interval 8w] [--note \"...\"]"
   echo "                   Register a time-based recheck entry in PROCESS_STATE.json rechecks[]"
   echo "                   Use --interval to enable rearming (e.g. 8w, 2d); --note for context"
@@ -103,6 +106,9 @@ elif [[ "${1-}" == "--rescope-task" ]]; then
 elif [[ "${1-}" == "--sync-status" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-sync-status.js" "$@"
+elif [[ "${1-}" == "--archive-merged" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-archive-merged.js" "$@"
 elif [[ "${1-}" == "--reflect-skill" ]]; then
   ROLE="$2"
   shift 2

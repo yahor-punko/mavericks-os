@@ -19,3 +19,7 @@ HANDOFF.md
 
 # Task context prefetch bundles (regenerated at registration/update time, not committed)
 .mavp/context/
+
+# Session-transcript archive (opt-in, --transcript-archive) — privacy-sensitive
+# full session content, local-disk only, never git-tracked
+.mavp/transcripts/

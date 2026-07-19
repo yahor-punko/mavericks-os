@@ -188,6 +188,36 @@ This is the recommended, narrowest command: it touches only `.claude/settings.lo
 
 Running the broader `node scripts/mavp-install.js --update .` against the framework root is **also safe** (self-install detection makes `--update` skip the wrapper/`.claude/{agents,skills,rules}` sync when the target IS the mavericks framework's own root — see the installer's header comment and DR-003 in `docs/core/DECISIONS.md`), but it does more work than needed for hook activation alone; `--hooks-only` is the recommended command.
 
+## Transcript archive
+
+A DR's optional `Session:` field (see `docs/core/DECISIONS.md` — "Optional lineage fields") records the Claude Code session id a decision was deliberated in, so the deliberation can later be traced back to its full transcript. But Claude Code stores that transcript as a plain `.jsonl` file at `~/.claude/projects/<cwd-slug>/<session-id>.jsonl` (`<cwd-slug>` is the project's absolute path with every `/` replaced by `-`) and deletes it after `cleanupPeriodDays` — 30 days by default — so an unqualified session id is provenance that self-destructs almost exactly when someone goes looking for it.
+
+**`--transcript-archive` — opt-in, off by default.** Pass this flag to a fresh install, `--update`, or `--hooks-only` to activate a managed `SessionStart` hook that sweeps every transcript for the current project out of Claude's local storage into `<project>/.mavp/transcripts/<session-id>.jsonl` (`scripts/mavp-transcript-archive.js`) on every session start:
+
+```bash
+node scripts/mavp-install.js /path/to/your-project --transcript-archive        # fresh install
+node scripts/mavp-install.js --update /path/to/your-project --transcript-archive     # existing project
+node scripts/mavp-install.js --hooks-only /path/to/your-project --transcript-archive # narrow activation
+```
+
+Installing without the flag adds no such hook. Once activated, the entry is preserved and its command refreshed by every later `--update` — with or without the flag — so a project that opted in is never silently opted back out by a plain sync.
+
+**Privacy — opt-in, gitignored, local-disk only.** A session transcript is the full raw conversation, not just the deliberation that ended up in the DR. The installer adds `.mavp/transcripts/` to the target project's `.gitignore` the moment this hook is activated, so archived transcripts are never git-tracked and never pushed anywhere. This is why the mechanism is opt-in rather than default-on: enabling it is a deliberate choice to retain that content locally for provenance purposes.
+
+**Crash coverage.** Because the sweep runs on every `SessionStart` (not just at the end of a session), it also picks up transcripts from prior sessions that crashed, were force-quit, or were left open across a compaction — anything still sitting in Claude's storage gets archived before the ~30-day cleanup can remove it, not just the session that happens to be ending cleanly.
+
+**Retention — opt-in, default unlimited.** By default the archive still grows unbounded — each sweep only ever adds files, it never deletes an archived transcript, even one whose source has since been cleaned up by Claude Code. Set the `MAVP_TRANSCRIPT_RETENTION_DAYS` environment variable to a positive number of days to bound it: every sweep run then also deletes any archived `.jsonl` file whose mtime is older than that many days.
+
+```bash
+export MAVP_TRANSCRIPT_RETENTION_DAYS=90   # prune archived transcripts older than 90 days
+```
+
+Leaving the variable unset (or setting it to `0`, a negative number, or a non-numeric value) keeps the default unlimited behavior — nothing is ever deleted. Pruning only ever touches archived copies under `<project>/.mavp/transcripts/`; it never touches the live source transcripts in Claude's own storage directory (`~/.claude/projects/<cwd-slug>/`).
+
+**Disabling.** Remove the managed `SessionStart` entry from `.claude/settings.local.json` by hand — it's identifiable by the `: mavp-transcript-archive-hook;` sentinel prefix or by the `mavp-transcript-archive.js` filename in its command. A later `--update` run without `--transcript-archive` will not re-add it.
+
+**Don't want the hook at all? Use Claude Code's own setting instead.** If you'd rather not add any mavericks-managed hook, Claude Code's `cleanupPeriodDays` user setting controls how long it keeps local transcripts before deleting them — raising it (or disabling cleanup) extends the natural window a `Session:` id stays resolvable, with no extra moving parts, at the cost of transcripts piling up in Claude's own storage location rather than the project.
+
 ## Deploy CI: skipping framework-only commits
 
 When the framework is synced into an adopting project, the commit touches only framework-owned artifacts — no deployable application code. If your CI pipeline deploys on branch push, these framework-sync commits will trigger the full pipeline (e.g. terraform plan/apply) unnecessarily.

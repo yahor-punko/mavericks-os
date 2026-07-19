@@ -7,6 +7,42 @@ docs in [`docs/core/`](docs/core/).
 
 ## [Unreleased]
 
+## [0.33.0] — 2026-07-19
+
+### Added
+
+- `--archive-merged` operator command — archive merged task blocks out of
+  `BACKLOG.md`'s Active Wave and `TASK_STATUS.md`'s Active tasks mid-wave,
+  without waiting for the end-of-session close-out.
+- Opt-in session-transcript archive — a `--transcript-archive` installer
+  flag (works with fresh install, `--update`, and `--hooks-only`) activates
+  a managed `SessionStart` hook that sweeps Claude Code session transcripts
+  into a gitignored `.mavp/transcripts/<session-id>.jsonl` before Claude
+  Code's ~30-day cleanup removes them. Off by default, local-disk only.
+- Retention pruning for the transcript archive — set the
+  `MAVP_TRANSCRIPT_RETENTION_DAYS` environment variable to bound the
+  archive's growth; the default remains unlimited.
+- Decision records gain an optional `Session:` lineage field — an opaque
+  Claude Code session id pointing at the deliberation behind a record. The
+  record body stays self-sufficient; the pointer is explicitly never
+  load-bearing.
+
+### Changed
+
+- The status-sync hook now auto-creates a missing `TASK_STATUS.md` entry
+  for any new `BACKLOG.md` Active Wave task, completing the
+  BACKLOG→TASK_STATUS mirror automatically (deprecated and superseded
+  tasks are skipped).
+- Task registration in the state artifacts is documented as a
+  Main-Agent-only responsibility, never delegated to sub-agent briefs.
+
+### Fixed
+
+- The status-sync PostToolUse hook is silent on no-ops — it only emits
+  output for real errors and actual mutations, restoring the
+  "silent means success" hook contract and eliminating alarm fatigue from
+  routine no-op runs.
+
 ## [0.32.2] — 2026-07-15
 
 ### Added
