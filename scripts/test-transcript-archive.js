@@ -102,15 +102,33 @@ try {
   console.log('Assertion 2 passed: sweep exited 0 (execFileSync would have thrown otherwise)');
 
   // ============================================================
-  // Assertion 3: second identical run is idempotent — copies nothing
+  // Assertion 3 (T-429): second identical run is idempotent — copies
+  // nothing, even when the archived copy's mtime lost sub-second
+  // precision on the copy round-trip. On real filesystems, copy() +
+  // utimesSync(dest, src.mtime) can truncate dest.mtime to a coarser
+  // granularity than the source's in-memory mtimeMs (e.g. whole-second
+  // precision on some CI runners), which used to make a strict
+  // `src.mtimeMs > dest.mtimeMs` comparison see the source as "newer"
+  // forever and re-copy an unchanged file. This block simulates that
+  // precision loss explicitly and deterministically — regardless of
+  // what precision the HOST filesystem actually supports — so this
+  // test catches the regression on ANY filesystem, not only ones that
+  // happen to lose precision themselves (it previously passed on local
+  // APFS despite the underlying bug being CI-red; see T-429).
   // ============================================================
+  const aDestPath = path.join(destDir, 'A.jsonl');
+  const aMtimeWithFraction = 1704067200.987654; // source mtime, sub-second precision
+  const aMtimeFloored = Math.floor(aMtimeWithFraction); // archived copy: precision lost
+  fs.utimesSync(aPath, aMtimeWithFraction, aMtimeWithFraction);
+  fs.utimesSync(aDestPath, aMtimeFloored, aMtimeFloored);
+
   const secondRunStdout = runSweep(sourceDir, destDir);
   assert.strictEqual(
     secondRunStdout.trim(),
     '',
-    `FAIL: second identical sweep run should copy nothing (idempotent), got: ${JSON.stringify(secondRunStdout)}`
+    `FAIL: second identical sweep run should copy nothing (idempotent, tolerant of mtime-precision loss), got: ${JSON.stringify(secondRunStdout)}`
   );
-  console.log('Assertion 3 passed — second identical run output: "" (nothing copied, idempotent)');
+  console.log('Assertion 3 passed — second identical run output: "" (nothing copied, idempotent even with simulated mtime-precision loss)');
 
   // ============================================================
   // Assertion 4: an archive-only transcript (no matching source) survives

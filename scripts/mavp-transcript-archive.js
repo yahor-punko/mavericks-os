@@ -67,6 +67,19 @@ const os = require('node:os');
 const path = require('node:path');
 
 /**
+ * Tolerance (in ms) absorbing filesystem mtime-precision loss on the copy
+ * round-trip: copy() -> utimesSync(dest, src.mtime) can truncate dest's mtime
+ * on coarser-granularity filesystems (e.g. whole-second precision on some CI
+ * runners), leaving dest.mtime slightly BELOW the original src.mtimeMs even
+ * though nothing actually changed. Without this tolerance, the very next
+ * sweep would see `src.mtimeMs > dest.mtimeMs` and re-copy an unchanged file
+ * forever, breaking idempotency (T-429). 1000ms comfortably covers up to
+ * whole-second granularity loss while still detecting genuine changes (which
+ * in practice advance mtime by far more than a second).
+ */
+const TOLERANCE_MS = 1000;
+
+/**
  * Claude Code's project-directory slug rule: the absolute cwd with every
  * "/" replaced by "-" (e.g. "/abs/path/project" -> "-abs-path-project").
  */
@@ -216,7 +229,17 @@ function sweep(sourceDir, destDir) {
       let shouldCopy = true;
       if (fs.existsSync(destPath)) {
         const destStat = fs.statSync(destPath);
-        shouldCopy = srcStat.mtimeMs > destStat.mtimeMs;
+        // A strict `srcStat.mtimeMs > destStat.mtimeMs` comparison is not
+        // idempotent: after copying, dest mtime is set to src mtime via
+        // utimesSync, but utimesSync stores the value at the DESTINATION
+        // filesystem's mtime granularity (some filesystems/CI runners only
+        // keep whole-second or coarser precision). That round-trip can
+        // truncate dest.mtime slightly below the original srcStat.mtimeMs,
+        // making the very next sweep see src > dest again and re-copy an
+        // unchanged file. TOLERANCE_MS absorbs up to ~1s of that precision
+        // loss: only treat the source as "genuinely newer" when it exceeds
+        // the archived copy's mtime by more than the tolerance.
+        shouldCopy = srcStat.mtimeMs - destStat.mtimeMs > TOLERANCE_MS;
       }
       if (!shouldCopy) {
         result.skipped.push(name);
