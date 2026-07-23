@@ -242,6 +242,16 @@ Status, owner role, and verification type must be identical in both files at all
 - `Evidence` — commit hash, branch, test output, any verification artifact
 - `Notes` — context notes, fix history, reviewer observations
 
+### Avoiding the mirror-edit race
+
+The PostToolUse hook runs `scripts/mavp-operator-sync-status.js` after every `BACKLOG.md` edit, and that script rewrites `TASK_STATUS.md` on disk (status field, heading title, and skeleton-entry creation — see the **Mirror rule** convention in the root `CLAUDE.md` for the exact scope). If an agent already holds an in-memory read of `TASK_STATUS.md` from before that rewrite, its next edit to that file can fail with a "modified since read" error, because the file changed underneath it.
+
+Workflow to avoid this:
+
+1. **Edit `BACKLOG.md` first.** Let the PostToolUse hook's auto-sync run and settle before touching `TASK_STATUS.md`.
+2. **Re-read `TASK_STATUS.md`** immediately before editing any of its non-status fields (`Notes`, `Evidence`, `Last verified by`) — never reuse a read taken before the BACKLOG edit.
+3. **Prefer the atomic ritual commands** — `--set-status`, `--update-status`, `--rename-task` — over hand-editing both files. These commands read-modify-write both artifacts in a single pass and are immune to the race by construction.
+
 ### Option (a) — append-only evidence journal — is out of scope
 
 Collapsing TASK_STATUS.md into a pure evidence journal (moving all source-of-truth to BACKLOG.md) would require changing the mirror-rule invariant, the validator, and all operator surfaces. This is a separate architectural decision and is explicitly excluded from the current design.

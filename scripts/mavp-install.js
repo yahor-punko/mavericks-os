@@ -350,9 +350,20 @@ fi
  * the bootstrapped project's — since here the scripts are referenced
  * out-of-tree (direct-reference model), unlike mavericks-on-itself where
  * framework and target happen to be the same repo.
+ *
+ * Self-preference (T-430): before falling back to the MAVERICKS_HOME >
+ * ~/.mavericks > ~/Documents/mavericks chain, the hook first checks whether
+ * MAVROOT itself (the target project) has a local scripts/mavp-validator.js —
+ * i.e. the target project IS a full mavericks checkout (self-hosting), not a
+ * thin direct-reference adopter. When it does, MAVROOT/scripts is used
+ * directly, so a repo like mavericks-on-itself always runs its OWN current
+ * code instead of a possibly-stale ~/.mavericks public-mirror checkout.
+ * Adopter/direct-reference projects have no local mavp-validator.js, so this
+ * check is false there and resolution falls through to the existing chain
+ * unchanged.
  */
 function buildPostToolUseHookCommand(targetDir) {
-  return `INPUT=$(cat); FP=$(node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write((d.tool_input&&d.tool_input.file_path)||'')}catch(e){}" <<< "$INPUT"); case "$FP" in *BACKLOG.md|*TASK_STATUS.md) ;; *) exit 0 ;; esac; MAVERICKS="\${MAVERICKS_HOME:-$( [ -d "$HOME/.mavericks" ] && printf %s "$HOME/.mavericks" || printf %s "$HOME/Documents/mavericks" )}/scripts"; MAVROOT="${targetDir}"; export MAVERICKS_PROJECT_ROOT="$MAVROOT"; TS=$(node -e "process.stdout.write(String(Date.now()))"); echo "$TS" > "$MAVROOT/.mavp-hook-ts"; sleep 1.5; CURRENT_TS=$(cat "$MAVROOT/.mavp-hook-ts" 2>/dev/null); if [ "$CURRENT_TS" != "$TS" ]; then exit 0; fi; rm -f "$MAVROOT/.mavp-hook-ts"; cd "$MAVROOT"; case "$FP" in *BACKLOG.md) node "$MAVERICKS/mavp-operator-sync-status.js" 1>&2 ;; esac; VOUT=$(node "$MAVERICKS/mavp-validator.js" 2>&1); VCODE=$?; [ $VCODE -ne 0 ] && printf '%s\\n' "$VOUT" >&2 || true; exit 0`;
+  return `INPUT=$(cat); FP=$(node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write((d.tool_input&&d.tool_input.file_path)||'')}catch(e){}" <<< "$INPUT"); case "$FP" in *BACKLOG.md|*TASK_STATUS.md) ;; *) exit 0 ;; esac; MAVROOT="${targetDir}"; if [ -f "$MAVROOT/scripts/mavp-validator.js" ]; then MAVERICKS="$MAVROOT/scripts"; else MAVERICKS="\${MAVERICKS_HOME:-$( [ -d "$HOME/.mavericks" ] && printf %s "$HOME/.mavericks" || printf %s "$HOME/Documents/mavericks" )}/scripts"; fi; export MAVERICKS_PROJECT_ROOT="$MAVROOT"; TS=$(node -e "process.stdout.write(String(Date.now()))"); echo "$TS" > "$MAVROOT/.mavp-hook-ts"; sleep 1.5; CURRENT_TS=$(cat "$MAVROOT/.mavp-hook-ts" 2>/dev/null); if [ "$CURRENT_TS" != "$TS" ]; then exit 0; fi; rm -f "$MAVROOT/.mavp-hook-ts"; cd "$MAVROOT"; case "$FP" in *BACKLOG.md) node "$MAVERICKS/mavp-operator-sync-status.js" 1>&2 ;; esac; VOUT=$(node "$MAVERICKS/mavp-validator.js" 2>&1); VCODE=$?; [ $VCODE -ne 0 ] && printf '%s\\n' "$VOUT" >&2 || true; exit 0`;
 }
 
 // Sentinel-prefixed identity token for the opt-in transcript-archive SessionStart
@@ -368,7 +379,8 @@ const TRANSCRIPT_ARCHIVE_IDENTITY_TOKEN = 'mavp-transcript-archive.js';
  * Build the managed SessionStart command that sweeps this project's Claude
  * Code transcripts into .mavp/transcripts/ (T-422). Resolves the mavericks
  * scripts dir the same way every other managed/lifecycle hook command does
- * (MAVERICKS_HOME env var > ~/.mavericks > ~/Documents/mavericks), `cd`s into
+ * (self-preference for a local scripts/mavp-validator.js first — T-430 — then
+ * MAVERICKS_HOME env var > ~/.mavericks > ~/Documents/mavericks), `cd`s into
  * the target project (mavp-transcript-archive.js derives both the source
  * transcript dir and the destination archive dir from its own cwd), and
  * always exits 0 — the sweep script itself never exits non-zero, but the
@@ -376,7 +388,7 @@ const TRANSCRIPT_ARCHIVE_IDENTITY_TOKEN = 'mavp-transcript-archive.js';
  * directory having been moved/deleted since bootstrap).
  */
 function buildTranscriptArchiveHookCommand(targetDir) {
-  return `${TRANSCRIPT_ARCHIVE_HOOK_SENTINEL} MAVERICKS="\${MAVERICKS_HOME:-$( [ -d "$HOME/.mavericks" ] && printf %s "$HOME/.mavericks" || printf %s "$HOME/Documents/mavericks" )}/scripts"; cd "${targetDir}" && node "$MAVERICKS/mavp-transcript-archive.js"; exit 0`;
+  return `${TRANSCRIPT_ARCHIVE_HOOK_SENTINEL} MAVROOT="${targetDir}"; if [ -f "$MAVROOT/scripts/mavp-validator.js" ]; then MAVERICKS="$MAVROOT/scripts"; else MAVERICKS="\${MAVERICKS_HOME:-$( [ -d "$HOME/.mavericks" ] && printf %s "$HOME/.mavericks" || printf %s "$HOME/Documents/mavericks" )}/scripts"; fi; cd "$MAVROOT" && node "$MAVERICKS/mavp-transcript-archive.js"; exit 0`;
 }
 
 /**
@@ -1488,7 +1500,18 @@ async function main() {
   }
 }
 
-main().catch(err => {
-  console.error(`${RED}install failed: ${err.message}${RESET}`);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch(err => {
+    console.error(`${RED}install failed: ${err.message}${RESET}`);
+    process.exitCode = 1;
+  });
+}
+
+// Additive-only exports (T-441): let other scripts (e.g.
+// mavp-operator-check-sync.js) reuse the pure hook-identity/composition
+// helpers without spawning a subprocess. Guarded by the require.main check
+// above — requiring this file never runs main() or touches the filesystem.
+module.exports = {
+  composePostToolUseHookCommand,
+  isManagedPostToolUseCommand,
+};

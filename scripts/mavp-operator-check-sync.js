@@ -22,6 +22,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const os = require('node:os');
 
+const { composePostToolUseHookCommand, isManagedPostToolUseCommand } = require('./mavp-install.js');
+
 const MAVERICKS_ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 
 // Files to compare between mavericks source and each project
@@ -118,6 +120,43 @@ function compareSyncTarget(target, mavRoot, projectRoot) {
 }
 
 /**
+ * Read MAVERICKS_VERSION from a mavericks root's scripts/mavp-version.js.
+ * Returns null if the file is missing, unreadable, or doesn't export the field.
+ */
+function readMaverticksVersion(root) {
+  try {
+    const versionFilePath = path.join(root, 'scripts', 'mavp-version.js');
+    if (!fs.existsSync(versionFilePath)) return null;
+    const resolved = require.resolve(versionFilePath);
+    delete require.cache[resolved];
+    const mod = require(resolved);
+    return mod && typeof mod.MAVERICKS_VERSION === 'string' ? mod.MAVERICKS_VERSION : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compare a ~/.mavericks checkout's version against the canonical repo's version.
+ * Pure/parameterized so it can be exercised against a fixture path in tests.
+ * Returns { homeVersion, canonicalVersion, homePath } when drifted, or null when
+ * versions match, the home checkout doesn't exist, or its version is unreadable.
+ */
+function checkHomeMavericksDrift(canonicalRoot, homeMavericksPath) {
+  if (!fs.existsSync(homeMavericksPath)) return null;
+
+  const homeVersion = readMaverticksVersion(homeMavericksPath);
+  if (!homeVersion) return null;
+
+  const canonicalVersion = readMaverticksVersion(canonicalRoot);
+  if (!canonicalVersion) return null;
+
+  if (homeVersion === canonicalVersion) return null;
+
+  return { homeVersion, canonicalVersion, homePath: homeMavericksPath };
+}
+
+/**
  * Determine if a directory looks like a bootstrapped mavericks project.
  * Heuristic: contains scripts/mavp-operator (the bash wrapper).
  */
@@ -203,6 +242,64 @@ function discoverProjects() {
   return [...new Set(found)];
 }
 
+/**
+ * Read and JSON-parse a project's .claude/settings.local.json.
+ * Returns null when the file is missing or malformed — callers treat that as
+ * "skip, no error", never as drift.
+ */
+function readSettingsLocal(projectPath) {
+  const settingsPath = path.join(projectPath, '.claude', 'settings.local.json');
+  if (!fs.existsSync(settingsPath)) return null;
+  try {
+    const raw = fs.readFileSync(settingsPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Detect a stale/naive managed PostToolUse hook (T-441) — the source of the
+ * false "blocking error" noise reported from the field. A naive/pre-hardening
+ * hook lacks the file-path filter, debounce, and unconditional advisory
+ * exit-0 that the current composePostToolUseHookCommand() produces.
+ *
+ * Identity: isManagedPostToolUseCommand() (imported from mavp-install.js) —
+ * the same check --update uses to find "the mavp hook" among a project's
+ * PostToolUse entries, however stale its body is.
+ *
+ * Returns:
+ *   null                          — no settings file, malformed JSON, or no
+ *                                    managed entry found. Skip silently, not
+ *                                    an error.
+ *   { stale: false }              — managed entry present and byte-identical
+ *                                    to the freshly composed command.
+ *   { stale: true, current, expected } — managed entry present but differs.
+ */
+function checkHookDrift(projectPath) {
+  const settingsLocal = readSettingsLocal(projectPath);
+  if (!settingsLocal) return null;
+
+  const postToolUse = settingsLocal.hooks && settingsLocal.hooks.PostToolUse;
+  if (!Array.isArray(postToolUse)) return null;
+
+  let managedCommand = null;
+  for (const entry of postToolUse) {
+    if (!entry || !Array.isArray(entry.hooks)) continue;
+    for (const h of entry.hooks) {
+      if (h && isManagedPostToolUseCommand(h.command)) {
+        managedCommand = h.command;
+      }
+    }
+  }
+  if (managedCommand === null) return null;
+
+  const expected = composePostToolUseHookCommand(projectPath);
+  if (managedCommand === expected) return { stale: false };
+  return { stale: true, current: managedCommand, expected };
+}
+
 function checkProject(projectPath) {
   const drifted = [];
   for (const target of SYNC_TARGETS) {
@@ -216,6 +313,15 @@ function checkProject(projectPath) {
 
 function main() {
   console.log(`\n${BOLD}MavP Check-Sync${RESET} ${DIM}comparing against ${MAVERICKS_ROOT}${RESET}\n`);
+
+  const homeMavericksPath = path.join(os.homedir(), '.mavericks');
+  const homeDrift = checkHomeMavericksDrift(MAVERICKS_ROOT, homeMavericksPath);
+  if (homeDrift) {
+    console.log(
+      `${YELLOW}⚠ ~/.mavericks is v${homeDrift.homeVersion} but canonical is v${homeDrift.canonicalVersion}${RESET}` +
+      ` ${DIM}(${homeDrift.homePath})${RESET} — run: ${BOLD}git -C ${homeDrift.homePath} pull${RESET}\n`
+    );
+  }
 
   const projects = discoverProjects();
 
@@ -243,6 +349,21 @@ function main() {
         console.log(`  ${YELLOW}${item.file}${RESET} ${DIM}(${item.reason})${RESET}`);
       }
     }
+
+    // Managed PostToolUse hook drift (T-441) — a naive/stale hook is the
+    // source of the false "blocking error" noise reported from the field.
+    // Skipped silently (no output) when there's no settings file or no
+    // managed entry — that's not drift, just "nothing to compare".
+    const hookDrift = checkHookDrift(projectPath);
+    if (hookDrift && hookDrift.stale) {
+      anyDrift = true;
+      console.log(
+        `  ${RED}✗ hook STALE${RESET} ${DIM}(managed PostToolUse hook differs from the current hardened composition)${RESET}` +
+        ` — run: ${BOLD}node scripts/mavp-install.js --update ${projectPath}${RESET}`
+      );
+    } else if (hookDrift && !hookDrift.stale) {
+      console.log(`  ${GREEN}✓ hook in sync${RESET}`);
+    }
   }
 
   console.log('');
@@ -254,4 +375,12 @@ function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  readMaverticksVersion,
+  checkHomeMavericksDrift,
+  checkHookDrift,
+};

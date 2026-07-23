@@ -30,6 +30,11 @@
 //      a BACKLOG.md edit produces validator output on stderr (exit 0 always,
 //      per the hook's own advisory-only contract), while a payload for an
 //      unrelated file path exits 0 with no output at all.
+//   7. (T-430) buildPostToolUseHookCommand() self-preference: a self-hosting
+//      checkout (own scripts/mavp-validator.js) resolves MAVERICKS to its own
+//      scripts/, never a stale MAVERICKS_HOME.
+//   8. (T-435) buildTranscriptArchiveHookCommand() self-preference: same
+//      proof as (7), but for the opt-in transcript-archive SessionStart hook.
 //
 // Plain node, no npm deps.
 
@@ -216,7 +221,127 @@ try {
   assert.strictEqual(unrelatedRun.stderr, '', 'FAIL: managed hook produced stderr for an unrelated file path');
   console.log('Assertion 6b passed: unrelated file path payload exits 0 silently, no output');
 
-  console.log('\nAll T-404 hook-merge assertions passed.');
+  // Note (T-430): assertion 6a/6b above already double as the "adopter fixture
+  // falls through to the existing chain unchanged" proof — `scratch` has a
+  // scripts/ dir with no mavp-validator.js in it, and the command still
+  // resolves via the MAVERICKS_HOME env var exactly as before self-preference
+  // was added.
+
+  // ============================================================
+  // Assertion 7 (T-430): self-preference — a target project that IS a full
+  // mavericks checkout (has its own scripts/mavp-validator.js) must resolve
+  // MAVERICKS to its own scripts/ dir, even when MAVERICKS_HOME points at a
+  // deliberately stale sibling installation. Uses stub validator scripts with
+  // distinct markers so we can tell which one actually ran.
+  // ============================================================
+  function seedStubMavericksScripts(dir, marker) {
+    fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'scripts', 'mavp-validator.js'),
+      `#!/usr/bin/env node\nprocess.stderr.write(${JSON.stringify(marker)} + '\\n');\nprocess.exit(1);\n`,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(dir, 'scripts', 'mavp-operator-sync-status.js'),
+      '#!/usr/bin/env node\n// no-op stub for T-430 hook-resolution test\n',
+      'utf8'
+    );
+  }
+
+  const selfHostScratch = makeScratchDir('mavp-hook-selfpref-');
+  cleanupDirs.push(selfHostScratch);
+  fs.mkdirSync(path.join(selfHostScratch, '.claude'), { recursive: true });
+  seedStubMavericksScripts(selfHostScratch, 'LOCAL_VALIDATOR_RAN');
+
+  runUpdate(selfHostScratch);
+  const selfHostSettings = readSettings(selfHostScratch);
+  const selfHostManagedEntry = findEntryByMatcher(selfHostSettings.hooks.PostToolUse, 'Edit|Write');
+  assert.ok(selfHostManagedEntry, 'FAIL: managed Edit|Write PostToolUse entry not found for self-host fixture');
+  const selfHostCmd = selfHostManagedEntry.hooks[0].command;
+
+  const staleHome = makeScratchDir('mavp-hook-stalehome-');
+  cleanupDirs.push(staleHome);
+  seedStubMavericksScripts(staleHome, 'STALE_VALIDATOR_RAN');
+
+  const selfPrefEnv = Object.assign({}, process.env, { MAVERICKS_HOME: staleHome });
+  const selfPrefPayload = JSON.stringify({ tool_input: { file_path: path.join(selfHostScratch, 'BACKLOG.md') } });
+  const selfPrefRun = spawnSync('bash', ['-c', selfHostCmd], {
+    input: selfPrefPayload,
+    encoding: 'utf8',
+    env: selfPrefEnv,
+    timeout: 15000,
+  });
+  assert.strictEqual(selfPrefRun.status, 0, 'FAIL: managed hook did not exit 0 with self-preference active (must always exit 0)');
+  assert.ok(
+    selfPrefRun.stderr.includes('LOCAL_VALIDATOR_RAN'),
+    'FAIL: self-hosting fixture did not run its own local scripts/mavp-validator.js'
+  );
+  assert.ok(
+    !selfPrefRun.stderr.includes('STALE_VALIDATOR_RAN'),
+    'FAIL: self-hosting fixture ran the stale MAVERICKS_HOME validator instead of preferring its own local scripts/'
+  );
+  console.log('Assertion 7 passed: self-hosting checkout resolves MAVERICKS to its own scripts/, ignoring a deliberately stale MAVERICKS_HOME');
+
+  // ============================================================
+  // Assertion 8 (T-435): self-preference for buildTranscriptArchiveHookCommand
+  // — mirrors Assertion 7, but for the transcript-archive SessionStart sweep
+  // hook rather than the PostToolUse validator hook. The transcript-archive
+  // hook is opt-in (--transcript-archive), so this reuses the same
+  // selfHostScratch/staleHome fixtures from Assertion 7 (each already carrying
+  // a scripts/mavp-validator.js with a distinct marker) and adds a stub
+  // scripts/mavp-transcript-archive.js to each, with its own distinct marker,
+  // so we can observe which one the composed command actually invokes.
+  // ============================================================
+  function seedStubTranscriptArchiveScript(dir, marker) {
+    fs.writeFileSync(
+      path.join(dir, 'scripts', 'mavp-transcript-archive.js'),
+      `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(marker)} + '\\n');\n`,
+      'utf8'
+    );
+  }
+
+  seedStubTranscriptArchiveScript(selfHostScratch, 'LOCAL_ARCHIVE_RAN');
+  seedStubTranscriptArchiveScript(staleHome, 'STALE_ARCHIVE_RAN');
+
+  runUpdate(selfHostScratch, ['--transcript-archive']);
+  const selfHostSettingsWithArchive = readSettings(selfHostScratch);
+  const sessionStartEntries = selfHostSettingsWithArchive.hooks.SessionStart || [];
+  let transcriptArchiveCmd = null;
+  for (const entry of sessionStartEntries) {
+    if (!entry || !Array.isArray(entry.hooks)) continue;
+    for (const h of entry.hooks) {
+      if (h && typeof h.command === 'string' && h.command.includes('mavp-transcript-archive.js')) {
+        transcriptArchiveCmd = h.command;
+      }
+    }
+  }
+  assert.ok(
+    transcriptArchiveCmd,
+    'FAIL: transcript-archive SessionStart hook command not found after --update --transcript-archive'
+  );
+
+  const archivePrefEnv = Object.assign({}, process.env, { MAVERICKS_HOME: staleHome });
+  const archivePrefRun = spawnSync('bash', ['-c', transcriptArchiveCmd], {
+    encoding: 'utf8',
+    env: archivePrefEnv,
+    timeout: 15000,
+  });
+  assert.strictEqual(
+    archivePrefRun.status,
+    0,
+    'FAIL: transcript-archive hook did not exit 0 with self-preference active (must always exit 0)'
+  );
+  assert.ok(
+    archivePrefRun.stdout.includes('LOCAL_ARCHIVE_RAN'),
+    'FAIL: self-hosting fixture did not run its own local scripts/mavp-transcript-archive.js'
+  );
+  assert.ok(
+    !archivePrefRun.stdout.includes('STALE_ARCHIVE_RAN'),
+    'FAIL: self-hosting fixture ran the stale MAVERICKS_HOME transcript-archive script instead of preferring its own local scripts/'
+  );
+  console.log('Assertion 8 passed: transcript-archive hook resolves MAVERICKS to its own scripts/, ignoring a deliberately stale MAVERICKS_HOME');
+
+  console.log('\nAll T-404/T-430/T-435 hook-merge assertions passed.');
 } finally {
   for (const dir of cleanupDirs) {
     fs.rmSync(dir, { recursive: true, force: true });

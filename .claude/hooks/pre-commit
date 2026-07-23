@@ -8,16 +8,25 @@
 
 set -euo pipefail
 
-# Locate the validator: prefer MAVERICKS_SCRIPTS env var, then MAVERICKS_HOME,
-# then ~/.mavericks (canonical), then ~/Documents/mavericks (legacy).
-if [ -n "${MAVERICKS_HOME:-}" ]; then
+# Locate the validator: prefer THIS repo's own scripts/ when it contains
+# mavp-validator.js (T-430 — a self-hosting mavericks checkout must run its
+# own current code, not a possibly-stale sibling installation), then
+# MAVERICKS_SCRIPTS env var, then MAVERICKS_HOME, then ~/.mavericks
+# (canonical), then ~/Documents/mavericks (legacy). Adopter/direct-reference
+# repos have no local scripts/mavp-validator.js, so they fall through to the
+# existing chain unchanged.
+if [[ -f "scripts/mavp-validator.js" ]]; then
+  MAVERICKS_SCRIPT_DIR="scripts"
+elif [ -n "${MAVERICKS_HOME:-}" ]; then
   MAVERICKS_ROOT="$MAVERICKS_HOME"
+  MAVERICKS_SCRIPT_DIR="${MAVERICKS_SCRIPTS:-$MAVERICKS_ROOT/scripts}"
 elif [ -d "$HOME/.mavericks" ]; then
   MAVERICKS_ROOT="$HOME/.mavericks"
+  MAVERICKS_SCRIPT_DIR="${MAVERICKS_SCRIPTS:-$MAVERICKS_ROOT/scripts}"
 else
   MAVERICKS_ROOT="$HOME/Documents/mavericks"
+  MAVERICKS_SCRIPT_DIR="${MAVERICKS_SCRIPTS:-$MAVERICKS_ROOT/scripts}"
 fi
-MAVERICKS_SCRIPT_DIR="${MAVERICKS_SCRIPTS:-$MAVERICKS_ROOT/scripts}"
 VALIDATOR="$MAVERICKS_SCRIPT_DIR/mavp-validator.js"
 
 if [[ ! -f "$VALIDATOR" ]]; then

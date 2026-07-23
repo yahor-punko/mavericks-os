@@ -18,7 +18,7 @@
 
 ### T-001 — Example task
 - **Status:** planned
-- **Owner:** developer
+- **Owner role:** developer
 - **Verification type:** artifact
 - **Last verified by:** —
 - **Evidence:** — _(for `runtime`/`unit` tasks, use: `commit: <hash> — <one-line summary>`; for `artifact`-verification tasks with no code diff (exploration/audit tasks), use `artifact: <description>` as an alternative to `commit:` (e.g. `artifact: docs/AUDIT.md`) — accepted only when `Verification type` is `artifact`; for infra-only tasks with no code commit, use `infra: <verifiable-ref>` as an alternative to `commit:` (accepted refs: AWS ARN `arn:aws:ssm:...`, git commit hash, Terraform state serial `serial/N`, or SSM parameter version `@vN`); for cross-repo tasks (Repos: [a, b]), one line per repo: `commit: <hash-a> (repo-a)` and `commit: <hash-b> (repo-b)`; for tasks with `requires_config_check: true`, include `config_check: <key1> ✓, <key2> ✓` listing each config key confirmed present and correct in the target environment; optional: `branch: <name>` — e.g. `main`, `develop`, `both` — for projects with branch-based deploy contours)_

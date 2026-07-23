@@ -108,7 +108,8 @@ evidence_expected: validator healthy, diff shows updated CONFIG.md
 Rules:
 - Each field is `key: value` on one line. No indentation. No markdown bullets.
 - Tasks separated by `---`.
-- Do NOT include `id:`, `status:`, or `repo:` — assigned automatically at apply time.
+- Do NOT include `id:` or `status:` — assigned automatically at apply time.
+- `repo:` is optional — include it (e.g. `repo: repo-a` or `repo: repo-a, repo-b` for a cross-repo task) when the repo is already known; omit it otherwise. See `docs/ARCHITECT_OUTPUT.md` — Optional fields.
 - Use em-dash (`—`) for `depends_on:` when there are no dependencies.
 
 ## Escalation

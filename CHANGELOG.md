@@ -7,6 +7,62 @@ docs in [`docs/core/`](docs/core/).
 
 ## [Unreleased]
 
+## [0.35.0] — 2026-07-23
+
+### Added
+
+- `--park-wave [N] --reason "..."` and `--unpark-wave <N>` operator commands
+  — relocate a wave's task blocks out of (and back into) the Active
+  sections of BOTH `BACKLOG.md` and `TASK_STATUS.md`, so parked-wave tasks
+  no longer bloat session-start, size budgets, or next-action routing.
+  Round-trip restore is byte-identical.
+- `--apply-decomposition` now supports multi-repo epics — an optional
+  per-task `repo:` field in the decomposition block (rendered as
+  `- **Repo:**` / `- **Repos:**`) and a `--repo <name>` batch default;
+  `TASK_STATUS` stubs are now built from the shared library builder.
+- Validator `duplicate_task_status_entry` check (warning severity) —
+  detects a task duplicated across `TASK_STATUS.md` sections and
+  duplicate section headings, catching incomplete-archival fallout that
+  previous Active-only checks missed.
+- `--check-sync` now reports a stale/naive managed `PostToolUse` hook in
+  known projects and names `mavp-install.js --update <dir>` as the fix.
+- Auto-sync (sync-status) now mirrors a renamed `BACKLOG.md` task heading
+  title into `TASK_STATUS.md` (emitting "sync-status: retitled T-NNN"),
+  clearing the persistent `title_mismatch` warning that status-only sync
+  could never fix.
+- `--check-sync` now warns when a `~/.mavericks` checkout's version lags
+  the canonical repo, naming both versions and the path.
+
+### Changed
+
+- `artifact_size_budget` Active-section budgets now scale with active
+  task count (`max(static default, per-task allowance × count)`), so a
+  legitimate large epic wave no longer permanently trips the advisory;
+  explicit `artifact_budgets` overrides still win. (info-severity, never
+  blocking.)
+- Templates (`BACKLOG_TEMPLATE.md`, `TASK_STATUS_TEMPLATE.md`)
+  standardized to `- **Owner role:**` to match tooling/validator canon.
+
+### Fixed
+
+- `--close-session` mid-wave merge archival is now symmetric — merged
+  tasks are archived out of BOTH `BACKLOG.md` (status set to merged +
+  block moved out of Active Wave) and `TASK_STATUS.md`, eliminating the
+  `missing_in_task_status` exit-2 and the sync-status
+  skeleton-duplication loop. The validator now runs BEFORE
+  `PROCESS_STATE` mutations, so an aborted (exit-2) close no longer
+  leaves half-mutated state or double-bumps `wave_session` on re-run.
+- Hooks now prefer a project's own `scripts/` (when
+  `scripts/mavp-validator.js` is present) over the
+  `MAVERICKS_HOME` > `~/.mavericks` > legacy resolution chain — a
+  self-hosting mavericks checkout no longer runs its quality gates
+  against a stale `~/.mavericks` mirror; adopter/direct-reference
+  projects (no local validator) are unaffected.
+- `--close-session` now creates the session commit on validator exit 0
+  or 1 (warnings), skipping only on exit 2 (repair required) with an
+  explicit "session commit SKIPPED" message — previously a
+  warnings-only validator run silently skipped the commit.
+
 ## [0.33.0] — 2026-07-19
 
 ### Added

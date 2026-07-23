@@ -1480,6 +1480,188 @@ function archiveMergedTasksFromActiveWave(backlogPath, waveNumber) {
 }
 
 /**
+ * T-440: heading text for a wave's parked BACKLOG.md section — created by
+ * --park-wave, consumed (and removed) by --unpark-wave.
+ *
+ * @param {number|string} waveNumber
+ * @returns {string}
+ */
+function parkedBacklogHeading(waveNumber) {
+  return `## Wave ${waveNumber} — Parked`;
+}
+
+/**
+ * T-440: heading text for a wave's parked TASK_STATUS.md section — created
+ * by --park-wave, consumed (and removed) by --unpark-wave.
+ *
+ * @param {number|string} waveNumber
+ * @returns {string}
+ */
+function parkedTaskStatusHeading(waveNumber) {
+  return `## Parked tasks (Wave ${waveNumber})`;
+}
+
+/**
+ * T-440: generic mover — cut ALL task blocks out of a named "active" section
+ * (identified by `activeHeadingRegex`, e.g. BACKLOG's `## Active Wave` or
+ * TASK_STATUS's `## Active tasks`) and place them, verbatim and in document
+ * order, into a freshly created section titled `parkedHeading` immediately
+ * following it. The active section's non-block preamble (any lines before
+ * the first `### T-NNN` heading — typically blank lines) is left in place
+ * untouched, which is what makes moveParkedBlocksToActiveSection() below able
+ * to restore the original bytes exactly: the preamble never moves, only the
+ * contiguous block content is cut out and later reinserted at the same spot.
+ *
+ * Requires exactly one match for `activeHeadingRegex` in `content` — zero or
+ * multiple matches is reported via `error` (mirrors
+ * archiveMergedTasksFromActiveWave()'s single-heading precondition).
+ *
+ * @param {string} content - full file content
+ * @param {RegExp} activeHeadingRegex - matches the active section's heading line, e.g. /^##\s+Active Wave/i
+ * @param {string} parkedHeading - exact heading line to create, e.g. "## Wave 5 — Parked"
+ * @returns {{ ok: boolean, updated: string|null, taskIds: string[], error: string|null }}
+ */
+function moveActiveBlocksToParkedSection(content, activeHeadingRegex, parkedHeading) {
+  const lines = content.split(/\r?\n/);
+
+  const activeIdxs = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (activeHeadingRegex.test(lines[i])) activeIdxs.push(i);
+  }
+
+  if (activeIdxs.length === 0) {
+    return { ok: false, updated: null, taskIds: [], error: `No heading matching ${activeHeadingRegex} found.` };
+  }
+  if (activeIdxs.length > 1) {
+    return {
+      ok: false,
+      updated: null,
+      taskIds: [],
+      error: `Multiple headings matching ${activeHeadingRegex} found at line(s): ${activeIdxs.map((i) => i + 1).join(', ')}.`,
+    };
+  }
+
+  const activeIdx = activeIdxs[0];
+  let sectionEnd = lines.length;
+  for (let i = activeIdx + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) { sectionEnd = i; break; }
+  }
+
+  const sectionLines = lines.slice(activeIdx + 1, sectionEnd);
+  const { preamble, blocks } = extractTaskBlocksFromLines(sectionLines);
+
+  if (blocks.length === 0) {
+    return { ok: true, updated: content, taskIds: [], error: null };
+  }
+
+  const blocksChunk = blocks.flatMap((b) => b.lines);
+  const taskIds = blocks.map((b) => b.id).filter(Boolean);
+
+  // Shrink the active section down to its preamble only — the preamble is
+  // left byte-for-byte untouched at its original offset relative to the
+  // heading, so a later unpark can restore it exactly.
+  const updated = [
+    ...lines.slice(0, activeIdx + 1),
+    ...preamble,
+    parkedHeading,
+    '',
+    ...blocksChunk,
+    ...lines.slice(sectionEnd),
+  ];
+
+  return { ok: true, updated: updated.join('\n'), taskIds, error: null };
+}
+
+/**
+ * T-440: inverse of moveActiveBlocksToParkedSection() — find the section
+ * titled exactly `parkedHeadingExact`, remove it entirely, and reinsert its
+ * block content immediately after the (currently preamble-only) active
+ * section identified by `activeHeadingRegex`, restoring the original file
+ * byte-for-byte (assuming no other edits touched either section between the
+ * park and unpark calls).
+ *
+ * @param {string} content - full file content
+ * @param {RegExp} activeHeadingRegex - matches the active section's heading line, e.g. /^##\s+Active Wave/i
+ * @param {string} parkedHeadingExact - exact heading line to find and remove, e.g. "## Wave 5 — Parked"
+ * @returns {{ ok: boolean, updated: string|null, taskIds: string[], error: string|null }}
+ */
+function moveParkedBlocksToActiveSection(content, activeHeadingRegex, parkedHeadingExact) {
+  const lines = content.split(/\r?\n/);
+
+  const parkedIdx = lines.findIndex((l) => l.trim() === parkedHeadingExact.trim());
+  if (parkedIdx === -1) {
+    return { ok: false, updated: null, taskIds: [], error: `No "${parkedHeadingExact}" section found.` };
+  }
+
+  let parkedEnd = lines.length;
+  for (let i = parkedIdx + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) { parkedEnd = i; break; }
+  }
+
+  let bodyLines = lines.slice(parkedIdx + 1, parkedEnd);
+  if (bodyLines[0] === '') {
+    bodyLines = bodyLines.slice(1);
+  } else {
+    return {
+      ok: false,
+      updated: null,
+      taskIds: [],
+      error: `Malformed "${parkedHeadingExact}" section — expected a blank line immediately after the heading.`,
+    };
+  }
+
+  const taskIds = [];
+  for (const line of bodyLines) {
+    const m = line.match(/^###\s+(T-\d+)/);
+    if (m) taskIds.push(m[1]);
+  }
+
+  if (taskIds.length === 0) {
+    return { ok: false, updated: null, taskIds: [], error: `"${parkedHeadingExact}" section contains no task blocks to restore.` };
+  }
+
+  const activeIdxs = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (activeHeadingRegex.test(lines[i])) activeIdxs.push(i);
+  }
+  if (activeIdxs.length === 0) {
+    return { ok: false, updated: null, taskIds: [], error: `No heading matching ${activeHeadingRegex} found to restore into.` };
+  }
+  if (activeIdxs.length > 1) {
+    return {
+      ok: false,
+      updated: null,
+      taskIds: [],
+      error: `Multiple headings matching ${activeHeadingRegex} found at line(s): ${activeIdxs.map((i) => i + 1).join(', ')}.`,
+    };
+  }
+
+  const activeIdx = activeIdxs[0];
+  let activeSectionEnd = lines.length;
+  for (let i = activeIdx + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) { activeSectionEnd = i; break; }
+  }
+
+  if (activeSectionEnd > parkedIdx) {
+    return {
+      ok: false,
+      updated: null,
+      taskIds: [],
+      error: 'Active section and parked section overlap unexpectedly — cannot safely restore.',
+    };
+  }
+
+  const updated = [
+    ...lines.slice(0, activeSectionEnd),
+    ...bodyLines,
+    ...lines.slice(activeSectionEnd, parkedIdx),
+    ...lines.slice(parkedEnd),
+  ];
+
+  return { ok: true, updated: updated.join('\n'), taskIds, error: null };
+}
+
+/**
  * Atomically rename a task heading in both BACKLOG.md and TASK_STATUS.md.
  *
  * Finds lines matching `### T-NNN — <any title>` and replaces the title
@@ -2849,7 +3031,11 @@ module.exports = {
   insertIntoActiveTasks,
   insertIntoActiveWave,
   lookupTaskTitle,
+  moveActiveBlocksToParkedSection,
+  moveParkedBlocksToActiveSection,
   normalizeWhitespace,
+  parkedBacklogHeading,
+  parkedTaskStatusHeading,
   parseActiveWaveMergedTitles,
   parseAllTaskBlocks,
   parseBlockedBy,

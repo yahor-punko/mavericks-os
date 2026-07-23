@@ -1,5 +1,6 @@
 'use strict';
 // Regression test: T-395 — artifact_size_budget + state_in_claude_md validator advisories.
+// Extended by T-442 — scaling the two Active-section budgets by active task count.
 //
 // Fixture-based: builds synthetic BACKLOG.md / TASK_STATUS.md / PROCESS_STATE.json /
 // CLAUDE.md / HANDOFF.md fixtures in a temp dir per case and runs the validator's
@@ -18,13 +19,25 @@
 //      a CLAUDE.md with neither produces no finding.
 //   5. Archived sections (content outside the current Active Wave / Active tasks
 //      heading) are never counted toward the budget.
+//   6. (T-442) The two Active-section budgets scale with active task count:
+//      a 24-task/340-line section passes while a 3-task/340-line section
+//      still fires, for both BACKLOG.md Active Wave and TASK_STATUS.md Active
+//      tasks; an explicit artifact_budgets override still takes precedence
+//      over the computed value; the check stays info severity and never
+//      affects exit code.
 
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert');
 const os = require('node:os');
 
-const { parseArtifacts, getExitCode, DEFAULT_ARTIFACT_BUDGETS } = require('./mavp-validator.js');
+const {
+  parseArtifacts,
+  getExitCode,
+  DEFAULT_ARTIFACT_BUDGETS,
+  BACKLOG_ACTIVE_WAVE_PER_TASK_LINES,
+  TASK_STATUS_ACTIVE_TASKS_PER_TASK_LINES,
+} = require('./mavp-validator.js');
 
 const TMP_DIR = path.join(os.tmpdir(), 't395-test-' + Date.now());
 fs.mkdirSync(TMP_DIR, { recursive: true });
@@ -82,6 +95,108 @@ ${stateLines}`;
 
 function buildHandoffMd({ lineCount = 5 } = {}) {
   return `# HANDOFF\n\n${repeatLines('- handoff note', lineCount)}\n`;
+}
+
+// T-442: build `taskCount` real "### T-NNN — Title" task blocks (so
+// getTaskBlocks() picks them up as active tasks) padded with filler bullets so
+// the section BODY is exactly `bodyLineCount` lines long. Status is `planned`
+// so these fixtures don't need a Repo: field to avoid unrelated (warning-only)
+// missing_repo_field noise.
+function buildTaskBodyLines(taskCount, bodyLineCount, { status = 'planned' } = {}) {
+  const lines = [];
+  for (let i = 1; i <= taskCount; i += 1) {
+    lines.push(`### T-${String(i).padStart(3, '0')} — Task ${i}`);
+    lines.push(`- **Status:** ${status}`);
+  }
+  let filler = 0;
+  while (lines.length < bodyLineCount) {
+    filler += 1;
+    lines.push(`- filler line ${filler}`);
+  }
+  return lines.slice(0, bodyLineCount).join('\n');
+}
+
+// T-442: a bare-minimum mirror of `taskCount` task entries (heading + Status
+// only) for the OTHER artifact — so a fixture testing the BACKLOG.md Active
+// Wave scaling has matching TASK_STATUS.md entries (and vice versa) and
+// doesn't trip the unrelated missing_in_task_status / missing_in_backlog
+// failure-severity checks, which would otherwise pollute the exit code.
+function buildMirrorSection(taskCount, { status = 'planned' } = {}) {
+  const lines = [];
+  for (let i = 1; i <= taskCount; i += 1) {
+    lines.push(`### T-${String(i).padStart(3, '0')} — Task ${i}`);
+    lines.push(`- **Status:** ${status}`);
+  }
+  return lines.join('\n');
+}
+
+function buildBacklogMirror(taskCount) {
+  return `# BACKLOG
+
+## Selection rules
+
+- unblockers first
+
+## Active Wave
+
+${buildMirrorSection(taskCount)}
+
+## Archived Wave 1
+
+${repeatLines('- archived filler line', 5000)}
+`;
+}
+
+function buildTaskStatusMirror(taskCount) {
+  return `# TASK_STATUS
+
+## Active tasks
+
+${buildMirrorSection(taskCount)}
+
+## Recently completed tasks
+
+${repeatLines('- archived completed filler line', 5000)}
+`;
+}
+
+// Builds a BACKLOG.md fixture whose `## Active Wave` section is EXACTLY
+// `totalSectionLines` lines long (heading + blank + body + blank before the
+// next `## ` heading = body length + 3) and contains `taskCount` real task
+// blocks.
+function buildBacklogWithTasks({ taskCount, totalSectionLines }) {
+  const bodyLineCount = totalSectionLines - 3;
+  const body = buildTaskBodyLines(taskCount, bodyLineCount);
+  return `# BACKLOG
+
+## Selection rules
+
+- unblockers first
+
+## Active Wave
+
+${body}
+
+## Archived Wave 1
+
+${repeatLines('- archived filler line', 5000)}
+`;
+}
+
+// Same shape as buildBacklogWithTasks but for TASK_STATUS.md's `## Active tasks`.
+function buildTaskStatusWithTasks({ taskCount, totalSectionLines }) {
+  const bodyLineCount = totalSectionLines - 3;
+  const body = buildTaskBodyLines(taskCount, bodyLineCount);
+  return `# TASK_STATUS
+
+## Active tasks
+
+${body}
+
+## Recently completed tasks
+
+${repeatLines('- archived completed filler line', 5000)}
+`;
 }
 
 function writeFixture(caseName, { backlog, taskStatus, processState, claudeMd, handoffMd }) {
@@ -300,8 +415,148 @@ function findAll(parsed, checkName) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 8 (T-442): BACKLOG.md Active Wave scaling — a 24-task/340-line section
+// passes (24 * BACKLOG_ACTIVE_WAVE_PER_TASK_LINES=15 = 360 >= 340) while a
+// 3-task/340-line section still fires (3 * 15 = 45 stays under the 200-line
+// static floor, so 340 > 200 trips).
+// ---------------------------------------------------------------------------
+assert.strictEqual(BACKLOG_ACTIVE_WAVE_PER_TASK_LINES, 15, 'Test 8 precondition: this test assumes a per-task allowance of 15 lines for BACKLOG Active Wave');
+
+{
+  const { backlogPath, taskStatusPath } = writeFixture('scaled-backlog-24-tasks-pass', {
+    backlog: buildBacklogWithTasks({ taskCount: 24, totalSectionLines: 340 }),
+    taskStatus: buildTaskStatusMirror(24),
+    processState: {},
+  });
+
+  const parsed = parseArtifacts({ backlogPath, taskStatusPath });
+  const findings = findAll(parsed, 'artifact_size_budget');
+  const backlogFinding = findings.find((f) => /BACKLOG\.md Active Wave/.test(f.message));
+
+  assert.strictEqual(backlogFinding, undefined, `Test 8 FAIL: a 24-task/340-line Active Wave section should not trip the scaled budget (24*15=360 >= 340), got: ${JSON.stringify(backlogFinding, null, 2)}`);
+
+  console.log('Test 8 passed: a 24-task/340-line BACKLOG.md Active Wave section produces no artifact_size_budget finding (scaled budget covers it)');
+}
+
+{
+  const { backlogPath, taskStatusPath } = writeFixture('scaled-backlog-3-tasks-fire', {
+    backlog: buildBacklogWithTasks({ taskCount: 3, totalSectionLines: 340 }),
+    taskStatus: buildTaskStatusMirror(3),
+    processState: {},
+  });
+
+  const parsed = parseArtifacts({ backlogPath, taskStatusPath });
+  const findings = findAll(parsed, 'artifact_size_budget');
+  const backlogFinding = findings.find((f) => /BACKLOG\.md Active Wave/.test(f.message));
+
+  assert.ok(backlogFinding, `Test 9 FAIL: a 3-task/340-line Active Wave section should still trip (scaled budget stays at the 200-line static floor), got findings: ${JSON.stringify(findings, null, 2)}`);
+  assert.strictEqual(backlogFinding.severity, 'info', `Test 9 FAIL: severity should be "info", got: "${backlogFinding.severity}"`);
+  assert.ok(/budget of 200/.test(backlogFinding.message), `Test 9 FAIL: expected the static floor of 200 in the message, got: "${backlogFinding.message}"`);
+
+  const exitCode = getExitCode(parsed.comparison.overallCandidateState);
+  assert.strictEqual(exitCode, 0, `Test 9 FAIL: info finding must not change exit code, got: ${exitCode}`);
+
+  console.log('Test 9 passed: a 3-task/340-line BACKLOG.md Active Wave section still produces an info-severity artifact_size_budget finding (falls back to the 200-line static floor)');
+}
+
+// ---------------------------------------------------------------------------
+// Test 10 (T-442): TASK_STATUS.md Active tasks scaling — analogous behavior
+// using its own per-task allowance (10) and static floor (150): a 20-task
+// section covering 190 lines passes (20*10=200 >= 190) while a 3-task section
+// with the same 190 lines still fires (3*10=30 stays under the 150 floor).
+// ---------------------------------------------------------------------------
+assert.strictEqual(TASK_STATUS_ACTIVE_TASKS_PER_TASK_LINES, 10, 'Test 10 precondition: this test assumes a per-task allowance of 10 lines for TASK_STATUS Active tasks');
+
+{
+  const { backlogPath, taskStatusPath } = writeFixture('scaled-taskstatus-20-tasks-pass', {
+    backlog: buildBacklogMirror(20),
+    taskStatus: buildTaskStatusWithTasks({ taskCount: 20, totalSectionLines: 190 }),
+    processState: {},
+  });
+
+  const parsed = parseArtifacts({ backlogPath, taskStatusPath });
+  const findings = findAll(parsed, 'artifact_size_budget');
+  const taskStatusFinding = findings.find((f) => /TASK_STATUS\.md Active tasks/.test(f.message));
+
+  assert.strictEqual(taskStatusFinding, undefined, `Test 10 FAIL: a 20-task/190-line Active tasks section should not trip the scaled budget (20*10=200 >= 190), got: ${JSON.stringify(taskStatusFinding, null, 2)}`);
+
+  console.log('Test 10 passed: a 20-task/190-line TASK_STATUS.md Active tasks section produces no artifact_size_budget finding (scaled budget covers it)');
+}
+
+{
+  const { backlogPath, taskStatusPath } = writeFixture('scaled-taskstatus-3-tasks-fire', {
+    backlog: buildBacklogMirror(3),
+    taskStatus: buildTaskStatusWithTasks({ taskCount: 3, totalSectionLines: 190 }),
+    processState: {},
+  });
+
+  const parsed = parseArtifacts({ backlogPath, taskStatusPath });
+  const findings = findAll(parsed, 'artifact_size_budget');
+  const taskStatusFinding = findings.find((f) => /TASK_STATUS\.md Active tasks/.test(f.message));
+
+  assert.ok(taskStatusFinding, `Test 11 FAIL: a 3-task/190-line Active tasks section should still trip (scaled budget stays at the 150-line static floor), got findings: ${JSON.stringify(findings, null, 2)}`);
+  assert.strictEqual(taskStatusFinding.severity, 'info', `Test 11 FAIL: severity should be "info", got: "${taskStatusFinding.severity}"`);
+  assert.ok(/budget of 150/.test(taskStatusFinding.message), `Test 11 FAIL: expected the static floor of 150 in the message, got: "${taskStatusFinding.message}"`);
+
+  const exitCode = getExitCode(parsed.comparison.overallCandidateState);
+  assert.strictEqual(exitCode, 0, `Test 11 FAIL: info finding must not change exit code, got: ${exitCode}`);
+
+  console.log('Test 11 passed: a 3-task/190-line TASK_STATUS.md Active tasks section still produces an info-severity artifact_size_budget finding (falls back to the 150-line static floor)');
+}
+
+// ---------------------------------------------------------------------------
+// Test 12 (T-442): an explicit artifact_budgets override takes precedence
+// over the computed (scaled) value, in both directions.
+// 12a. A 24-task/340-line Active Wave section (which the scaled budget of 360
+//      would pass) still fires when an override lowers the budget to 100.
+// 12b. A 3-task/340-line Active Wave section (which falls back to the
+//      200-line static floor and fires) stays clean when an override raises
+//      the budget to 1000.
+// ---------------------------------------------------------------------------
+{
+  const { backlogPath, taskStatusPath } = writeFixture('scaled-override-lower-wins', {
+    backlog: buildBacklogWithTasks({ taskCount: 24, totalSectionLines: 340 }),
+    taskStatus: buildTaskStatusMirror(24),
+    processState: {
+      artifact_budgets: {
+        backlog_active_wave_max_lines: 100,
+      },
+    },
+  });
+
+  const parsed = parseArtifacts({ backlogPath, taskStatusPath });
+  const findings = findAll(parsed, 'artifact_size_budget');
+  const backlogFinding = findings.find((f) => /BACKLOG\.md Active Wave/.test(f.message));
+
+  assert.ok(backlogFinding, `Test 12a FAIL: an explicit override of 100 should win over the scaled budget of 360 and trip the finding, got findings: ${JSON.stringify(findings, null, 2)}`);
+  assert.ok(/budget of 100/.test(backlogFinding.message), `Test 12a FAIL: expected the override value of 100 in the message, got: "${backlogFinding.message}"`);
+
+  console.log('Test 12a passed: a lowered artifact_budgets override wins over a scaled budget that would otherwise have passed');
+}
+
+{
+  const { backlogPath, taskStatusPath } = writeFixture('scaled-override-raise-wins', {
+    backlog: buildBacklogWithTasks({ taskCount: 3, totalSectionLines: 340 }),
+    taskStatus: buildTaskStatusMirror(3),
+    processState: {
+      artifact_budgets: {
+        backlog_active_wave_max_lines: 1000,
+      },
+    },
+  });
+
+  const parsed = parseArtifacts({ backlogPath, taskStatusPath });
+  const findings = findAll(parsed, 'artifact_size_budget');
+  const backlogFinding = findings.find((f) => /BACKLOG\.md Active Wave/.test(f.message));
+
+  assert.strictEqual(backlogFinding, undefined, `Test 12b FAIL: an explicit override of 1000 should win over the scaled/floor budget and silence the finding, got: ${JSON.stringify(backlogFinding, null, 2)}`);
+
+  console.log('Test 12b passed: a raised artifact_budgets override wins over a scaled budget that would otherwise have fired');
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
 
-console.log('\nAll T-395 assertions passed.');
+console.log('\nAll T-395 + T-442 assertions passed.');

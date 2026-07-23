@@ -13,6 +13,10 @@
 //      skipped: no entry, no output.
 //   3. Skip-superseded — a BACKLOG task with a real `- **Superseded by:**`
 //      value is skipped: no entry, no output.
+//   4. Create-then-retitle (T-432) — after a skeleton entry is created with
+//      BACKLOG's title, a subsequent BACKLOG rename is mirrored on its own
+//      re-run as exactly one "sync-status: retitled T-NNN" line (no
+//      duplicate "created" line for an entry that already exists).
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -167,6 +171,59 @@ function run(root) {
     `Test 3 FAIL: expected no T-902 entry to be created, got:\n${updated}`
   );
   console.log('Test 3 passed: a superseded BACKLOG task is skipped — no entry, no output');
+}
+
+// ---------------------------------------------------------------------------
+// Test 4 (T-432): create-then-retitle — after a skeleton entry is created,
+// renaming the task in BACKLOG.md and re-running mirrors the new title on
+// TASK_STATUS.md's heading with exactly one "retitled" line (no "created"
+// line, since the entry already exists).
+// ---------------------------------------------------------------------------
+{
+  const root = writeFixture(
+    'create-then-retitle-fixture',
+    `
+### T-903 — Original fixture title
+- **Status:** in_progress
+- **Owner role:** developer
+- **Verification type:** runtime
+`
+  );
+
+  const created = run(root);
+  assert.strictEqual(created.status, 0, `Test 4 FAIL (create step): expected exit 0, got ${created.status}`);
+  assert.strictEqual(
+    created.stderr,
+    'sync-status: created T-903 entry\n',
+    `Test 4 FAIL (create step): expected exactly the created line, got: ${JSON.stringify(created.stderr)}`
+  );
+
+  // Simulate a direct rename in BACKLOG.md (e.g. a manual edit rather than --rename-task).
+  const backlogPath = path.join(root, 'BACKLOG.md');
+  const renamedBacklog = fs
+    .readFileSync(backlogPath, 'utf8')
+    .replace('### T-903 — Original fixture title', '### T-903 — Renamed fixture title');
+  fs.writeFileSync(backlogPath, renamedBacklog, 'utf8');
+
+  const retitled = run(root);
+  assert.strictEqual(retitled.status, 0, `Test 4 FAIL (retitle step): expected exit 0, got ${retitled.status}`);
+  assert.strictEqual(
+    retitled.stderr,
+    'sync-status: retitled T-903\n',
+    `Test 4 FAIL (retitle step): expected exactly the retitled line, got: ${JSON.stringify(retitled.stderr)}`
+  );
+  assert.strictEqual(
+    Buffer.byteLength(retitled.stdout, 'utf8'),
+    0,
+    `Test 4 FAIL (retitle step): expected zero bytes on stdout, got: ${JSON.stringify(retitled.stdout)}`
+  );
+
+  const updated = fs.readFileSync(path.join(root, 'TASK_STATUS.md'), 'utf8');
+  assert.ok(
+    updated.includes('### T-903 — Renamed fixture title'),
+    `Test 4 FAIL: expected TASK_STATUS.md heading rewritten to the renamed title, got:\n${updated}`
+  );
+  console.log('Test 4 passed: a BACKLOG rename after auto-creation is mirrored as exactly the retitled line');
 }
 
 // ---------------------------------------------------------------------------

@@ -38,6 +38,7 @@ const {
   insertIntoActiveTasks,
   updateLastTaskId,
   writeContextBundle,
+  buildTaskStatusEntry,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -110,7 +111,7 @@ function parseTaskBlock(raw) {
     if ([
       'title', 'owner_role', 'depends_on', 'verification_type',
       'problem', 'acceptance_criteria', 'evidence_expected',
-      'requires_ux', 'requires_security_review', 'touches', 'type',
+      'requires_ux', 'requires_security_review', 'touches', 'type', 'repo',
     ].includes(key)) {
       task[key] = value;
     }
@@ -141,18 +142,40 @@ function formatTaskId(n) {
 }
 
 /**
+ * Resolve the effective repo value for a task and render its BACKLOG.md
+ * line: a single repo renders as `- **Repo:** <name>`; two or more
+ * comma-separated repos render as `- **Repos:** a, b` (matches the
+ * cross-repo convention in CLAUDE.md). A per-task `repo:` field overrides
+ * the batch `--repo` default; a task with neither gets no line at all.
+ *
+ * @param {object} task - Parsed task fields (may include `repo`)
+ * @param {string} [repoName] - Optional batch-level default repo name
+ * @returns {string|null} Rendered `- **Repo:**`/`- **Repos:**` line, or null when neither is set
+ */
+function resolveRepoLine(task, repoName) {
+  const effective = (task.repo && task.repo.trim()) || repoName;
+  if (!effective) return null;
+  const parts = effective.split(',').map(s => s.trim()).filter(Boolean);
+  if (parts.length > 1) {
+    return `- **Repos:** ${parts.join(', ')}`;
+  }
+  return `- **Repo:** ${parts[0]}`;
+}
+
+/**
  * Build a BACKLOG.md entry for a task.
  * @param {string} id - Task ID (e.g. "T-222")
  * @param {object} task - Parsed task fields
- * @param {string} [repoName] - Optional repo name. When omitted the Repo field is excluded.
+ * @param {string} [repoName] - Optional batch-level default repo name. A per-task `repo:` field overrides this. When neither is set, the Repo field is excluded.
  */
 function buildBacklogEntry(id, task, repoName) {
   const lines = [];
   lines.push(`\n### ${id} — ${task.title}`);
   lines.push(`- **Status:** planned`);
   lines.push(`- **Owner role:** ${task.owner_role}`);
-  if (repoName) {
-    lines.push(`- **Repo:** ${repoName}`);
+  const repoLine = resolveRepoLine(task, repoName);
+  if (repoLine) {
+    lines.push(repoLine);
   }
   lines.push(`- **Verification type:** ${task.verification_type}`);
 
@@ -193,17 +216,6 @@ function buildBacklogEntry(id, task, repoName) {
   return lines.join('\n') + '\n';
 }
 
-/**
- * Build a TASK_STATUS.md stub entry for a task.
- */
-function buildTaskStatusEntry(id, task) {
-  return `\n### ${id} — ${task.title}
-- **Status:** planned
-- **Owner role:** ${task.owner_role}
-- **Verification type:** ${task.verification_type}
-`;
-}
-
 function runValidator() {
   const result = spawnSync('node', [VALIDATOR], {
     stdio: ['inherit', 'pipe', 'pipe'],
@@ -214,15 +226,36 @@ function runValidator() {
   return result.status || 0;
 }
 
+/**
+ * Parse CLI args: an optional positional FILE path plus an optional
+ * `--repo <name>` flag supplying the batch-level default repo.
+ *
+ * @param {string[]} argv - process.argv.slice(2)
+ * @returns {{filePath: string|null, repoName: string|null}}
+ */
+function parseCliArgs(argv) {
+  let filePath = null;
+  let repoName = null;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--repo') {
+      repoName = argv[i + 1] || null;
+      i++;
+    } else if (!filePath) {
+      filePath = argv[i];
+    }
+  }
+  return { filePath, repoName };
+}
+
 async function main() {
   const today = new Date().toISOString().slice(0, 10);
-  const filePath = process.argv[2] || null;
+  const { filePath, repoName } = parseCliArgs(process.argv.slice(2));
 
   console.log(`\n${BOLD}MavP Apply Decomposition${RESET} ${DIM}${today}${RESET}\n`);
 
   // Read input
   const input = readInput(filePath);
-  await applyDecompositionFromString(input);
+  await applyDecompositionFromString(input, repoName);
 }
 
 /**
@@ -295,7 +328,7 @@ async function applyDecompositionFromString(input, repoName) {
       id,
       task,
       backlogEntry: buildBacklogEntry(id, task, repoName),
-      taskStatusEntry: buildTaskStatusEntry(id, task),
+      taskStatusEntry: buildTaskStatusEntry(id, task.title, task.owner_role, task.verification_type, 'planned'),
     };
   });
 
@@ -370,5 +403,7 @@ module.exports = {
   validateTask,
   buildBacklogEntry,
   buildTaskStatusEntry,
+  resolveRepoLine,
+  parseCliArgs,
   applyDecompositionFromString,
 };

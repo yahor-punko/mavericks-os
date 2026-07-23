@@ -34,7 +34,8 @@ Rules:
 - Each field is `key: value` on a single line. No indentation. No markdown bullets.
 - Tasks are separated by a line containing only `---`.
 - The block may appear anywhere in the markdown response — beginning, middle, or end.
-- Do not include `id:`, `status:`, or `repo:` fields — `--apply-decomposition` assigns those automatically.
+- Do not include `id:` or `status:` fields — `--apply-decomposition` assigns those automatically.
+- `repo:` is optional (see the Optional fields table below) — omit it when the task has no known repo yet, or when a batch-level `--repo` default is being supplied via the CLI.
 - Use an em-dash (`—`) for `depends_on:` when there are no dependencies.
 
 ## Field reference
@@ -59,6 +60,7 @@ Rules:
 | `requires_security_review:` | `true` if the task needs a security review stage. Omit or set `false` otherwise. |
 | `touches:` | Comma-separated list of file paths the task is expected to modify. |
 | `type:` | Task category, matching BACKLOG.md's existing `- **Type:**` convention (values in use: `feature`, `debt`, `bug`, `improvement`, `docs`, `initiative`, `exploration`). Defaults to `feature` when omitted. Use `type: debt` for a follow-up task that pays down a workaround — see the architect's Workaround rule in `.claude/agents/architect.md`. |
+| `repo:` | Repo name this task touches — a single name (e.g. `repo: repo-a`) or comma-separated names for a cross-repo task (e.g. `repo: repo-a, repo-b`). `--apply-decomposition` writes a single repo as `- **Repo:** <name>` and multiple repos as `- **Repos:** a, b` into BACKLOG.md, matching the cross-repo evidence convention in `CLAUDE.md`. Per-task `repo:` overrides the batch `--repo <name>` CLI default when both are present. Omit entirely to leave the task with no Repo field. |
 
 > **Note:** since T-302, `--apply-decomposition`'s field parser recognises `type:` as part of its allowlist and emits it as `- **Type:** <value>` into the registered BACKLOG.md entry automatically. No manual annotation is required.
 
@@ -66,14 +68,13 @@ Rules:
 
 - `id:` — assigned automatically by `--apply-decomposition` based on `last_task_id` in `PROCESS_STATE.json`.
 - `status:` — always `planned` on registration; set by the Main Agent.
-- `repo:` — set by the Main Agent when the task moves to `in_progress`.
 - Markdown headers, bullets, or any formatting inside the block — plain `key: value` lines only.
 
 ## What `--apply-decomposition` does
 
-The `--apply-decomposition [FILE]` operator command parses this block and:
+The `--apply-decomposition [FILE] [--repo <name>]` operator command parses this block and:
 1. Assigns sequential T-NNN IDs continuing from `last_task_id`.
-2. Appends entries to `BACKLOG.md` with status `planned`.
+2. Appends entries to `BACKLOG.md` with status `planned`, writing a `- **Repo:**`/`- **Repos:**` line when a task's `repo:` field or the batch `--repo <name>` CLI default resolves to a value (per-task `repo:` wins when both are present).
 3. Appends stub entries to `TASK_STATUS.md`.
 4. Increments `last_task_id` in `PROCESS_STATE.json`.
 5. Runs the validator to confirm artifact sync.

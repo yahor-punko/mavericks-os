@@ -153,6 +153,22 @@ node "$HOME/.mavericks/scripts/mavp-install.js" --update /path/to/your-project
 
 This re-copies `.claude/hooks/pre-commit` from the mavericks source along with agents, skills, and rules.
 
+## Close-session commit contract
+
+`--close-session` (`scripts/mavp-operator-close-session.js`, both interactive and non-interactive modes) creates a session commit — `chore: close session <date>` — as part of every close-session run, gated only by the validator's exit code:
+
+| Validator exit code | Meaning | Session commit behaviour |
+|---|---|---|
+| `0` — healthy | Artifacts in sync | Commit proceeds |
+| `1` — drifting | Minor drift / warnings only | Commit still proceeds |
+| `2` — repair required | Artifacts out of sync | **Commit skipped** — prints `session commit SKIPPED — validator exit 2 (repair required); commit manually after repair` |
+
+This mirrors the pre-commit hook's own gate (only exit 2 blocks), so the two mechanisms never disagree about what counts as "safe to commit."
+
+**Staging scope.** The commit stages tracked files only, via `git add -u` — it never runs `git add -A` or `git add .`. Any newly-created untracked file is left out of the session commit; if you created new files this session, stage and commit them yourself (or verify they were staged by an earlier, more targeted `git add` during the task itself). This is deliberate: `--close-session` is an end-of-session ritual over already-tracked state artifacts and code, not a catch-all for stray untracked files.
+
+If the commit is skipped (exit 2), fix the reported artifact drift, re-run `--close-session` (or commit manually), then proceed to the wave-close push once the session commit exists.
+
 ## Claude Code hooks activation
 
 Separate from the git pre-commit hook above, mavericks manages three Claude Code hooks in `.claude/settings.local.json`: `SessionStart`, `PostCompact`, and `PostToolUse` (the hardened validator hook, composed with the doc-sync and manifest-guard fragments).

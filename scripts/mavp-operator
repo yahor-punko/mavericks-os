@@ -37,6 +37,11 @@ if [[ "${1-}" == "--help" ]]; then
   echo "  --archive-merged Mid-wave: move merged task blocks out of BACKLOG.md's Active Wave /"
   echo "                   TASK_STATUS.md's Active tasks into the wave-close archive destinations,"
   echo "                   without closing the wave; leaves in-flight tasks untouched"
+  echo "  --park-wave [N] --reason \"text\"  Move ALL of wave N's (default: current wave) task blocks"
+  echo "                   out of BACKLOG.md's Active Wave / TASK_STATUS.md's Active tasks into"
+  echo "                   parked sections, and record the wave + reason in parked_waves"
+  echo "  --unpark-wave <N>  Inverse of --park-wave: restore wave N's blocks to Active Wave /"
+  echo "                   Active tasks byte-for-byte and remove its parked_waves entry"
   echo "  --arm-recheck T-NNN --due YYYY-MM-DD [--interval 8w] [--note \"...\"]"
   echo "                   Register a time-based recheck entry in PROCESS_STATE.json rechecks[]"
   echo "                   Use --interval to enable rearming (e.g. 8w, 2d); --note for context"
@@ -109,6 +114,12 @@ elif [[ "${1-}" == "--sync-status" ]]; then
 elif [[ "${1-}" == "--archive-merged" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-archive-merged.js" "$@"
+elif [[ "${1-}" == "--park-wave" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-park-wave.js" --park-wave "$@"
+elif [[ "${1-}" == "--unpark-wave" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-park-wave.js" --unpark-wave "$@"
 elif [[ "${1-}" == "--reflect-skill" ]]; then
   ROLE="$2"
   shift 2

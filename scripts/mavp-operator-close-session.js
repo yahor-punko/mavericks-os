@@ -46,7 +46,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, classifyNextAction, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
@@ -441,6 +441,40 @@ function moveTaskToCompleted(markdown, taskId) {
   ].join('\n');
 }
 
+/**
+ * T-438: mirror TASK_STATUS.md's merge state into BACKLOG.md — set each merged
+ * task's `- **Status:**` field to match, then archive its block out of
+ * BACKLOG's `## Active Wave` section via the same
+ * archiveMergedTasksFromActiveWave() machinery `--archive-merged` uses
+ * (moving it into that wave's `## Wave <N> — Archived (mid-wave)` section).
+ *
+ * Without this, a task merged mid-wave stayed listed as active in BACKLOG.md
+ * while its TASK_STATUS.md block had already moved to "Recently completed" —
+ * an asymmetry that produced `missing_in_task_status` validator findings and
+ * duplicate skeleton entries via sync-status's findMissingEntries().
+ *
+ * No-op when there are no merged tasks this run, or BACKLOG.md is absent.
+ *
+ * @param {Array<{id: string, status: string}>} mergedTaskRecords - tasks merged this run, with their final status value
+ * @param {number|string} waveNumber - the currently open wave number (read BEFORE any wave increment)
+ */
+function syncBacklogMergedTasks(mergedTaskRecords, waveNumber) {
+  if (!mergedTaskRecords.length || !fs.existsSync(BACKLOG_MD)) return;
+
+  let backlogContent = readUtf8(BACKLOG_MD);
+  for (const rec of mergedTaskRecords) {
+    backlogContent = updateTaskStatusField(backlogContent, rec.id, 'Status', rec.status);
+  }
+  writeUtf8(BACKLOG_MD, backlogContent);
+
+  const archiveResult = archiveMergedTasksFromActiveWave(BACKLOG_MD, waveNumber);
+  if (!archiveResult.ok) {
+    console.log(`${YELLOW}⚠ BACKLOG.md archive warning: ${archiveResult.warning}${RESET}`);
+  } else if (archiveResult.archivedIds.length > 0) {
+    console.log(`  ${GREEN}✓ BACKLOG.md — archived ${archiveResult.archivedIds.length} task(s) out of Active Wave: ${archiveResult.archivedIds.join(', ')}${RESET}`);
+  }
+}
+
 function updateProcessState(markdown, nextAction) {
   const today = new Date().toISOString().slice(0, 10);
   let updated = markdown;
@@ -513,6 +547,33 @@ function filterStaleSlices(activeSlices, backlogStatuses) {
 }
 
 /**
+ * T-438: PROCESS_STATE.json's `active_slices` must reflect BACKLOG.md's
+ * current state BEFORE the validator runs — otherwise a task just merged
+ * (and archived out of BACKLOG's Active Wave) but still listed in
+ * `active_slices` trips checkActiveSlices()'s WARNING-severity
+ * `active_slices_mismatch` finding, downgrading a healthy close to
+ * "drifting" (exit 1) for no real reason. This is a narrow, idempotent
+ * pre-validator sync — it only ever removes stale IDs from `active_slices`
+ * and never touches `wave`/`wave_session`/`last_updated`, so it does not
+ * reintroduce the "PROCESS_STATE mutated before the validator gate" problem
+ * the wave/wave_session bump (see updateProcessStateJson call sites below)
+ * is being fixed for.
+ */
+function syncActiveSlicesPreValidator() {
+  if (!fs.existsSync(PROCESS_STATE_JSON) || !fs.existsSync(BACKLOG_MD)) return;
+  try {
+    const current = JSON.parse(readUtf8(PROCESS_STATE_JSON));
+    if (!Array.isArray(current.active_slices) || current.active_slices.length === 0) return;
+    const backlogStatuses = parseBacklogStatuses(readUtf8(BACKLOG_MD));
+    const filtered = filterStaleSlices(current.active_slices, backlogStatuses);
+    if (filtered.length !== current.active_slices.length) {
+      current.active_slices = filtered;
+      writeUtf8(PROCESS_STATE_JSON, JSON.stringify(current, null, 2) + '\n');
+    }
+  } catch { /* leave PROCESS_STATE.json untouched on any parse/read error */ }
+}
+
+/**
  * Check whether scripts/ changed after the last version bump in mavp-version.js.
  * Returns a non-empty string (commit list) if a bump is needed, null otherwise.
  */
@@ -549,12 +610,23 @@ function checkVersionBump() {
   }
 }
 
+// T-431: runValidator() must distinguish the validator's three exit codes
+// (0 healthy, 1 drifting/warnings, 2 repair required) rather than collapsing
+// 1 and 2 into a single "not ok" result — execSync throws on ANY non-zero
+// exit, so the caught branch previously had no way to tell drifting (1) apart
+// from repair-required (2). `code` is always populated: err.status when the
+// child process actually ran and exited non-zero; defaults to 1 (drifting-like,
+// non-blocking) for the rare case where execSync fails before/without an exit
+// code (e.g. spawn failure) — only an explicit exit 2 should ever skip the
+// session commit. Existing callers only read `.ok`/`.output`/`.code`, all of
+// which keep their prior shape and meaning — this is an additive change.
 function runValidator() {
   try {
     const result = execSync(`node "${VALIDATOR}"`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-    return { ok: true, output: result };
+    return { ok: true, code: 0, output: result };
   } catch (err) {
-    return { ok: false, output: err.stdout || err.message, code: err.status };
+    const code = typeof err.status === 'number' ? err.status : 1;
+    return { ok: false, code, output: err.stdout || err.message };
   }
 }
 
@@ -717,43 +789,9 @@ async function runNonInteractive(args) {
 
   let updatedContent = taskStatusContent;
 
-  // Apply --mark-merged
-  for (const taskId of args.markMerged) {
-    const task = activeTasks.find(t => t.id === taskId);
-    if (!task) {
-      console.log(`${YELLOW}⚠ ${taskId} not found in active tasks — skipping${RESET}`);
-      continue;
-    }
-    updatedContent = updateTaskStatusField(updatedContent, taskId, 'Status', 'merged');
-    updatedContent = updateTaskStatusField(updatedContent, taskId, 'Notes', `Completed ${today}.`);
-    updatedContent = moveTaskToCompleted(updatedContent, taskId);
-    console.log(`  ${GREEN}✓ ${taskId} → merged${RESET}`);
-  }
-
-  // Also move any tasks that were already merged before --close-session was called
-  const alreadyHandled = new Set(args.markMerged);
-  for (const task of activeTasks) {
-    if ((task.status === 'merged' || task.status === 'deployed_dev' || task.status === 'deployed_prod') && !alreadyHandled.has(task.id)) {
-      updatedContent = moveTaskToCompleted(updatedContent, task.id);
-      console.log(`  ${GREEN}✓ ${task.id} → moved to completed (was already merged)${RESET}`);
-    }
-  }
-
-  // Write TASK_STATUS.md
-  writeUtf8(TASK_STATUS_MD, updatedContent);
-  console.log(`${GREEN}✓ TASK_STATUS.md updated${RESET}`);
-
-  // Compute remaining tasks and the auto-computed next_action suggestion
-  const remainingTasks = parseActiveTasks(updatedContent);
-  let nextAction = null;
-  if (remainingTasks.length > 0) {
-    const first = remainingTasks[0];
-    nextAction = `${first.id} → developer → ${first.title}`;
-  }
-
-  const allMerged = remainingTasks.length === 0;
-
-  // Read current wave/wave_session and existing next_action before incrementing
+  // Read current wave/wave_session and existing next_action before any mutation.
+  // T-438: read early (before the BACKLOG.md sync below) so the symmetric
+  // archival step can use the CURRENT (not-yet-incremented) wave number.
   let sessionWave = 1;
   let sessionNumber = 1;
   let currentNextAction = null;
@@ -765,6 +803,53 @@ async function runNonInteractive(args) {
       currentNextAction = ps.next_action || null;
     }
   } catch { /* use defaults */ }
+
+  // T-438: tasks merged this run, tracked with their final status so BACKLOG.md
+  // can be synced symmetrically (see syncBacklogMergedTasks doc comment).
+  const mergedTaskRecords = [];
+
+  // Apply --mark-merged
+  for (const taskId of args.markMerged) {
+    const task = activeTasks.find(t => t.id === taskId);
+    if (!task) {
+      console.log(`${YELLOW}⚠ ${taskId} not found in active tasks — skipping${RESET}`);
+      continue;
+    }
+    updatedContent = updateTaskStatusField(updatedContent, taskId, 'Status', 'merged');
+    updatedContent = updateTaskStatusField(updatedContent, taskId, 'Notes', `Completed ${today}.`);
+    updatedContent = moveTaskToCompleted(updatedContent, taskId);
+    mergedTaskRecords.push({ id: taskId, status: 'merged' });
+    console.log(`  ${GREEN}✓ ${taskId} → merged${RESET}`);
+  }
+
+  // Also move any tasks that were already merged before --close-session was called
+  const alreadyHandled = new Set(args.markMerged);
+  for (const task of activeTasks) {
+    if ((task.status === 'merged' || task.status === 'deployed_dev' || task.status === 'deployed_prod') && !alreadyHandled.has(task.id)) {
+      updatedContent = moveTaskToCompleted(updatedContent, task.id);
+      mergedTaskRecords.push({ id: task.id, status: task.status });
+      console.log(`  ${GREEN}✓ ${task.id} → moved to completed (was already merged)${RESET}`);
+    }
+  }
+
+  // Write TASK_STATUS.md
+  writeUtf8(TASK_STATUS_MD, updatedContent);
+  console.log(`${GREEN}✓ TASK_STATUS.md updated${RESET}`);
+
+  // T-438: mirror the merge into BACKLOG.md — set Status + archive the block
+  // out of Active Wave, so BACKLOG.md and TASK_STATUS.md never fall out of
+  // sync mid-wave (see syncBacklogMergedTasks doc comment above).
+  syncBacklogMergedTasks(mergedTaskRecords, sessionWave);
+
+  // Compute remaining tasks and the auto-computed next_action suggestion
+  const remainingTasks = parseActiveTasks(updatedContent);
+  let nextAction = null;
+  if (remainingTasks.length > 0) {
+    const first = remainingTasks[0];
+    nextAction = `${first.id} → developer → ${first.title}`;
+  }
+
+  const allMerged = remainingTasks.length === 0;
 
   // Resolved next_action: preserve existing Main Agent value when wave is still open
   const resolvedNextAction = allMerged
@@ -779,14 +864,6 @@ async function runNonInteractive(args) {
   const volatileNextActionNotice = buildVolatileNextActionNotice(allMerged, currentNextAction);
   if (volatileNextActionNotice) {
     console.log(`${YELLOW}${volatileNextActionNotice}${RESET}`);
-  }
-
-  // Update legacy PROCESS_STATE.md using resolved value (will be overwritten by
-  // generateProcessStateMd below; kept for any edge-case where JSON update fails)
-  if (fs.existsSync(PROCESS_STATE_MD)) {
-    const processContent = readUtf8(PROCESS_STATE_MD);
-    writeUtf8(PROCESS_STATE_MD, updateProcessState(processContent, resolvedNextAction));
-    console.log(`${GREEN}✓ PROCESS_STATE.md updated${RESET}`);
   }
 
   // Compute summary: explicit --summary wins, otherwise auto-generate — but only once the wave is
@@ -815,31 +892,14 @@ async function runNonInteractive(args) {
     effectiveSummary = buildAutoSummary(sessionWave, mergedTitles);
   }
 
-  const { wave: newWave } = updateProcessStateJson(nextAction, allMerged, effectiveSummary, { summaryKey: 'wave_summary' });
-  console.log(`${GREEN}✓ PROCESS_STATE.json updated${allMerged ? ` — wave → ${newWave}` : ''}${RESET}`);
-
-  // Archive Active Wave heading in BACKLOG.md when wave is complete
-  if (allMerged) {
-    const closedWaveNumber = newWave - 1;
-    const archiveResult = archiveActiveWaveInBacklog(BACKLOG_MD, closedWaveNumber);
-    if (!archiveResult.ok) {
-      console.log(`${YELLOW}⚠ BACKLOG.md wave archive warning:${RESET}\n${archiveResult.warning}`);
-    } else if (archiveResult.archived) {
-      console.log(`${GREEN}✓ BACKLOG.md — Wave ${closedWaveNumber} heading archived${RESET}`);
-    } else if (archiveResult.warning) {
-      console.log(`${YELLOW}⚠ ${archiveResult.warning}${RESET}`);
-    }
-  }
-
-  // Regenerate PROCESS_STATE.md from JSON
-  generateProcessStateMd(PROCESS_STATE_JSON, PROCESS_STATE_MD);
-  console.log(`${GREEN}✓ PROCESS_STATE.md regenerated from JSON${RESET}`);
-
-  if (effectiveSummary) {
-    console.log(`  ${DIM}wave_summary written: ${effectiveSummary}${RESET}`);
-  }
-
-  // Run validator
+  // T-438: run the validator BEFORE any PROCESS_STATE.json mutation. A blocked
+  // (exit 2) close must leave PROCESS_STATE.json byte-for-byte unchanged —
+  // otherwise wave/wave_session would already be bumped, and a subsequent
+  // repair-and-retry run would bump them a second time (double-bump bug).
+  // Narrow exception: sync active_slices first (see syncActiveSlicesPreValidator
+  // doc comment) so a task just merged/archived doesn't trip a false
+  // active_slices_mismatch warning.
+  syncActiveSlicesPreValidator();
   console.log(`\n${BOLD}Running validator...${RESET}`);
   const validatorResult = runValidator();
   if (validatorResult.ok) {
@@ -849,8 +909,52 @@ async function runNonInteractive(args) {
     console.log(validatorResult.output);
   }
 
-  // Commit all tracked changes after successful validator
-  if (validatorResult.ok) {
+  if (validatorResult.code === 2) {
+    console.log(`${RED}✗ PROCESS_STATE mutation SKIPPED — validator exit 2 (repair required); state left unchanged, re-run --close-session after repair${RESET}`);
+  } else {
+    // Update legacy PROCESS_STATE.md using resolved value (will be overwritten by
+    // generateProcessStateMd below; kept for any edge-case where JSON update fails)
+    if (fs.existsSync(PROCESS_STATE_MD)) {
+      const processContent = readUtf8(PROCESS_STATE_MD);
+      writeUtf8(PROCESS_STATE_MD, updateProcessState(processContent, resolvedNextAction));
+      console.log(`${GREEN}✓ PROCESS_STATE.md updated${RESET}`);
+    }
+
+    const { wave: newWave } = updateProcessStateJson(nextAction, allMerged, effectiveSummary, { summaryKey: 'wave_summary' });
+    console.log(`${GREEN}✓ PROCESS_STATE.json updated${allMerged ? ` — wave → ${newWave}` : ''}${RESET}`);
+
+    // Archive Active Wave heading in BACKLOG.md when wave is complete
+    if (allMerged) {
+      const closedWaveNumber = newWave - 1;
+      const archiveResult = archiveActiveWaveInBacklog(BACKLOG_MD, closedWaveNumber);
+      if (!archiveResult.ok) {
+        console.log(`${YELLOW}⚠ BACKLOG.md wave archive warning:${RESET}\n${archiveResult.warning}`);
+      } else if (archiveResult.archived) {
+        console.log(`${GREEN}✓ BACKLOG.md — Wave ${closedWaveNumber} heading archived${RESET}`);
+      } else if (archiveResult.warning) {
+        console.log(`${YELLOW}⚠ ${archiveResult.warning}${RESET}`);
+      }
+    }
+
+    // Regenerate PROCESS_STATE.md from JSON
+    generateProcessStateMd(PROCESS_STATE_JSON, PROCESS_STATE_MD);
+    console.log(`${GREEN}✓ PROCESS_STATE.md regenerated from JSON${RESET}`);
+
+    if (effectiveSummary) {
+      console.log(`  ${DIM}wave_summary written: ${effectiveSummary}${RESET}`);
+    }
+  }
+
+  // Commit all tracked changes unless the validator requires repair (exit 2).
+  // T-431: the commit gate is aligned with the pre-commit hook contract
+  // (.claude/hooks/pre-commit) where only exit 2 blocks — exit 0 (healthy)
+  // and exit 1 (drifting/warnings-only) both still produce a session commit.
+  // Only an explicit exit 2 skips the commit, and it prints an unambiguous
+  // "session commit SKIPPED" line so a silent skip (the T-431 bug) can never
+  // happen again.
+  if (validatorResult.code === 2) {
+    console.log(`${RED}✗ session commit SKIPPED — validator exit 2 (repair required); commit manually after repair${RESET}`);
+  } else {
     try {
       execSync('git -C "' + ROOT + '" add -u', { stdio: 'pipe' });
       const today = new Date().toISOString().slice(0, 10);
@@ -1001,6 +1105,9 @@ async function runInteractive() {
   let updatedContent = taskStatusContent;
   let allMerged = activeTasks.length > 0;
   const sessionMergedIds = [];
+  // T-438: tasks merged this run, tracked with their final status so BACKLOG.md
+  // can be synced symmetrically (see syncBacklogMergedTasks doc comment).
+  const mergedTaskRecords = [];
 
   for (const task of activeTasks) {
     const answer = await prompt(rl, `${BOLD}${task.id}${RESET} — ${task.title}\n  [m]erged / [n]eeds_fix / [k]eep / [enter] skip: `);
@@ -1013,6 +1120,7 @@ async function runInteractive() {
       updatedContent = updateTaskStatusField(updatedContent, task.id, 'Notes', notes);
       updatedContent = moveTaskToCompleted(updatedContent, task.id);
       sessionMergedIds.push(task.id);
+      mergedTaskRecords.push({ id: task.id, status: 'merged' });
       console.log(`  ${GREEN}✓ ${task.id} → merged${RESET}\n`);
     } else if (choice === 'n' || choice === 'needs_fix') {
       updatedContent = updateTaskStatusField(updatedContent, task.id, 'Status', 'needs_fix');
@@ -1061,6 +1169,11 @@ async function runInteractive() {
     }
   } catch { /* use defaults */ }
 
+  // T-438: mirror the merge into BACKLOG.md — set Status + archive the block
+  // out of Active Wave, so BACKLOG.md and TASK_STATUS.md never fall out of
+  // sync mid-wave (see syncBacklogMergedTasks doc comment above).
+  syncBacklogMergedTasks(mergedTaskRecords, sessionWave);
+
   const waveComplete = allMerged && remainingTasks.length === 0;
 
   // T-367: on a wave-complete interactive close, also compute the scoped
@@ -1081,30 +1194,14 @@ async function runInteractive() {
     autoWaveSummary = buildAutoSummary(sessionWave, mergedTitles);
   }
 
-  const { wave: newWave } = updateProcessStateJson(nextAction, waveComplete, waveGoalToSave, { explicitNextAction: operatorExplicit, waveSummary: autoWaveSummary });
-  console.log(`${GREEN}✓ PROCESS_STATE.json updated${waveComplete ? ` — wave → ${newWave}` : ''}${RESET}`);
-  if (autoWaveSummary) {
-    console.log(`  ${DIM}wave_summary written: ${autoWaveSummary}${RESET}`);
-  }
-
-  // Archive Active Wave heading in BACKLOG.md when wave is complete
-  if (waveComplete) {
-    const closedWaveNumber = newWave - 1;
-    const archiveResult = archiveActiveWaveInBacklog(BACKLOG_MD, closedWaveNumber);
-    if (!archiveResult.ok) {
-      console.log(`${YELLOW}⚠ BACKLOG.md wave archive warning:${RESET}\n${archiveResult.warning}`);
-    } else if (archiveResult.archived) {
-      console.log(`${GREEN}✓ BACKLOG.md — Wave ${closedWaveNumber} heading archived${RESET}`);
-    } else if (archiveResult.warning) {
-      console.log(`${YELLOW}⚠ ${archiveResult.warning}${RESET}`);
-    }
-  }
-
-  // Regenerate PROCESS_STATE.md from JSON
-  generateProcessStateMd(PROCESS_STATE_JSON, PROCESS_STATE_MD);
-  console.log(`${GREEN}✓ PROCESS_STATE.md regenerated from JSON${RESET}`);
-
-  // Run validator
+  // T-438: run the validator BEFORE any PROCESS_STATE.json mutation. A blocked
+  // (exit 2) close must leave PROCESS_STATE.json byte-for-byte unchanged —
+  // otherwise wave/wave_session would already be bumped, and a subsequent
+  // repair-and-retry run would bump them a second time (double-bump bug).
+  // Narrow exception: sync active_slices first (see syncActiveSlicesPreValidator
+  // doc comment) so a task just merged/archived doesn't trip a false
+  // active_slices_mismatch warning.
+  syncActiveSlicesPreValidator();
   console.log(`\n${BOLD}Running validator...${RESET}`);
   const validatorResult = runValidator();
   if (validatorResult.ok) {
@@ -1114,8 +1211,43 @@ async function runInteractive() {
     console.log(validatorResult.output);
   }
 
-  // Commit all tracked changes after successful validator
-  if (validatorResult.ok) {
+  if (validatorResult.code === 2) {
+    console.log(`${RED}✗ PROCESS_STATE mutation SKIPPED — validator exit 2 (repair required); state left unchanged, re-run --close-session after repair${RESET}`);
+  } else {
+    const { wave: newWave } = updateProcessStateJson(nextAction, waveComplete, waveGoalToSave, { explicitNextAction: operatorExplicit, waveSummary: autoWaveSummary });
+    console.log(`${GREEN}✓ PROCESS_STATE.json updated${waveComplete ? ` — wave → ${newWave}` : ''}${RESET}`);
+    if (autoWaveSummary) {
+      console.log(`  ${DIM}wave_summary written: ${autoWaveSummary}${RESET}`);
+    }
+
+    // Archive Active Wave heading in BACKLOG.md when wave is complete
+    if (waveComplete) {
+      const closedWaveNumber = newWave - 1;
+      const archiveResult = archiveActiveWaveInBacklog(BACKLOG_MD, closedWaveNumber);
+      if (!archiveResult.ok) {
+        console.log(`${YELLOW}⚠ BACKLOG.md wave archive warning:${RESET}\n${archiveResult.warning}`);
+      } else if (archiveResult.archived) {
+        console.log(`${GREEN}✓ BACKLOG.md — Wave ${closedWaveNumber} heading archived${RESET}`);
+      } else if (archiveResult.warning) {
+        console.log(`${YELLOW}⚠ ${archiveResult.warning}${RESET}`);
+      }
+    }
+
+    // Regenerate PROCESS_STATE.md from JSON
+    generateProcessStateMd(PROCESS_STATE_JSON, PROCESS_STATE_MD);
+    console.log(`${GREEN}✓ PROCESS_STATE.md regenerated from JSON${RESET}`);
+  }
+
+  // Commit all tracked changes unless the validator requires repair (exit 2).
+  // T-431: the commit gate is aligned with the pre-commit hook contract
+  // (.claude/hooks/pre-commit) where only exit 2 blocks — exit 0 (healthy)
+  // and exit 1 (drifting/warnings-only) both still produce a session commit.
+  // Only an explicit exit 2 skips the commit, and it prints an unambiguous
+  // "session commit SKIPPED" line so a silent skip (the T-431 bug) can never
+  // happen again.
+  if (validatorResult.code === 2) {
+    console.log(`${RED}✗ session commit SKIPPED — validator exit 2 (repair required); commit manually after repair${RESET}`);
+  } else {
     try {
       execSync('git -C "' + ROOT + '" add -u', { stdio: 'pipe' });
       const today = new Date().toISOString().slice(0, 10);
@@ -1227,4 +1359,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice };
+module.exports = { moveTaskToCompleted, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, runValidator };

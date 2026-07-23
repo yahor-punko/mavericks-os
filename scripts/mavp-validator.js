@@ -240,6 +240,7 @@ function getSeverityForCheck(checkName) {
     duplicate_active_task: 'failure',
     dev_done_without_qa: 'warning',
     duplicate_task_id: 'failure',
+    duplicate_task_status_entry: 'warning',
     last_task_id_auto_patched: 'info',
     merged_without_commit_hash: 'warning',
     merged_missing_commit_field: 'failure',
@@ -733,6 +734,101 @@ function checkDuplicateTaskIds(backlogMarkdown) {
         })
       );
     }
+  }
+
+  return findings;
+}
+
+/**
+ * Detect duplicate `### T-NNN` task headings and duplicate `## <section>`
+ * headings ANYWHERE in TASK_STATUS.md (across all sections, not just
+ * `## Active tasks`). This catches drift left behind by incomplete
+ * archivals — e.g. a task duplicated across Active tasks + Recently
+ * completed tasks, or two `## Recently completed tasks` sections that
+ * should have been merged into one.
+ *
+ * Distinct from `duplicate_active_task` (which only compares the Active
+ * sections of BACKLOG.md/TASK_STATUS.md against each other) and
+ * `checkDuplicateTaskIds` (BACKLOG.md whole-file only) — neither of those
+ * checks sees a task duplicated across two non-Active TASK_STATUS.md
+ * sections.
+ *
+ * Warning severity only, never failure — detection only, no auto-repair.
+ * A failure severity here would immediately block this repo and every
+ * adopter carrying historical archival debt.
+ */
+function checkDuplicateTaskStatusEntries(taskStatusMarkdown) {
+  const findings = [];
+  const lines = taskStatusMarkdown.split('\n');
+
+  let currentSection = null;
+  const taskOccurrences = new Map(); // taskId -> [{ section, lineNumber }]
+  const sectionOccurrences = new Map(); // sectionName -> [lineNumber, ...]
+
+  lines.forEach((line, index) => {
+    const lineNumber = index + 1;
+
+    const sectionMatch = line.match(/^##\s+(.+?)\s*$/);
+    if (sectionMatch) {
+      currentSection = sectionMatch[1].trim();
+      if (!sectionOccurrences.has(currentSection)) {
+        sectionOccurrences.set(currentSection, []);
+      }
+      sectionOccurrences.get(currentSection).push(lineNumber);
+      return;
+    }
+
+    const taskMatch = line.match(/^###\s+(T-\d+)\s+—/);
+    if (taskMatch) {
+      const taskId = taskMatch[1];
+      if (!taskOccurrences.has(taskId)) {
+        taskOccurrences.set(taskId, []);
+      }
+      taskOccurrences.get(taskId).push({ section: currentSection, lineNumber });
+    }
+  });
+
+  for (const [taskId, occurrences] of taskOccurrences.entries()) {
+    if (occurrences.length <= 1) continue;
+
+    const locations = occurrences
+      .map((o) => `${o.section || 'unknown section'} (line ${o.lineNumber})`)
+      .join(', ');
+
+    findings.push(
+      createFinding({
+        checkName: 'duplicate_task_status_entry',
+        taskId,
+        message: `${taskId} appears ${occurrences.length} times in TASK_STATUS.md: ${locations}.`,
+        repairTarget: 'TASK_STATUS.md',
+        suggestedAction: `Remove or reconcile the duplicate ${taskId} entries in TASK_STATUS.md so only one canonical entry remains.`,
+        details: {
+          kind: 'task_heading',
+          count: occurrences.length,
+          occurrences,
+        },
+      })
+    );
+  }
+
+  for (const [sectionName, lineNumbers] of sectionOccurrences.entries()) {
+    if (lineNumbers.length <= 1) continue;
+
+    findings.push(
+      createFinding({
+        checkName: 'duplicate_task_status_entry',
+        taskId: null,
+        message: `Section heading "## ${sectionName}" appears ${lineNumbers.length} times in TASK_STATUS.md (lines ${lineNumbers.join(', ')}).`,
+        repairTarget: 'TASK_STATUS.md',
+        suggestedAction: `Merge the duplicate "## ${sectionName}" sections into one so each section heading appears exactly once.`,
+        details: {
+          kind: 'section_heading',
+          sectionName,
+          count: lineNumbers.length,
+          lineNumbers,
+        },
+      })
+    );
   }
 
   return findings;
@@ -1275,18 +1371,57 @@ const DEFAULT_ARTIFACT_BUDGETS = {
   task_status_active_tasks_max_lines: 150,
 };
 
-function resolveArtifactBudgets(processStatePath) {
-  let overrides = {};
+/**
+ * T-442: per-task line allowances used to scale the two Active-section budgets
+ * (backlog_active_wave_max_lines, task_status_active_tasks_max_lines) by how
+ * many tasks are actually in flight, so a legitimately large wave (many tasks,
+ * not bloated per-task content) doesn't permanently trip the advisory.
+ *
+ * BACKLOG_ACTIVE_WAVE_PER_TASK_LINES = 15: a full BACKLOG.md task block
+ * (heading + title + Status/Owner/Verification type/Definition of done/etc.
+ * field bullets + blank lines) runs roughly 12-18 lines in practice; 15
+ * strikes the middle and is high enough that 24 tasks * 15 = 360 lines clears
+ * a 340-line section, while 3 tasks * 15 = 45 stays far under the 200-line
+ * static floor (so a 340-line, 3-task section still trips on the static
+ * default).
+ *
+ * TASK_STATUS_ACTIVE_TASKS_PER_TASK_LINES = 10: TASK_STATUS.md entries are
+ * shorter than their BACKLOG counterparts (status + evidence only, no
+ * definition-of-done prose), so a lower per-task allowance is realistic;
+ * combined with the 150-line static floor this still scales sensibly for
+ * large waves (e.g. 20 tasks * 10 = 200 > 150).
+ */
+const BACKLOG_ACTIVE_WAVE_PER_TASK_LINES = 15;
+const TASK_STATUS_ACTIVE_TASKS_PER_TASK_LINES = 10;
+
+function resolveArtifactBudgetOverrides(processStatePath) {
   try {
     const raw = fs.readFileSync(processStatePath, 'utf8');
     const parsed = JSON.parse(raw);
     if (parsed.artifact_budgets && typeof parsed.artifact_budgets === 'object') {
-      overrides = parsed.artifact_budgets;
+      return parsed.artifact_budgets;
     }
   } catch (_err) {
-    // PROCESS_STATE.json missing/unreadable — fall back to defaults silently.
+    // PROCESS_STATE.json missing/unreadable — no overrides.
   }
+  return {};
+}
+
+function resolveArtifactBudgets(processStatePath) {
+  const overrides = resolveArtifactBudgetOverrides(processStatePath);
   return { ...DEFAULT_ARTIFACT_BUDGETS, ...overrides };
+}
+
+/**
+ * Resolve one of the two Active-section budgets: an explicit override always
+ * wins; otherwise the budget is max(static default, per-task allowance *
+ * active task count).
+ */
+function resolveScaledSectionBudget({ overrides, overrideKey, staticDefault, perTaskAllowance, activeTaskCount }) {
+  if (Object.prototype.hasOwnProperty.call(overrides, overrideKey)) {
+    return overrides[overrideKey];
+  }
+  return Math.max(staticDefault, perTaskAllowance * activeTaskCount);
 }
 
 function countLines(text) {
@@ -1300,16 +1435,24 @@ function countLines(text) {
  * Fires when:
  *   - CLAUDE.md whole-file line count exceeds claude_md_max_lines, or
  *   - HANDOFF.md whole-file line count exceeds handoff_md_max_lines, or
- *   - the BACKLOG.md `## Active Wave` section exceeds backlog_active_wave_max_lines, or
- *   - the TASK_STATUS.md `## Active tasks` section exceeds task_status_active_tasks_max_lines.
+ *   - the BACKLOG.md `## Active Wave` section exceeds its (scaled) budget, or
+ *   - the TASK_STATUS.md `## Active tasks` section exceeds its (scaled) budget.
  * Archived wave sections are never counted: getSectionContent() stops at the
  * next top-level `## ` heading, so anything archived outside the current
- * Active Wave / Active tasks section is excluded by construction. Budgets are
- * overridable via an `artifact_budgets` object in PROCESS_STATE.json.
+ * Active Wave / Active tasks section is excluded by construction.
+ * T-442: the two Active-section budgets scale with how many tasks are actually
+ * in the section — each resolves to max(static default, per-task allowance *
+ * active task count) via resolveScaledSectionBudget(), so a wave with many
+ * legitimate tasks doesn't permanently trip the advisory just for having more
+ * tasks. An explicit `artifact_budgets` override in PROCESS_STATE.json always
+ * takes precedence over the computed value for that field. claude_md_max_lines
+ * and handoff_md_max_lines remain flat static budgets (whole-file, not scaled
+ * by task count) and are overridable the same way via `artifact_budgets`.
  * HANDOFF.md and CLAUDE.md are optional files — silently skipped if absent.
  */
 function checkArtifactSizeBudget({ backlogMarkdown, taskStatusMarkdown, backlogPath, processStatePath }) {
   const budgets = resolveArtifactBudgets(processStatePath);
+  const overrides = resolveArtifactBudgetOverrides(processStatePath);
   const repoRoot = path.dirname(backlogPath);
   const findings = [];
 
@@ -1348,12 +1491,20 @@ function checkArtifactSizeBudget({ backlogMarkdown, taskStatusMarkdown, backlogP
   const backlogActiveWaveSection = getSectionContent(backlogMarkdown, /^##\s+Active Wave/mi, '## Active Wave', { optional: true });
   if (backlogActiveWaveSection) {
     const lineCount = countLines(backlogActiveWaveSection);
-    if (lineCount > budgets.backlog_active_wave_max_lines) {
+    const activeTaskCount = getTaskBlocks(backlogActiveWaveSection).length;
+    const backlogActiveWaveBudget = resolveScaledSectionBudget({
+      overrides,
+      overrideKey: 'backlog_active_wave_max_lines',
+      staticDefault: DEFAULT_ARTIFACT_BUDGETS.backlog_active_wave_max_lines,
+      perTaskAllowance: BACKLOG_ACTIVE_WAVE_PER_TASK_LINES,
+      activeTaskCount,
+    });
+    if (lineCount > backlogActiveWaveBudget) {
       findings.push(
         createFinding({
           checkName: 'artifact_size_budget',
           taskId: null,
-          message: `BACKLOG.md Active Wave section is ${lineCount} lines, exceeding the budget of ${budgets.backlog_active_wave_max_lines}`,
+          message: `BACKLOG.md Active Wave section is ${lineCount} lines, exceeding the budget of ${backlogActiveWaveBudget}`,
           repairTarget: 'BACKLOG.md',
           suggestedAction: 'Archive merged/completed tasks out of the Active Wave section, or raise backlog_active_wave_max_lines in PROCESS_STATE.json artifact_budgets.',
         })
@@ -1364,12 +1515,20 @@ function checkArtifactSizeBudget({ backlogMarkdown, taskStatusMarkdown, backlogP
   const taskStatusActiveSection = getSectionContent(taskStatusMarkdown, /^##\s+Active tasks\s*$/m, '## Active tasks', { optional: true });
   if (taskStatusActiveSection) {
     const lineCount = countLines(taskStatusActiveSection);
-    if (lineCount > budgets.task_status_active_tasks_max_lines) {
+    const activeTaskCount = getTaskBlocks(taskStatusActiveSection).length;
+    const taskStatusActiveBudget = resolveScaledSectionBudget({
+      overrides,
+      overrideKey: 'task_status_active_tasks_max_lines',
+      staticDefault: DEFAULT_ARTIFACT_BUDGETS.task_status_active_tasks_max_lines,
+      perTaskAllowance: TASK_STATUS_ACTIVE_TASKS_PER_TASK_LINES,
+      activeTaskCount,
+    });
+    if (lineCount > taskStatusActiveBudget) {
       findings.push(
         createFinding({
           checkName: 'artifact_size_budget',
           taskId: null,
-          message: `TASK_STATUS.md Active tasks section is ${lineCount} lines, exceeding the budget of ${budgets.task_status_active_tasks_max_lines}`,
+          message: `TASK_STATUS.md Active tasks section is ${lineCount} lines, exceeding the budget of ${taskStatusActiveBudget}`,
           repairTarget: 'TASK_STATUS.md',
           suggestedAction: 'Archive completed tasks out of the Active tasks section, or raise task_status_active_tasks_max_lines in PROCESS_STATE.json artifact_budgets.',
         })
@@ -1610,6 +1769,12 @@ function parseArtifacts({ backlogPath, taskStatusPath }) {
   }
 
   const processStatePath = path.join(path.dirname(backlogPath), 'PROCESS_STATE.json');
+
+  // Whole-file TASK_STATUS.md duplicate detection: duplicate ### T-NNN
+  // headings or duplicate ## <section> headings anywhere in the file,
+  // across all sections (not just Active tasks) — catches incomplete
+  // archival fallout that duplicate_active_task/checkDuplicateTaskIds miss.
+  mergeFindings(comparison, checkDuplicateTaskStatusEntries(taskStatusMarkdown));
   // Use all wave records (including merged) so drift is detected even when no active tasks remain
   mergeFindings(comparison, checkLastTaskId(backlogAllWaveRecords, processStatePath));
 
@@ -1817,6 +1982,7 @@ module.exports = {
   compareField,
   compareRecords,
   checkDuplicateTaskIds,
+  checkDuplicateTaskStatusEntries,
   checkLastTaskId,
   checkActiveSlices,
   checkModuleIds,
@@ -1833,6 +1999,7 @@ module.exports = {
   resolveRepoMapPath,
   mergeFindings,
   DEV_DONE_WITHOUT_QA_CHECK: 'dev_done_without_qa',
+  DUPLICATE_TASK_STATUS_ENTRY_CHECK: 'duplicate_task_status_entry',
   MERGED_WITHOUT_COMMIT_HASH_CHECK: 'merged_without_commit_hash',
   MERGED_MISSING_COMMIT_FIELD_CHECK: 'merged_missing_commit_field',
   MERGED_MISSING_COMMIT_FORMAT_CHECK: 'merged_missing_commit_format',
@@ -1855,6 +2022,8 @@ module.exports = {
   BLOCKED_BY_OPEN_CHECK: 'blocked_by_open',
   BLOCKED_BY_UNRESOLVABLE_CHECK: 'blocked_by_unresolvable',
   DEFAULT_ARTIFACT_BUDGETS,
+  BACKLOG_ACTIVE_WAVE_PER_TASK_LINES,
+  TASK_STATUS_ACTIVE_TASKS_PER_TASK_LINES,
   checkMergedNeedsFixRounds,
   checkOverdueRechecks,
   checkNextActionVolatileFacts,

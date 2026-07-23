@@ -6,12 +6,19 @@
  * Reads task statuses from BACKLOG.md (Active Wave section only) and updates
  * the matching `- **Status:**` lines in TASK_STATUS.md.
  *
- * Only touches `- **Status:**` lines — never evidence blocks, Notes, or any
- * other fields — EXCEPT for the auto-create path (T-419): a BACKLOG Active
- * Wave task that has no matching TASK_STATUS.md Active-tasks entry gets a
- * whole new skeleton entry created (via the shared entry builder in
- * mavp-operator-lib.js), completing the mirror for creations the same way
- * status updates were already mirrored.
+ * Only touches `- **Status:**` lines and the task heading title — never
+ * evidence blocks, Notes, or any other fields — EXCEPT for the auto-create
+ * path (T-419): a BACKLOG Active Wave task that has no matching
+ * TASK_STATUS.md Active-tasks entry gets a whole new skeleton entry created
+ * (via the shared entry builder in mavp-operator-lib.js), completing the
+ * mirror for creations the same way status updates were already mirrored.
+ *
+ * Heading-title mirror (T-432): when a BACKLOG heading title for a task
+ * differs from its TASK_STATUS heading title, the TASK_STATUS heading is
+ * rewritten to match BACKLOG's title (BACKLOG is the source of truth) —
+ * clearing the title_mismatch validator warning that status-only sync could
+ * never fix. Only the title portion of the heading is touched; the id and
+ * separator are preserved as-is.
  *
  * Called automatically by the PostToolUse hook when BACKLOG.md is edited.
  * Also available as:
@@ -20,16 +27,18 @@
  * Exit 0 always — non-fatal.
  *
  * Output policy (hook silent-means-success compliance — T-418): no-op paths
- * (statuses already in sync, no Active Wave section/tasks to sync, no
- * missing entries to create) emit NOTHING on stdout or stderr — the
- * PostToolUse hook surfaces any stderr output to the agent as feedback, so a
- * noisy no-op looks like an error on every BACKLOG/TASK_STATUS edit. Only
- * three categories write to stderr:
+ * (statuses already in sync, titles already in sync, no Active Wave
+ * section/tasks to sync, no missing entries to create) emit NOTHING on
+ * stdout or stderr — the PostToolUse hook surfaces any stderr output to the
+ * agent as feedback, so a noisy no-op looks like an error on every
+ * BACKLOG/TASK_STATUS edit. Only four categories write to stderr:
  *   1. Real errors — missing/unreadable files, parse/write exceptions.
  *   2. Actual status-sync mutations — one line per synced task, exactly:
  *      "sync-status: synced T-NNN: <old> -> <new>"
  *   3. Actual entry-creation mutations (T-419) — one line per created task,
  *      exactly: "sync-status: created T-NNN entry"
+ *   4. Actual heading-title mutations (T-432) — one line per retitled task,
+ *      exactly: "sync-status: retitled T-NNN"
  */
 
 'use strict';
@@ -147,14 +156,16 @@ function findMissingEntries(backlogMap, existingIds) {
 
 /**
  * Update the first `- **Status:**` line within each task block in TASK_STATUS.md
- * for tasks that appear in the backlogMap.
+ * for tasks that appear in the backlogMap, and rewrite each task heading's
+ * title (T-432) when it differs from BACKLOG's title for the same task id.
  *
  * @param {string} content - TASK_STATUS.md content
- * @param {Map} backlogMap - taskId -> { status, ... } (from parseBacklogTasks)
- * Returns { updatedContent, changes: [{taskId, oldStatus, newStatus}] }.
+ * @param {Map} backlogMap - taskId -> { status, title, ... } (from parseBacklogTasks)
+ * Returns { updatedContent, changes: [{taskId, oldStatus, newStatus}], retitles: [{taskId, oldTitle, newTitle}] }.
  */
 function applyStatuses(content, backlogMap) {
   const changes = [];
+  const retitles = [];
 
   // Split content into task blocks by ### T-NNN headings
   // We rebuild the file by processing each block
@@ -166,11 +177,23 @@ function applyStatuses(content, backlogMap) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    // Detect a new task heading
-    const headingMatch = line.match(/^###\s+(T-\d+)\s+/);
+    // Detect a new task heading — capture the id, the separator (em-dash or
+    // hyphen, if any), and the title text so a mismatched title can be
+    // rewritten in place (T-432).
+    const headingMatch = line.match(/^###\s+(T-\d+)\s+(?:([—-])\s*)?(.*)$/);
     if (headingMatch) {
       currentTaskId = headingMatch[1];
       statusUpdatedForCurrentTask = false;
+
+      const separator = headingMatch[2] || '—';
+      const oldTitle = (headingMatch[3] || '').trim();
+      const backlogInfo = backlogMap.get(currentTaskId);
+      if (backlogInfo && backlogInfo.title && oldTitle !== backlogInfo.title) {
+        retitles.push({ taskId: currentTaskId, oldTitle, newTitle: backlogInfo.title });
+        result.push(`### ${currentTaskId} ${separator} ${backlogInfo.title}`);
+        continue;
+      }
+
       result.push(line);
       continue;
     }
@@ -199,7 +222,7 @@ function applyStatuses(content, backlogMap) {
     result.push(line);
   }
 
-  return { updatedContent: result.join('\n'), changes };
+  return { updatedContent: result.join('\n'), changes, retitles };
 }
 
 function main() {
@@ -271,8 +294,9 @@ function main() {
     process.exit(0);
   }
 
-  // Nothing created and statuses already in sync is a no-op — stay silent (T-418).
-  if (missingEntries.length === 0 && result.changes.length === 0) {
+  // Nothing created, no titles to rewrite, and statuses already in sync is a
+  // no-op — stay silent (T-418).
+  if (missingEntries.length === 0 && result.changes.length === 0 && result.retitles.length === 0) {
     process.exit(0);
   }
 
@@ -286,6 +310,10 @@ function main() {
 
   for (const { taskId } of missingEntries) {
     process.stderr.write('sync-status: created ' + taskId + ' entry\n');
+  }
+
+  for (const { taskId } of result.retitles) {
+    process.stderr.write('sync-status: retitled ' + taskId + '\n');
   }
 
   for (const { taskId, oldStatus, newStatus } of result.changes) {

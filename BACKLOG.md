@@ -11,7 +11,7 @@
 
 ### T-001 — Example task
 - **Status:** planned
-- **Owner:** developer
+- **Owner role:** developer
 - **Depends on:** —
 - **Root cause:** [optional — T-NNN of the task that closes the underlying structural cause]
 - **Touches:** [optional — comma-separated file paths this task modifies, e.g. scripts/mavp-operator-lib.js, CLAUDE.md]
