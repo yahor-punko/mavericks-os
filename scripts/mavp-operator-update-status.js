@@ -19,6 +19,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execSync } = require('node:child_process');
+const { printRepoIdentityHeader } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -89,6 +90,8 @@ function printUsage() {
 }
 
 function main() {
+  printRepoIdentityHeader(ROOT);
+
   const args = process.argv.slice(2);
   const taskId = args[0];
   const newStatus = args[1];

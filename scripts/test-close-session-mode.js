@@ -446,3 +446,286 @@ function makeMidWaveFixtureRepo() {
 }
 
 console.log('All T-438 assertions passed.');
+
+// ---------------------------------------------------------------------------
+// T-445 — interactive/non-interactive wave-complete parity + announcement:
+// (1) an empty Active tasks section completes the wave identically in both
+//     modes, printing an explicit "Wave N complete — archiving + incrementing"
+//     line;
+// (2) a fixture with one task still open keeps the wave open identically in
+//     both modes, printing a line naming that task as the reason;
+// (3) an already-merged task sitting in the Active tasks section no longer
+//     requires re-answering in the interactive loop and does not block wave
+//     completion.
+// ---------------------------------------------------------------------------
+
+function readProcessState(dir) {
+  return JSON.parse(fs.readFileSync(path.join(dir, 'PROCESS_STATE.json'), 'utf8'));
+}
+
+function makeOneOpenTaskFixtureRepo(waveNumber) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t445-open-fixture-'));
+
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
+
+  fs.writeFileSync(
+    path.join(dir, 'BACKLOG.md'),
+    [
+      '# BACKLOG',
+      '',
+      '## Active Wave',
+      '',
+      '### T-200 — Task still in flight',
+      '- **Status:** planned',
+      '- **Owner role:** developer',
+      '- **Repo:** mavericks',
+      '- **Verification type:** runtime',
+      '',
+    ].join('\n')
+  );
+
+  fs.writeFileSync(
+    path.join(dir, 'TASK_STATUS.md'),
+    [
+      '# TASK_STATUS',
+      '',
+      '## Active tasks',
+      '',
+      '### T-200 — Task still in flight',
+      '- **Status:** planned',
+      '- **Owner role:** developer',
+      '- **Verification type:** runtime',
+      '- **Last verified by:** —',
+      '- **Evidence:** —',
+      '- **Notes:** —',
+      '',
+      '## Recently completed tasks',
+      '',
+    ].join('\n')
+  );
+
+  fs.writeFileSync(
+    path.join(dir, 'PROCESS_STATE.json'),
+    JSON.stringify(
+      {
+        initiative: 'T-445 open fixture',
+        stage: 'execution',
+        wave: waveNumber,
+        wave_status: 'execution',
+        wave_goal: 'fixture wave goal',
+        parked_waves: [],
+        active_slices: [],
+        next_action: null,
+        blocker: null,
+        stage_owner: 'main_agent',
+        last_task_id: 200,
+        last_updated: '2020-01-01',
+        deploy_contours: 0,
+        wave_summary: null,
+        rechecks: [],
+      },
+      null,
+      2
+    ) + '\n'
+  );
+
+  execFileSync('git', ['add', '-A'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'fixture: initial state'], { cwd: dir });
+
+  return dir;
+}
+
+function makeAlreadyMergedFixtureRepo(waveNumber) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t445-merged-fixture-'));
+
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
+
+  fs.writeFileSync(
+    path.join(dir, 'BACKLOG.md'),
+    [
+      '# BACKLOG',
+      '',
+      '## Active Wave',
+      '',
+      '### T-300 — Already merged task',
+      '- **Status:** qa_passed',
+      '- **Owner role:** developer',
+      '- **Repo:** mavericks',
+      '- **Verification type:** artifact',
+      '',
+    ].join('\n')
+  );
+
+  fs.writeFileSync(
+    path.join(dir, 'TASK_STATUS.md'),
+    [
+      '# TASK_STATUS',
+      '',
+      '## Active tasks',
+      '',
+      '### T-300 — Already merged task',
+      '- **Status:** merged',
+      '- **Owner role:** developer',
+      '- **Verification type:** artifact',
+      '- **Last verified by:** qa',
+      '- **Evidence:** commit: bbbbbbb branch: main',
+      '- **Notes:** —',
+      '',
+      '## Recently completed tasks',
+      '',
+    ].join('\n')
+  );
+
+  fs.writeFileSync(
+    path.join(dir, 'PROCESS_STATE.json'),
+    JSON.stringify(
+      {
+        initiative: 'T-445 already-merged fixture',
+        stage: 'execution',
+        wave: waveNumber,
+        wave_status: 'execution',
+        wave_goal: 'fixture wave goal',
+        parked_waves: [],
+        active_slices: [],
+        next_action: null,
+        blocker: null,
+        stage_owner: 'main_agent',
+        last_task_id: 300,
+        last_updated: '2020-01-01',
+        deploy_contours: 0,
+        wave_summary: null,
+        rechecks: [],
+      },
+      null,
+      2
+    ) + '\n'
+  );
+
+  execFileSync('git', ['add', '-A'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'fixture: initial state'], { cwd: dir });
+
+  return dir;
+}
+
+// Case 14: empty Active tasks section, wave=3 — non-interactive completes the
+// wave and prints the explicit announcement.
+{
+  const repoDir = makeFixtureRepo();
+  // makeFixtureRepo() seeds wave: 1 — bump it to 3 to prove the announcement
+  // names whatever wave is actually open, not a hardcoded number.
+  const ps = readProcessState(repoDir);
+  ps.wave = 3;
+  fs.writeFileSync(path.join(repoDir, 'PROCESS_STATE.json'), JSON.stringify(ps, null, 2) + '\n');
+  execFileSync('git', ['commit', '-aqm', 'fixture: set wave 3'], { cwd: repoDir });
+
+  const result = runCloseSessionCli(repoDir, __dirname, ['--non-interactive']);
+
+  assert.ok(
+    /Wave 3 complete — archiving \+ incrementing/.test(result.stdout),
+    `Case 14 FAIL: expected explicit wave-complete announcement, got:\n${result.stdout}`
+  );
+  const after = readProcessState(repoDir);
+  assert.strictEqual(after.wave, 4, `Case 14 FAIL: expected wave to bump to 4, got ${after.wave}`);
+
+  console.log('Case 14 passed: non-interactive completes an empty-Active-tasks wave and announces it');
+
+  cleanup(repoDir);
+}
+
+// Case 15: identical empty-Active-tasks fixture, interactive mode — same
+// wave-complete decision and same announcement as Case 14. Only prompt
+// reached is "Next action" (wave_goal already set, no active tasks to
+// answer) — a single blank line accepts the default.
+{
+  const repoDir = makeFixtureRepo();
+  const ps = readProcessState(repoDir);
+  ps.wave = 3;
+  fs.writeFileSync(path.join(repoDir, 'PROCESS_STATE.json'), JSON.stringify(ps, null, 2) + '\n');
+  execFileSync('git', ['commit', '-aqm', 'fixture: set wave 3'], { cwd: repoDir });
+
+  const result = runCloseSessionCli(repoDir, __dirname, ['--interactive'], '\n\n');
+
+  assert.ok(
+    /Wave 3 complete — archiving \+ incrementing/.test(result.stdout),
+    `Case 15 FAIL: expected explicit wave-complete announcement (interactive), got:\n${result.stdout}`
+  );
+  const after = readProcessState(repoDir);
+  assert.strictEqual(after.wave, 4, `Case 15 FAIL: expected wave to bump to 4 (interactive), got ${after.wave}`);
+
+  console.log('Case 15 passed: interactive completes an empty-Active-tasks wave and announces it — parity with Case 14');
+
+  cleanup(repoDir);
+}
+
+// Case 16: one task still planned, wave=5 — non-interactive keeps the wave
+// open and names the task as the reason.
+{
+  const repoDir = makeOneOpenTaskFixtureRepo(5);
+  const result = runCloseSessionCli(repoDir, __dirname, ['--non-interactive']);
+
+  assert.ok(
+    /Wave 5 stays open — T-200 still planned/.test(result.stdout),
+    `Case 16 FAIL: expected explicit "stays open" line naming T-200, got:\n${result.stdout}`
+  );
+  const after = readProcessState(repoDir);
+  assert.strictEqual(after.wave, 5, `Case 16 FAIL: expected wave to remain 5, got ${after.wave}`);
+
+  console.log('Case 16 passed: non-interactive keeps an open wave open and names the blocking task');
+
+  cleanup(repoDir);
+}
+
+// Case 17: identical one-open-task fixture, interactive mode — same
+// wave-stays-open decision and same announcement naming T-200. Two blank-line
+// answers: skip the T-200 merge/needs_fix/keep prompt, then accept the
+// default "Next action".
+{
+  const repoDir = makeOneOpenTaskFixtureRepo(5);
+  const result = runCloseSessionCli(repoDir, __dirname, ['--interactive'], '\n\n');
+
+  assert.ok(
+    /Wave 5 stays open — T-200 still planned/.test(result.stdout),
+    `Case 17 FAIL: expected explicit "stays open" line naming T-200 (interactive), got:\n${result.stdout}`
+  );
+  const after = readProcessState(repoDir);
+  assert.strictEqual(after.wave, 5, `Case 17 FAIL: expected wave to remain 5 (interactive), got ${after.wave}`);
+
+  console.log('Case 17 passed: interactive keeps an open wave open and names the blocking task — parity with Case 16');
+
+  cleanup(repoDir);
+}
+
+// Case 18: an already-merged task sitting in TASK_STATUS's Active tasks
+// section (not yet archived) — interactive mode must NOT prompt
+// [m]/[n]/[k]/[enter] for it, must auto-archive it, and must complete the
+// wave without requiring the operator to answer for it. Only the "Next
+// action" prompt is reached (blank-line accepts the default).
+{
+  const repoDir = makeAlreadyMergedFixtureRepo(7);
+  const result = runCloseSessionCli(repoDir, __dirname, ['--interactive'], '\n');
+
+  assert.ok(
+    /T-300 → moved to completed \(was already merged\)/.test(result.stdout),
+    `Case 18 FAIL: expected T-300 to be auto-archived without prompting, got:\n${result.stdout}`
+  );
+  assert.ok(
+    !/T-300.*\[m\]erged \/ \[n\]eeds_fix/.test(result.stdout),
+    `Case 18 FAIL: T-300 must not be re-prompted with the merged/needs_fix/keep question, got:\n${result.stdout}`
+  );
+  assert.ok(
+    /Wave 7 complete — archiving \+ incrementing/.test(result.stdout),
+    `Case 18 FAIL: expected the wave to complete without requiring re-answering T-300, got:\n${result.stdout}`
+  );
+  const after = readProcessState(repoDir);
+  assert.strictEqual(after.wave, 8, `Case 18 FAIL: expected wave to bump to 8, got ${after.wave}`);
+
+  console.log('Case 18 passed: already-merged task auto-archives without prompting and does not block wave completion');
+
+  cleanup(repoDir);
+}
+
+console.log('All T-445 assertions passed.');

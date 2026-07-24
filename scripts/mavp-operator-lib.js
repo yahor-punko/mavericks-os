@@ -21,6 +21,41 @@ function writeUtf8(filePath, content) {
 }
 
 /**
+ * Print a first-line repo-identity header so a wrong-repo run (stale shell cwd,
+ * or a stale MAVERICKS_PROJECT_ROOT) is obvious immediately. Reads wave and
+ * initiative from <root>/PROCESS_STATE.json; degrades to a path-only line when
+ * that file is absent or unparsable. Never throws.
+ *
+ * @param {string} root - Absolute path to the project root being operated on.
+ */
+function printRepoIdentityHeader(root) {
+  try {
+    const processStateJsonPath = path.join(root, 'PROCESS_STATE.json');
+    let state = null;
+    if (fs.existsSync(processStateJsonPath)) {
+      try {
+        state = JSON.parse(fs.readFileSync(processStateJsonPath, 'utf8'));
+      } catch {
+        state = null;
+      }
+    }
+    if (state && (state.wave !== undefined || state.initiative !== undefined)) {
+      const wave = state.wave !== undefined ? state.wave : 'unknown';
+      const initiative = state.initiative !== undefined ? state.initiative : 'unknown';
+      console.log(`repo: ${root} | wave: ${wave} | initiative: ${initiative}`);
+    } else {
+      console.log(`repo: ${root}`);
+    }
+  } catch {
+    try {
+      console.log(`repo: ${root}`);
+    } catch {
+      // swallow - never throw from a diagnostic header
+    }
+  }
+}
+
+/**
  * Determine the next task ID by reading PROCESS_STATE.json last_task_id
  * and also scanning BACKLOG.md + TASK_STATUS.md for the highest existing ID.
  * Takes the max of both sources to avoid duplicates.
@@ -3006,6 +3041,151 @@ function computeMustRead(root, activeSlices) {
   return Array.from(new Set([...changedFiles, ...contextDocs]));
 }
 
+/**
+ * T-446 — shared commit-hash validation/resolution for evidence-writing
+ * commands (--set-status --commit, --merge-task).
+ *
+ * Accepts either the literal string "HEAD" (resolved to the current repo's
+ * short hash via `git rev-parse --short HEAD`) or a hex string matching
+ * /^[0-9a-f]{7,40}$/. Any other input is rejected WITHOUT invoking git.
+ *
+ * For a format-valid, non-HEAD hash, best-effort checks reachability from
+ * the given branch via `git merge-base --is-ancestor <hash> <branch>`. This
+ * check never blocks the write — an unreachable/unknown hash surfaces only
+ * as a non-fatal `warning` string naming both the hash and the branch. When
+ * git itself is unavailable (ENOENT) or the root is not inside a git work
+ * tree, the function degrades silently: no warning, no throw.
+ *
+ * @param {string} root - Absolute path used as the git command's cwd.
+ * @param {string} rawHash - Raw --commit value ("HEAD", a hex hash, or garbage).
+ * @param {string} branchName - Branch name to check reachability against.
+ * @returns {{ok: boolean, hash: string|null, warning: string|null, error: string|null}}
+ */
+function isValidHashFormat(hash) {
+  return /^[0-9a-f]{7,40}$/.test(String(hash || ''));
+}
+
+function isInsideGitRepo(root) {
+  try {
+    cp.execSync('git rev-parse --is-inside-work-tree', {
+      cwd: root,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+function resolveCommitHash(root, rawHash, branchName) {
+  if (!rawHash) {
+    return { ok: true, hash: null, warning: null, error: null };
+  }
+
+  if (rawHash === 'HEAD') {
+    try {
+      const out = cp
+        .execSync('git rev-parse --short HEAD', {
+          cwd: root,
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        })
+        .trim();
+      if (!out) throw new Error('empty HEAD resolution');
+      return { ok: true, hash: out, warning: null, error: null };
+    } catch (err) {
+      return {
+        ok: false,
+        hash: null,
+        warning: null,
+        error: 'Could not resolve --commit HEAD (git unavailable or not inside a repository).',
+      };
+    }
+  }
+
+  if (!isValidHashFormat(rawHash)) {
+    return {
+      ok: false,
+      hash: null,
+      warning: null,
+      error: `Invalid commit hash "${rawHash}" — expected "HEAD" or 7-40 lowercase hex characters (e.g. abc1234).`,
+    };
+  }
+
+  // Format is valid. Best-effort reachability check — never blocks the write.
+  let warning = null;
+  const branch = branchName || 'main';
+  try {
+    cp.execSync(`git merge-base --is-ancestor ${rawHash} ${branch}`, {
+      cwd: root,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    if (err && err.code === 'ENOENT') {
+      // git binary not found at all — degrade silently.
+    } else if (isInsideGitRepo(root)) {
+      warning = `commit ${rawHash} does not appear reachable from branch "${branch}"`;
+    }
+    // else: not inside a git work tree — degrade silently.
+  }
+
+  return { ok: true, hash: rawHash, warning, error: null };
+}
+
+/**
+ * T-446 — merge a resolved "commit: <hash> branch: <branch>" pair into an
+ * existing Evidence field string without deleting prior text (e.g. QA notes).
+ * If the evidence already contains a `commit: ... [branch: ...]` token, that
+ * token is replaced in place (no duplication). Otherwise the new pair is
+ * appended to the end of the existing text, verbatim-preserving it.
+ *
+ * @param {string} existingEvidence - Current Evidence field text (may be empty or "—").
+ * @param {string} hash - Resolved commit hash to write.
+ * @param {string} branch - Branch name to write.
+ * @returns {string}
+ */
+function mergeCommitEvidence(existingEvidence, hash, branch) {
+  const replacement = `commit: ${hash} branch: ${branch}`;
+  const trimmed = (existingEvidence || '').trim();
+  const placeholder = trimmed === '—' || trimmed === '-' ? '' : trimmed;
+  const commitBranchRe = /commit:\s*\S+(?:\s+branch:\s*\S+)?/;
+  if (commitBranchRe.test(placeholder)) {
+    return placeholder.replace(commitBranchRe, replacement);
+  }
+  if (!placeholder) return replacement;
+  return `${placeholder} ${replacement}`;
+}
+
+/**
+ * Return the full list of commit hashes reachable from HEAD in `root`, via a
+ * single batched `git rev-list HEAD` call (T-448). Used by the validator's
+ * commit_unreachable check to detect merged-task evidence commit: hashes that
+ * were never actually integrated onto HEAD — e.g. a worktree-local hash pasted
+ * into evidence before the cherry-pick landed. A mere existence check (like
+ * `git cat-file -e <hash>`) is insufficient here: worktrees share the object
+ * database, so it would pass even for a hash that never reached HEAD.
+ * Reachability from HEAD is the only check that actually catches this.
+ *
+ * Degrades silently (returns null, never throws) when `root` is not a git
+ * repository, git is not installed, or the repo has no commits yet — mirrors
+ * the pattern used by findPreviousCloseSessionCommit() above.
+ *
+ * @param {string} root - Absolute path to the git working tree.
+ * @returns {string[]|null} Full hashes reachable from HEAD, or null when git/HEAD is unavailable.
+ */
+function getCommitHashesReachableFromHead(root) {
+  try {
+    const output = cp.execSync('git rev-list HEAD', {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return output.split('\n').map((s) => s.trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   ROOT,
   ackRecheck,
@@ -3025,12 +3205,16 @@ module.exports = {
   findPreviousCloseSessionCommit,
   formatIsoTime,
   generateProcessStateMd,
+  getCommitHashesReachableFromHead,
   getDeployPendingForRepo,
   getFilesChangedSincePreviousCloseSession,
   getNextTaskId,
   insertIntoActiveTasks,
   insertIntoActiveWave,
+  isInsideGitRepo,
+  isValidHashFormat,
   lookupTaskTitle,
+  mergeCommitEvidence,
   moveActiveBlocksToParkedSection,
   moveParkedBlocksToActiveSection,
   normalizeWhitespace,
@@ -3046,12 +3230,14 @@ module.exports = {
   parseTasksWithRepo,
   parseTouchesConflicts,
   parseWaveTasks,
+  printRepoIdentityHeader,
   readPermissionMode,
   readPersistedPermissionMode,
   relativeTime,
   renameTask,
   renderThinSnapshot,
   readUtf8,
+  resolveCommitHash,
   resolveContextBundlePath,
   resolveModuleRegistryPath,
   resolveRepoMapPath,

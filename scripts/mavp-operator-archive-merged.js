@@ -42,7 +42,7 @@ const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
 const VALIDATOR = path.join(__dirname, 'mavp-validator.js');
 
-const { archiveMergedTasksFromActiveWave } = require('./mavp-operator-lib.js');
+const { archiveMergedTasksFromActiveWave, printRepoIdentityHeader } = require('./mavp-operator-lib.js');
 const { moveTaskToCompleted } = require('./mavp-operator-close-session.js');
 
 const RESET = '\x1b[0m';
@@ -87,6 +87,8 @@ function runValidatorOnce() {
 }
 
 function main() {
+  printRepoIdentityHeader(ROOT);
+
   if (!fs.existsSync(BACKLOG_MD)) {
     console.error(`${RED}BACKLOG.md not found at ${BACKLOG_MD}${RESET}`);
     process.exitCode = 2;

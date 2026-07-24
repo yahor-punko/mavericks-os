@@ -39,6 +39,7 @@ const {
   updateLastTaskId,
   writeContextBundle,
   buildTaskStatusEntry,
+  printRepoIdentityHeader,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -248,6 +249,8 @@ function parseCliArgs(argv) {
 }
 
 async function main() {
+  printRepoIdentityHeader(ROOT);
+
   const today = new Date().toISOString().slice(0, 10);
   const { filePath, repoName } = parseCliArgs(process.argv.slice(2));
 

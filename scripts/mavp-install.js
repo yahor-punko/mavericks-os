@@ -98,6 +98,7 @@
  */
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
 const { execSync, execFileSync } = require('node:child_process');
@@ -785,6 +786,87 @@ function removeStripPath(targetDir, rel) {
   }
 }
 
+/**
+ * Compare two dotted numeric version strings (e.g. "0.34.0" vs "0.35.0").
+ * Returns -1 / 0 / 1 (a<b / a==b / a>b), or null if either string doesn't
+ * parse as a dotted-numeric version — callers must treat null as "cannot
+ * compare, skip".
+ */
+function compareSemver(a, b) {
+  const parse = (v) => {
+    if (typeof v !== 'string') return null;
+    const parts = v.trim().split('.').map((p) => Number(p));
+    if (parts.length === 0 || parts.some((n) => !Number.isFinite(n))) return null;
+    return parts;
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (!pa || !pb) return null;
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const na = pa[i] || 0;
+    const nb = pb[i] || 0;
+    if (na < nb) return -1;
+    if (na > nb) return 1;
+  }
+  return 0;
+}
+
+/**
+ * Stale-source guard (T-444): on self-install, resolve a sibling Mavericks
+ * source (MAVERICKS_HOME > ~/.mavericks > ~/Documents/mavericks — first
+ * existing dir containing scripts/mavp-version.js) and, if it exists and is
+ * NOT the same directory as the local framework root, read its version by
+ * regex (never require() — must not execute arbitrary sibling code) and
+ * compare it against the local MAVERICKS_VERSION.
+ *
+ * Returns { siblingDir, siblingVersion } when the local source is strictly
+ * older than the sibling (the case to warn about), or null in every other
+ * case: no sibling resolves, sibling IS the local framework root (true
+ * canonical self-install / symlinked home), either version fails to parse,
+ * or local >= sibling.
+ *
+ * Never throws — any IO/parse failure degrades silently to null (no guard).
+ */
+function detectStaleSourceGuard(frameworkOwnRoot) {
+  try {
+    const candidates = [
+      process.env.MAVERICKS_HOME,
+      path.join(os.homedir(), '.mavericks'),
+      path.join(os.homedir(), 'Documents', 'mavericks'),
+    ].filter(Boolean);
+
+    let siblingDir = null;
+    for (const candidate of candidates) {
+      const versionFile = path.join(candidate, 'scripts', 'mavp-version.js');
+      if (fs.existsSync(versionFile)) {
+        siblingDir = candidate;
+        break;
+      }
+    }
+    if (!siblingDir) return null;
+
+    const siblingReal = fs.realpathSync(siblingDir);
+    const ownReal = fs.realpathSync(frameworkOwnRoot);
+    if (siblingReal === ownReal) return null;
+
+    // mavp-version.js is `module.exports = { MAVERICKS_VERSION: '0.35.0' };` — the key
+    // is followed by ':' (object literal), not '=' (which only appears before the
+    // enclosing `{ ... }`); match either separator so this stays robust to both forms.
+    const versionFileContent = fs.readFileSync(path.join(siblingDir, 'scripts', 'mavp-version.js'), 'utf8');
+    const match = versionFileContent.match(/MAVERICKS_VERSION\s*[:=]\s*'([^']+)'/);
+    if (!match) return null;
+    const siblingVersion = match[1];
+
+    const cmp = compareSemver(MAVERICKS_VERSION, siblingVersion);
+    if (cmp === null || cmp >= 0) return null;
+
+    return { siblingDir, siblingVersion };
+  } catch {
+    return null;
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const checkOnly = args.includes('--check');
@@ -823,6 +905,20 @@ async function main() {
   }
   if (selfInstall) {
     console.log(`${CYAN}self-install detected: framework files are the source here; syncing config/hooks only${RESET}\n`);
+  }
+
+  // Stale-source guard (T-444): on self-install, warn loudly if the LOCAL framework
+  // source (FRAMEWORK_DIR) is older than an available sibling install resolved via
+  // MAVERICKS_HOME / ~/.mavericks / ~/Documents/mavericks — the adopter-project incident
+  // (re-stamped an older version while ~/.mavericks was newer). See detectStaleSourceGuard()
+  // above for the full skip-condition contract. Never throws, never changes exit code.
+  const staleSourceGuard = selfInstall ? detectStaleSourceGuard(path.join(FRAMEWORK_DIR, '..')) : null;
+  if (staleSourceGuard) {
+    console.log(`${RED}${BOLD}WARNING: stale local framework source${RESET}`);
+    console.log(`${RED}  Local source:   ${FRAMEWORK_DIR} ${BOLD}v${MAVERICKS_VERSION}${RESET}`);
+    console.log(`${RED}  Newer sibling:  ${staleSourceGuard.siblingDir} ${BOLD}v${staleSourceGuard.siblingVersion}${RESET}`);
+    console.log(`${RED}  Re-run the installer from the newer source instead:${RESET}`);
+    console.log(`${RED}    cd ${staleSourceGuard.siblingDir} && node scripts/mavp-install.js ${targetDir} --update${RESET}\n`);
   }
 
   // --hooks-only (T-406): sync ONLY the managed hooks (+ their .mavp-hook-ts gitignore
@@ -970,17 +1066,24 @@ async function main() {
       }
     }
 
-    // Update mavericks_version in target project's PROCESS_STATE.json if it exists
+    // Update mavericks_version in target project's PROCESS_STATE.json if it exists.
+    // Stale-source guard (T-444): when a newer sibling source was detected above,
+    // this re-stamp would silently downgrade PROCESS_STATE.json's mavericks_version
+    // to the older local source's value — skip it and print a red notice instead.
     const psJsonPath = path.join(targetDir, 'PROCESS_STATE.json');
     if (fs.existsSync(psJsonPath)) {
-      try {
-        const psRaw = fs.readFileSync(psJsonPath, 'utf8');
-        const ps = JSON.parse(psRaw);
-        ps.mavericks_version = MAVERICKS_VERSION;
-        fs.writeFileSync(psJsonPath, JSON.stringify(ps, null, 2) + '\n', 'utf8');
-        console.log(`  ${GREEN}updated${RESET}  PROCESS_STATE.json ${DIM}(mavericks_version → ${MAVERICKS_VERSION})${RESET}`);
-      } catch {
-        // malformed JSON — skip silently
+      if (staleSourceGuard) {
+        console.log(`  ${RED}skipped${RESET}  PROCESS_STATE.json version stamp (local source v${MAVERICKS_VERSION} is older than ${staleSourceGuard.siblingDir} v${staleSourceGuard.siblingVersion})`);
+      } else {
+        try {
+          const psRaw = fs.readFileSync(psJsonPath, 'utf8');
+          const ps = JSON.parse(psRaw);
+          ps.mavericks_version = MAVERICKS_VERSION;
+          fs.writeFileSync(psJsonPath, JSON.stringify(ps, null, 2) + '\n', 'utf8');
+          console.log(`  ${GREEN}updated${RESET}  PROCESS_STATE.json ${DIM}(mavericks_version → ${MAVERICKS_VERSION})${RESET}`);
+        } catch {
+          // malformed JSON — skip silently
+        }
       }
     }
 

@@ -22,9 +22,18 @@
  * failure.  The validator exit code is returned as the process exit code
  * (0 = healthy, 1 = drifting, 2 = repair required).
  *
- * --commit <hash>   When present, writes "commit: <hash> branch: <branch>" into
- *                   the Evidence field of each updated task in TASK_STATUS.md.
- * --branch <name>   Branch name to record alongside the commit. Defaults to "main".
+ * --commit <hash>   When present, merges "commit: <hash> branch: <branch>" into
+ *                   the Evidence field of each updated task in TASK_STATUS.md —
+ *                   prior evidence text (e.g. QA notes) is preserved, not
+ *                   clobbered. Accepts "HEAD" (resolved to the current repo's
+ *                   short hash) or a hex string matching /^[0-9a-f]{7,40}$/;
+ *                   anything else is rejected before any git subprocess runs.
+ *                   A format-valid hash not reachable from --branch prints a
+ *                   non-blocking warning naming the hash and branch — the
+ *                   write still proceeds. Degrades silently (no warning, no
+ *                   crash) when git is unavailable.
+ * --branch <name>   Branch name to record alongside the commit, and to check
+ *                   reachability against. Defaults to "main".
  * --from <status>   When present, acts as a precondition guard: each task is only
  *                   updated if its current Status equals <status>. Tasks that do
  *                   not match are warned and skipped. Enables atomic transitions
@@ -37,6 +46,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execSync } = require('node:child_process');
+const { resolveCommitHash, mergeCommitEvidence, printRepoIdentityHeader } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -121,6 +131,21 @@ function updateTaskStatusField(markdown, taskId, newStatus) {
 }
 
 /**
+ * Read the current Evidence field text for a task block in markdown.
+ * Returns the raw text (may be empty string), or '' if the task or field
+ * is not found.
+ */
+function readCurrentEvidence(markdown, taskId) {
+  const escaped = taskId.replace('-', '\\-');
+  const blockPattern = new RegExp(
+    `###\\s+${escaped}\\s+—[\\s\\S]*?- \\*\\*Evidence:\\*\\*\\s+([^\\n]+)`,
+    'm'
+  );
+  const match = markdown.match(blockPattern);
+  return match ? match[1] : '';
+}
+
+/**
  * Update the Evidence field for a task block in TASK_STATUS.md.
  * Only modifies the first occurrence of the task heading's Evidence field.
  * Returns the updated string (unchanged if no match).
@@ -164,6 +189,8 @@ function printUsage() {
 }
 
 function main() {
+  printRepoIdentityHeader(ROOT);
+
   const argv = process.argv.slice(2);
 
   // Extract named flags (--commit, --branch, --from) before reading positional args.
@@ -202,6 +229,23 @@ function main() {
     console.error(`${DIM}Valid statuses: ${VALID_STATUSES.join(', ')}${RESET}`);
     process.exitCode = 1;
     return;
+  }
+
+  // Resolve/validate --commit before touching any artifact file. Non-hex,
+  // non-"HEAD" input is rejected here without invoking any git subprocess.
+  // "HEAD" is resolved to the current repo's short hash. A format-valid hash
+  // that is not reachable from --branch produces a non-blocking warning
+  // (printed later, once, after task IDs are known) — the write still proceeds.
+  let commitWarning = null;
+  if (commitHash) {
+    const resolved = resolveCommitHash(ROOT, commitHash, branchName);
+    if (!resolved.ok) {
+      console.error(`${RED}Error: ${resolved.error}${RESET}`);
+      process.exitCode = 1;
+      return;
+    }
+    commitHash = resolved.hash;
+    commitWarning = resolved.warning;
   }
 
   // Parse and normalise task IDs (accept t-113 or T-113, comma-separated)
@@ -288,10 +332,13 @@ function main() {
         taskStatus = result;
         taskStatusChanged = true;
       }
-      // Write evidence atomically alongside status when --commit is provided
+      // Write evidence atomically alongside status when --commit is provided.
+      // Merges into existing evidence text (e.g. prior QA notes) rather than
+      // clobbering it — see mergeCommitEvidence().
       if (commitHash && inTaskStatus) {
-        const evidence = `commit: ${commitHash} branch: ${branchName}`;
-        taskStatus = updateTaskEvidence(taskStatus, taskId, evidence);
+        const currentEvidence = readCurrentEvidence(taskStatus, taskId);
+        const mergedEvidence = mergeCommitEvidence(currentEvidence, commitHash, branchName);
+        taskStatus = updateTaskEvidence(taskStatus, taskId, mergedEvidence);
       }
       // Auto-insert needs_fix_rounds: 0 when transitioning to merged (if not already set)
       if (newStatus === 'merged' && inTaskStatus) {
@@ -326,6 +373,9 @@ function main() {
       console.log(
         `${GREEN}Evidence written: commit: ${commitHash} branch: ${branchName}${RESET}`
       );
+    }
+    if (commitWarning) {
+      console.warn(`${YELLOW}Warning: ${commitWarning}${RESET}`);
     }
     if (newStatus === 'merged') {
       console.log(

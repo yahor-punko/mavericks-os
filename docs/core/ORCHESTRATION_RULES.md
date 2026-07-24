@@ -31,6 +31,32 @@ Neither role produces BACKLOG tasks. Their briefs inform the Main Agent before t
 
 **Architect model spawn rule** — the Main Agent spawns architect with a per-invocation `model: fable` override (Fable 5, primary). If Fable is unavailable, it re-spawns with `model: opus` (Opus 4.8). Architect is never spawned below Opus (in particular, never `sonnet`). The Agent-tool `model` parameter accepts aliases only (`sonnet`/`opus`/`haiku`/`fable`), not full-ids — spawn overrides must use one of these aliases. See `docs/AGENT_SPEC.md` — "Model selection" (worker model-escalation table) and "Effort selection" (effort-selection table), the single source of truth for both policies.
 
+## XS fast lane (quick-merge)
+
+`--quick-merge` (`scripts/mavp-operator-quick-merge.js`) is the **sole sanctioned exception** to the mandatory pre-task architect gate above. It fast-tracks a genuinely trivial change directly to `merged` — title + commit hash, no BACKLOG `planned` stage, no architect spawn — but only after every cited commit passes a mechanical guard, and only under Main-Agent attestation of the conditions the guard cannot check.
+
+**Mechanically enforced thresholds** (the guard inspects the commit's diff via git plumbing *before* any file is written; violating any one refuses the **entire** run — nothing is registered, and the refusal names the violated threshold and the measured value):
+- `files_changed` — at most 2 files changed in the commit.
+- `total_lines` — at most 10 total changed lines (additions + deletions combined).
+- `new_files` — zero new tracked files (any file added by the commit refuses the run).
+- `sensitive_path` — no touched path falls in the sensitive set: `scripts/mavp-validator.js`, `scripts/mavp-operator-close-session.js`, `scripts/mavp-operator-lib.js`, `scripts/mavp-operator-quick-merge.js`, `scripts/mavp-operator`, any path under `.claude/hooks/`, any path prefixed `scripts/mavp-publish-`.
+- `unresolvable` — the commit hash must resolve via `git rev-parse --verify` and its diff must be computable; unresolvable commits are refused.
+- `binary_file` — any binary file in the diff is refused (line counts aren't mechanically checkable).
+
+**Main-Agent-attested conditions** (the Main Agent vouches for these before running `--quick-merge`; the guard does not and cannot check them):
+- No new external attack surface (no new API endpoint, file parser, auth flow, or third-party integration).
+- No new runtime config keys (env vars, feature flags, secrets references).
+- No change to the task-state model, lifecycle semantics, or validator behavior.
+- `Verification type: artifact`, or a `runtime`/`unit` change trivial enough to be self-evidently correct on inspection.
+
+**What the lane skips** — no separate architect spawn or decomposition block; no full multi-field sub-agent brief; no QA-agent stage (the task is registered directly as `merged`, never passing through `planned` → `qa_passed`).
+
+**What the lane keeps** — the developer sub-agent still makes the actual code edit (the Main Agent never edits code directly, XS lane or not); the validator and `.claude/hooks/pre-commit` gate still run on the commit exactly as they would for any other change; `commit: <hash>` evidence is still required in `TASK_STATUS.md` (this is the only path used by `--quick-merge` — see `buildTaskStatusEntry()` in `scripts/mavp-operator-quick-merge.js`).
+
+**Batch support** — `--quick-merge` accepts N title+commit(+optional note) items in a single run (interactively, looped until an empty title, or piped as grouped lines of 3 per item). Every item is pre-flighted against the XS guard before any registration happens: if any single item fails, the whole batch is refused and zero items are written (no partial registration). On success, sequential `T-NNN` ids are assigned, `last_task_id` is bumped once to the highest, one `EXECUTION_LOG.md` line is appended per item, and the validator runs exactly once at the end.
+
+Use `--quick-merge` only when a change is genuinely this small. Anything larger, riskier, or touching the conditions above goes through the normal pre-task gate and full task lifecycle.
+
 ## Cross-repo task pre-flight
 
 When a task's `work_dir` points to a different repo, the following three-step sequence is mandatory.

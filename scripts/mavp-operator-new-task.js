@@ -25,6 +25,7 @@ const {
   getDeployPendingForRepo,
   writeContextBundle,
   buildTaskStatusEntry,
+  printRepoIdentityHeader,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -65,6 +66,8 @@ async function prompt(rl, question, fallback) {
 }
 
 async function main() {
+  printRepoIdentityHeader(ROOT);
+
   const today = new Date().toISOString().slice(0, 10);
   console.log(`\n${BOLD}MavP New Task${RESET} ${DIM}${today}${RESET}\n`);
 

@@ -47,6 +47,7 @@ const {
   moveParkedBlocksToActiveSection,
   parkedBacklogHeading,
   parkedTaskStatusHeading,
+  printRepoIdentityHeader,
 } = require('./mavp-operator-lib.js');
 
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -209,6 +210,8 @@ function unparkWave(waveNumber) {
 }
 
 function main() {
+  printRepoIdentityHeader(ROOT);
+
   const mode = process.argv[2];
   const rest = process.argv.slice(3);
 

@@ -46,7 +46,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode, printRepoIdentityHeader } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
@@ -764,6 +764,28 @@ function buildVolatileNextActionNotice(allMerged, currentNextAction) {
   return `NOTE: preserving freeform next_action with volatile facts (${volatile_facts.join(', ')}) — move narrative to HANDOFF.md; keep next_action a directive`;
 }
 
+/**
+ * T-445: build the explicit wave-completion announcement line, unified across
+ * both interactive and non-interactive close-session runs so the same state
+ * (e.g. an empty Active tasks section) always produces the same decision AND
+ * the same visible message. On completion, names the wave being archived +
+ * incremented. When the wave stays open, names the specific task(s) still
+ * blocking completion so "wave stays open" is never a silent, unexplained
+ * no-op — pure function, no I/O, unit-testable directly.
+ *
+ * @param {boolean} waveComplete - whether every task has left the Active tasks section
+ * @param {number} sessionWave - the wave number being evaluated (not yet incremented)
+ * @param {Array<{id: string, status: string}>} remainingTasks - tasks still in the Active tasks section
+ * @returns {string} the announcement line (no color codes — caller wraps in color)
+ */
+function buildWaveCompletionAnnouncement(waveComplete, sessionWave, remainingTasks) {
+  if (waveComplete) {
+    return `Wave ${sessionWave} complete — archiving + incrementing`;
+  }
+  const reasons = remainingTasks.map(t => `${t.id} still ${t.status}`).join(', ');
+  return `Wave ${sessionWave} stays open — ${reasons}`;
+}
+
 async function runNonInteractive(args) {
   const today = new Date().toISOString().slice(0, 10);
 
@@ -850,6 +872,14 @@ async function runNonInteractive(args) {
   }
 
   const allMerged = remainingTasks.length === 0;
+
+  // T-445: explicit wave-completion announcement — unified with the
+  // interactive path via buildWaveCompletionAnnouncement() so identical state
+  // always produces identical messaging in both modes.
+  {
+    const announcement = buildWaveCompletionAnnouncement(allMerged, sessionWave, remainingTasks);
+    console.log(`${allMerged ? `${CYAN}${BOLD}` : YELLOW}${announcement}${RESET}`);
+  }
 
   // Resolved next_action: preserve existing Main Agent value when wave is still open
   const resolvedNextAction = allMerged
@@ -1102,14 +1132,43 @@ async function runInteractive() {
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
+  // Read current wave/wave_session up front — needed for the wave-completion
+  // announcement below and for the RENAME_SESSION label later. T-445: moved
+  // earlier from its former location (after rl.close()) so both uses share
+  // one read.
+  let sessionWave = 1;
+  let sessionNumber = 1;
+  try {
+    if (fs.existsSync(PROCESS_STATE_JSON)) {
+      const ps = JSON.parse(readUtf8(PROCESS_STATE_JSON));
+      sessionWave = Number(ps.wave) || 1;
+      sessionNumber = Number(ps.wave_session) || 1;
+    }
+  } catch { /* use defaults */ }
+
   let updatedContent = taskStatusContent;
-  let allMerged = activeTasks.length > 0;
   const sessionMergedIds = [];
   // T-438: tasks merged this run, tracked with their final status so BACKLOG.md
   // can be synced symmetrically (see syncBacklogMergedTasks doc comment).
   const mergedTaskRecords = [];
 
+  // T-445: tasks already at a terminal completed status (merged/deployed_dev/
+  // deployed_prod) when the loop starts are auto-archived without prompting —
+  // mirrors runNonInteractive's "already merged before --close-session was
+  // called" block below. Previously these were asked the same
+  // [m]/[n]/[k]/[enter] question as any other active task, and Enter-skipping
+  // one left its already-merged status untouched in the Active tasks section,
+  // which then counted as "remaining" and silently blocked wave completion.
+  const alreadyTerminalStatuses = new Set(['merged', 'deployed_dev', 'deployed_prod']);
+  const alreadyTerminalTasks = activeTasks.filter(t => alreadyTerminalStatuses.has(t.status));
+  for (const task of alreadyTerminalTasks) {
+    updatedContent = moveTaskToCompleted(updatedContent, task.id);
+    mergedTaskRecords.push({ id: task.id, status: task.status });
+    console.log(`  ${GREEN}✓ ${task.id} → moved to completed (was already ${task.status})${RESET}`);
+  }
+
   for (const task of activeTasks) {
+    if (alreadyTerminalStatuses.has(task.status)) continue;
     const answer = await prompt(rl, `${BOLD}${task.id}${RESET} — ${task.title}\n  [m]erged / [n]eeds_fix / [k]eep / [enter] skip: `);
     const choice = answer.trim().toLowerCase();
 
@@ -1125,19 +1184,32 @@ async function runInteractive() {
     } else if (choice === 'n' || choice === 'needs_fix') {
       updatedContent = updateTaskStatusField(updatedContent, task.id, 'Status', 'needs_fix');
       console.log(`  ${YELLOW}⚠ ${task.id} → needs_fix${RESET}\n`);
-      allMerged = false;
     } else {
       console.log(`  ${DIM}skipped${RESET}\n`);
-      allMerged = false;
     }
   }
 
-  // Compute next action from remaining active tasks
+  // Compute next action + wave-completion decision from remaining active
+  // tasks. T-445: unified with runNonInteractive — wave completion is purely
+  // "no tasks remain in the Active tasks section", not a separately tracked
+  // flag that could diverge from that same computation (the former
+  // `allMerged` seeded false whenever any task existed and stayed false
+  // forever on any skip/needs_fix, so the identical empty-Active-tasks state
+  // completed the wave non-interactively but never interactively).
   const remainingTasks = parseActiveTasks(updatedContent);
+  const waveComplete = remainingTasks.length === 0;
   let nextAction = null;
   if (remainingTasks.length > 0) {
     const first = remainingTasks[0];
     nextAction = `${first.id} → developer → ${first.title}`;
+  }
+
+  // T-445: explicit wave-completion announcement — shares
+  // buildWaveCompletionAnnouncement() with runNonInteractive so identical
+  // state always produces identical messaging in both modes.
+  {
+    const announcement = buildWaveCompletionAnnouncement(waveComplete, sessionWave, remainingTasks);
+    console.log(`${waveComplete ? `${CYAN}${BOLD}` : YELLOW}${announcement}${RESET}\n`);
   }
 
   const nextAnswer = await prompt(rl, `Next action [${nextAction || 'wave complete'}]: `);
@@ -1158,23 +1230,15 @@ async function runInteractive() {
   writeUtf8(TASK_STATUS_MD, updatedContent);
   console.log(`${GREEN}✓ TASK_STATUS.md updated${RESET}`);
 
-  // Read current wave/wave_session before incrementing (for RENAME_SESSION label)
-  let sessionWave = 1;
-  let sessionNumber = 1;
-  try {
-    if (fs.existsSync(PROCESS_STATE_JSON)) {
-      const ps = JSON.parse(readUtf8(PROCESS_STATE_JSON));
-      sessionWave = Number(ps.wave) || 1;
-      sessionNumber = Number(ps.wave_session) || 1;
-    }
-  } catch { /* use defaults */ }
+  // sessionWave/sessionNumber were already read earlier (needed for the
+  // wave-completion announcement); reused here for BACKLOG.md sync and later
+  // for the RENAME_SESSION label. waveComplete was likewise already computed
+  // above alongside remainingTasks — see the T-445 comment there.
 
   // T-438: mirror the merge into BACKLOG.md — set Status + archive the block
   // out of Active Wave, so BACKLOG.md and TASK_STATUS.md never fall out of
   // sync mid-wave (see syncBacklogMergedTasks doc comment above).
   syncBacklogMergedTasks(mergedTaskRecords, sessionWave);
-
-  const waveComplete = allMerged && remainingTasks.length === 0;
 
   // T-367: on a wave-complete interactive close, also compute the scoped
   // wave_summary (mirrors the non-interactive T-361/T-366 contract) so
@@ -1342,6 +1406,8 @@ async function runInteractive() {
 }
 
 async function main() {
+  printRepoIdentityHeader(ROOT);
+
   const args = parseArgs(process.argv.slice(2));
 
   const mode = resolveMode({ interactive: args.interactive, nonInteractive: args.nonInteractive, isTTY: process.stdin.isTTY });
@@ -1359,4 +1425,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, runValidator };
+module.exports = { moveTaskToCompleted, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, runValidator };

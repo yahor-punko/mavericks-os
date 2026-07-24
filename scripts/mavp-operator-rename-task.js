@@ -27,7 +27,7 @@ const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
 const VALIDATOR = path.join(__dirname, 'mavp-validator.js');
 
-const { renameTask } = require('./mavp-operator-lib.js');
+const { renameTask, printRepoIdentityHeader } = require('./mavp-operator-lib.js');
 
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -43,6 +43,8 @@ function printUsage() {
 }
 
 function main() {
+  printRepoIdentityHeader(ROOT);
+
   const args = process.argv.slice(2);
   const rawTaskId = args[0];
   const newTitle = args[1];

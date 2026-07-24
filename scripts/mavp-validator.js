@@ -26,7 +26,13 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { computeDueRechecks, classifyNextAction, parseBlockedBy, parseRepoMap } = require('./mavp-operator-lib');
+const {
+  computeDueRechecks,
+  classifyNextAction,
+  parseBlockedBy,
+  parseRepoMap,
+  getCommitHashesReachableFromHead,
+} = require('./mavp-operator-lib');
 
 // Statuses that require a Repo: field (warning if absent)
 const STATUSES_REQUIRING_REPO = new Set([
@@ -216,6 +222,25 @@ function parseTaskStatusActiveTasks(markdown) {
     .map((block) => parseTaskBlock({ block, source: 'task_status', sourceSection }));
 }
 
+/**
+ * Parse the "## Recently completed tasks" section of TASK_STATUS.md (T-448).
+ * Optional — returns [] when the section is absent (e.g. a fresh project that
+ * has never archived a task yet).
+ */
+function parseTaskStatusRecentlyCompletedTasks(markdown) {
+  const sourceSection = 'Recently completed tasks';
+  const section = getSectionContent(
+    markdown,
+    /^##\s+Recently completed tasks\s*$/m,
+    '## Recently completed tasks',
+    { optional: true }
+  );
+  if (!section) return [];
+
+  return getTaskBlocks(section)
+    .map((block) => parseTaskBlock({ block, source: 'task_status', sourceSection }));
+}
+
 function createTaskRecordIndex(records) {
   const byTaskId = new Map();
 
@@ -263,6 +288,7 @@ function getSeverityForCheck(checkName) {
     state_in_claude_md: 'info',
     blocked_by_open: 'failure',
     blocked_by_unresolvable: 'info',
+    commit_unreachable: 'warning',
   };
 
   return severityByCheckName[checkName] || 'warning';
@@ -1285,6 +1311,136 @@ function checkMergedNeedsFixRounds(taskStatusRecords) {
 }
 
 /**
+ * Extract candidate `commit:` hashes from an evidence block (T-448). Cross-repo
+ * evidence may carry multiple `commit:` lines (one per repo), so this returns
+ * an array. Each match is re-validated against the anchored hex pattern before
+ * being returned — defensive, since the extraction regex already constrains
+ * the character class but a literal validation step is required per the
+ * acceptance criteria ("hashes are validated against /^[0-9a-f]{7,40}$/ before
+ * any git invocation").
+ */
+function extractCommitHashesFromEvidence(evidence) {
+  if (!evidence) return [];
+  const HASH_PATTERN = /^[0-9a-f]{7,40}$/;
+  const matches = evidence.match(/commit:\s*[0-9a-f]{7,40}\b/gi) || [];
+  return matches
+    .map((m) => m.replace(/^commit:\s*/i, '').trim())
+    .filter((hash) => HASH_PATTERN.test(hash));
+}
+
+/**
+ * Build a lookup index from a flat list of full commit hashes, bucketed by
+ * their first 7 characters (git's default short-hash length). Lets
+ * isHashReachable() prefix-match a short evidence hash against only the
+ * handful of candidates sharing its prefix, instead of scanning every
+ * reachable hash for every evidence hash.
+ */
+function buildReachableHashIndex(hashes) {
+  const index = new Map();
+  for (const hash of hashes) {
+    const key = hash.slice(0, 7);
+    if (!index.has(key)) index.set(key, []);
+    index.get(key).push(hash);
+  }
+  return index;
+}
+
+/** True when `hash` (7-40 hex chars) is a prefix of some hash reachable from HEAD. */
+function isHashReachable(hash, reachableIndex) {
+  const candidates = reachableIndex.get(hash.slice(0, 7));
+  if (!candidates) return false;
+  return candidates.some((full) => full.startsWith(hash));
+}
+
+/**
+ * Resolve the repo id (from docs/REPO_MAP.md) that corresponds to `root`
+ * itself — i.e. the entry whose `path:` field resolves to the same directory
+ * being validated. Returns null when no entry matches (including when the
+ * repo map is absent/empty) — the caller treats null as "cannot determine
+ * cross-repo skip, check every task".
+ */
+function resolveSelfRepoId(root, repoMap) {
+  const normalizedRoot = path.resolve(root);
+  for (const [id, entry] of Object.entries(repoMap || {})) {
+    if (entry && entry.path && path.resolve(entry.path) === normalizedRoot) {
+      return id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Check 9 (T-448): commit_unreachable. Flags a merged/terminal task's
+ * evidence `commit:` hash that is not reachable from HEAD in the current
+ * repo's git history — the cherry-pick footgun where a worktree-local hash is
+ * pasted into evidence but the corresponding commit never actually landed on
+ * HEAD (a mere existence check like `git cat-file -e` is insufficient:
+ * worktrees share the object database, so it would pass even for a hash that
+ * never reached HEAD).
+ *
+ * - Active tasks section: warning severity (exit 1 at worst, never 2).
+ * - Recently completed tasks section: info severity (historical debt must
+ *   never flip the exit code).
+ * - Tasks whose Repo:/Repos: field names a repo other than the current one
+ *   (resolved via docs/REPO_MAP.md's path: matching `root`) are skipped —
+ *   their evidence hashes live in a different repo's git history.
+ * - Reachability is computed with exactly one batched `git rev-list HEAD`
+ *   call (via getCommitHashesReachableFromHead()), then evidence hashes are
+ *   prefix-matched against that set — never a subprocess per hash.
+ * - Degrades silently (returns [], never throws) when git is unavailable.
+ *
+ * @param {object} options
+ * @param {Array} options.activeRecords - TASK_STATUS.md "## Active tasks" records.
+ * @param {Array} options.recentlyCompletedRecords - TASK_STATUS.md "## Recently completed tasks" records.
+ * @param {string} options.root - Absolute path to the git working tree being validated.
+ * @param {Object} [options.repoMap] - Pre-parsed repo map (test injection); defaults to parseRepoMap(root).
+ * @returns {Array} findings
+ */
+function checkCommitReachable({ activeRecords, recentlyCompletedRecords, root, repoMap }) {
+  const reachableHashes = getCommitHashesReachableFromHead(root);
+  if (reachableHashes === null) return []; // git unavailable — degrade silently
+
+  const reachableIndex = buildReachableHashIndex(reachableHashes);
+  const resolvedRepoMap = repoMap || parseRepoMap(root);
+  const selfRepoId = resolveSelfRepoId(root, resolvedRepoMap);
+
+  const findings = [];
+
+  const scanSection = (records, severity) => {
+    for (const record of records || []) {
+      if (!TERMINAL_TASK_STATUSES.has(record.status)) continue;
+
+      if (selfRepoId && record.repo) {
+        const repoIds = record.repo.split(',').map((r) => r.trim().toLowerCase()).filter(Boolean);
+        if (repoIds.length > 0 && !repoIds.includes(selfRepoId.toLowerCase())) continue; // cross-repo — skip
+      }
+
+      const evidence = getFieldMultiline(record.rawBlock, 'Evidence');
+      const hashes = extractCommitHashesFromEvidence(evidence);
+      for (const hash of hashes) {
+        if (!isHashReachable(hash, reachableIndex)) {
+          findings.push(
+            createFinding({
+              checkName: 'commit_unreachable',
+              severity,
+              taskId: record.taskId,
+              message: `${record.taskId} is ${record.status} with evidence commit: ${hash} but that hash is not reachable from HEAD`,
+              repairTarget: 'TASK_STATUS.md',
+              suggestedAction: `Verify commit ${hash} actually landed on the current branch (e.g. cherry-pick/merge the sub-agent's worktree commit), then update the evidence hash if it changed.`,
+            })
+          );
+        }
+      }
+    }
+  };
+
+  scanSection(activeRecords, 'warning');
+  scanSection(recentlyCompletedRecords, 'info');
+
+  return findings;
+}
+
+/**
  * Check 8: overdue recheck advisory.
  * Reads rechecks[] from PROCESS_STATE.json and computes which entries are
  * overdue (due date is strictly before today). Emits one info-severity finding
@@ -1829,6 +1985,20 @@ function parseArtifacts({ backlogPath, taskStatusPath }) {
   // blocker task in another repo; info when the reference is unresolvable.
   mergeFindings(comparison, checkBlockedBy(backlogAllWaveRecords));
 
+  // commit_unreachable advisory (T-448): warning for Active tasks / info for
+  // Recently completed tasks when a merged evidence commit: hash is not
+  // reachable from HEAD (worktree cherry-pick footgun). Degrades silently
+  // when git is unavailable.
+  const taskStatusRecentlyCompletedRecords = parseTaskStatusRecentlyCompletedTasks(taskStatusMarkdown);
+  mergeFindings(
+    comparison,
+    checkCommitReachable({
+      activeRecords: taskStatusRecords,
+      recentlyCompletedRecords: taskStatusRecentlyCompletedRecords,
+      root: path.dirname(backlogPath),
+    })
+  );
+
   return {
     inputs: {
       backlogPath,
@@ -2021,6 +2191,7 @@ module.exports = {
   STATE_IN_CLAUDE_MD_CHECK: 'state_in_claude_md',
   BLOCKED_BY_OPEN_CHECK: 'blocked_by_open',
   BLOCKED_BY_UNRESOLVABLE_CHECK: 'blocked_by_unresolvable',
+  COMMIT_UNREACHABLE_CHECK: 'commit_unreachable',
   DEFAULT_ARTIFACT_BUDGETS,
   BACKLOG_ACTIVE_WAVE_PER_TASK_LINES,
   TASK_STATUS_ACTIVE_TASKS_PER_TASK_LINES,
@@ -2030,6 +2201,11 @@ module.exports = {
   checkArtifactSizeBudget,
   checkStateInClaudeMd,
   checkBlockedBy,
+  checkCommitReachable,
+  extractCommitHashesFromEvidence,
+  buildReachableHashIndex,
+  isHashReachable,
+  resolveSelfRepoId,
   findTaskStatusInFile,
   getBlockedByRepoMapRoot,
   resolveArtifactBudgets,
@@ -2049,6 +2225,7 @@ module.exports = {
   parseBacklogActiveTasks,
   parseBacklogAllActiveWaveTasks,
   parseTaskStatusActiveTasks,
+  parseTaskStatusRecentlyCompletedTasks,
   parseArtifacts,
   renderFindingLines,
   renderValidatorReport,

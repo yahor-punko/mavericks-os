@@ -132,6 +132,22 @@ _(Optional)_ Task is rejected permanently — as opposed to `deferred`, which ma
 
 If unsure: check `git diff main --name-only` for files under `scripts/` — any match means at minimum a patch bump.
 
+## Session close vs wave close
+
+`--close-session` runs every session, but only some closes advance the wave. Confusing "a session closed" with "the wave rolled over" leads to wrong assumptions about `wave`/`wave_session` and about what still lives in `## Active Wave`.
+
+**Wave-increment trigger:** the `wave` counter in `PROCESS_STATE.json` only increments when, after this `--close-session` run, TASK_STATUS.md's `## Active tasks` section is empty — every task has left it (merged/deployed or otherwise archived out). As of T-445 this check (`buildWaveCompletionAnnouncement()` in `scripts/mavp-operator-close-session.js`) is identical in interactive and non-interactive mode, so the same underlying state always produces the same wave-complete decision regardless of which mode ran the close. A close that leaves any task in-flight does not touch `wave`.
+
+**`wave_session` counter:** counts how many `--close-session` runs have happened inside the current wave. It increments by 1 on every close that does not complete the wave, and resets to 1 the moment the wave advances. It feeds the `RENAME_SESSION: W{wave}[S{wave_session}] — T-xxx, ...` label so multiple sessions inside one wave get distinct, ordered names.
+
+**Merged-task residency:** a task reaching `merged` (or `deployed_dev`/`deployed_prod`) moves out of TASK_STATUS.md's `## Active tasks` into `## Recently completed tasks` on the very close-session run that observes the terminal status — not only once the wave completes. The matching BACKLOG.md block moves out of `## Active Wave` into that wave's `## Wave N — Archived (mid-wave)` section on the same run, via the same archival function (`archiveMergedTasksFromActiveWave()` in `scripts/mavp-operator-lib.js`) that `--archive-merged` calls directly. So a merged task's residency in `## Active Wave` ends at the next `--archive-merged` run or the next `--close-session` run, whichever comes first — it does not wait for the wave itself to close. Only the `## Active Wave` *heading* (renamed to `## Wave N — Archived`) and the `wave`/`wave_session` counters wait for wave completion.
+
+**`--archive-merged` mid-wave role:** runs that same archival step on demand, without the rest of the close-session ritual (no validator-gated commit, no wave-increment logic, no session-completed table). Use it to keep BACKLOG.md's Active Wave section lean mid-session when several tasks have merged but the wave itself is far from done. `--close-session` still surfaces titles archived this way in `wave_summary` and its results table once the wave eventually closes (`parseMidWaveArchivedTasks()`).
+
+**Wave-completion announcements (T-445):** every close-session run prints one of two lines, built by the same function in both modes so identical state always produces identical messaging:
+- `Wave N complete — archiving + incrementing` — the Active tasks section emptied this run; the wave counter advances and the Active Wave heading is archived.
+- `Wave N stays open — T-NNN still <status>, ...` — names each task still remaining in Active tasks, so a non-advancing close is never a silent, unexplained no-op.
+
 ## Task types
 
 By default every task is an implementation task — a developer sub-agent produces code or config, the orchestrator routes through QA, and the task reaches `merged`. Two specialised types exist for cases that do not fit this pattern.

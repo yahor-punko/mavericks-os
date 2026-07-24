@@ -45,7 +45,7 @@ const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
 const VALIDATOR = path.join(__dirname, 'mavp-validator.js');
 
-const { insertIntoActiveWave, insertIntoActiveTasks, writeContextBundle } = require('./mavp-operator-lib.js');
+const { insertIntoActiveWave, insertIntoActiveTasks, writeContextBundle, printRepoIdentityHeader } = require('./mavp-operator-lib.js');
 
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -215,6 +215,8 @@ function runValidatorOnce() {
 }
 
 function main() {
+  printRepoIdentityHeader(ROOT);
+
   const argv = process.argv.slice(2);
 
   let taskId = null;

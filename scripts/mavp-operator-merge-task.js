@@ -13,6 +13,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
 const { execSync } = require('node:child_process');
+const { resolveCommitHash, printRepoIdentityHeader } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -122,6 +123,8 @@ async function prompt(rl, question) {
 }
 
 async function main() {
+  printRepoIdentityHeader(ROOT);
+
   const today = new Date().toISOString().slice(0, 10);
   console.log(`\n${BOLD}MavP Merge Task${RESET} ${DIM}${today}${RESET}\n`);
 
@@ -175,7 +178,26 @@ async function main() {
   }
 
   // Prompt for commit hash
-  const commitHash = await prompt(rl, "Commit hash (or 'none')");
+  let commitHash = await prompt(rl, "Commit hash (or 'none')");
+
+  // T-446 — validate/resolve the hash before proceeding. Accepts "none",
+  // "HEAD" (resolved to the current repo's short hash), or a hex string
+  // matching /^[0-9a-f]{7,40}$/. Anything else is rejected before any git
+  // subprocess runs. A format-valid hash not reachable from "main" prints a
+  // non-blocking warning — the merge still proceeds.
+  let commitWarning = null;
+  const hasCommit = commitHash && commitHash.toLowerCase() !== 'none';
+  if (hasCommit) {
+    const resolved = resolveCommitHash(ROOT, commitHash, 'main');
+    if (!resolved.ok) {
+      console.error(`${RED}Error: ${resolved.error}${RESET}`);
+      rl.close();
+      process.exitCode = 1;
+      return;
+    }
+    commitHash = resolved.hash;
+    commitWarning = resolved.warning;
+  }
 
   // Prompt for evidence summary
   const evidenceSummary = await prompt(rl, 'Evidence summary (one line)');
@@ -187,8 +209,12 @@ async function main() {
 
   rl.close();
 
+  if (commitWarning) {
+    console.warn(`${YELLOW}Warning: ${commitWarning}${RESET}`);
+  }
+
   // Build evidence string
-  const evidence = commitHash && commitHash.toLowerCase() !== 'none'
+  const evidence = hasCommit
     ? `commit: ${commitHash} — ${evidenceSummary}`
     : evidenceSummary;
 

@@ -640,9 +640,13 @@ function driveInteractive(dir, steps, timeoutMs = 10000) {
 //     "!currentWaveGoal" prompt is skipped, keeping the scripted stdin small
 //     and isolating this test to the wave_summary behavior under test.
 //
+//     T-445: a task already at a terminal status (merged/deployed_dev/
+//     deployed_prod) when the interactive loop starts is now auto-archived
+//     without prompting — the [m]/[n]/[k]/[enter] question and its notes
+//     follow-up are never shown for T-201, so this fixture's only prompts
+//     are "Next action" and "Run git push?".
+//
 //     Scripted stdin, one answer per prompt in order:
-//       "m"  -> T-201 status prompt: merged
-//       ""   -> notes prompt: skip (defaults to "Completed <date>.")
 //       ""   -> "Next action [...]:" prompt: skip (wave is complete anyway)
 //       "n"  -> "Run git push? [Y/n]:" prompt: decline (fixture isn't a real
 //               git remote; declining keeps the test hermetic)
@@ -720,8 +724,6 @@ fs.writeFileSync(
 );
 
 await driveInteractive(INTERACTIVE_DIR, [
-  { waitFor: '[enter] skip:', send: 'm\n' },
-  { waitFor: 'Notes (optional', send: '\n' },
   { waitFor: 'Next action', send: '\n' },
   { waitFor: 'Run git push?', send: 'n\n' },
 ]);

@@ -7,6 +7,48 @@ docs in [`docs/core/`](docs/core/).
 
 ## [Unreleased]
 
+## [0.36.0] — 2026-07-24
+
+### Added
+
+- Self-install stale-source guard — `mavp-install.js` warns and skips the
+  `PROCESS_STATE` version re-stamp when a self-install would stamp a
+  version older than an available `~/.mavericks` / `MAVERICKS_HOME`
+  source.
+- `--set-status` / `--merge-task` evidence flags — `--commit <hash|HEAD>`
+  and `--branch <name>` write commit evidence atomically, appending to
+  (never clobbering) existing evidence; `HEAD` auto-resolves; a hash
+  unreachable from the branch warns without blocking.
+- Validator `commit_unreachable` advisory — flags merged-task evidence
+  `commit:` hashes not reachable from HEAD, warning severity for Active
+  tasks, info severity for Recently-completed.
+- Repo-identity header — every mutating ritual command now prints
+  `repo: <path> | wave: N | initiative: <...>` as its first line, so a
+  wrong-repo run is obvious immediately.
+- XS fast lane — `--quick-merge` now enforces XS thresholds (≤2 files,
+  ≤10 changed lines, no new tracked files, no sensitive paths;
+  binary/unresolvable commits refused) against the cited commit and
+  supports batch registration; documented in
+  `docs/core/ORCHESTRATION_RULES.md` as the sole sanctioned exception to
+  the architect gate.
+
+### Fixed
+
+- `--close-session` wave-complete parity — interactive and
+  non-interactive close now reach the same wave-complete decision; both
+  announce "Wave N complete — archiving + incrementing" or name the
+  tasks keeping the wave open; already-merged tasks auto-archive without
+  a re-prompt.
+
+### Changed
+
+- Documented the session-close vs wave-close model in
+  `docs/core/TASK_LIFECYCLE.md`.
+- Hardened the developer role spec to require explicit per-criterion
+  expected-vs-actual MATCH/MISMATCH evidence and a self-check
+  distinguishing "passed a check" from "demonstrated the required
+  behavior" — from a skill-reflection over real adopter trajectories.
+
 ## [0.35.0] — 2026-07-23
 
 ### Added

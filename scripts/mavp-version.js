@@ -1,3 +1,3 @@
 // Mavericks framework version — updated on every script release
 // Projects can read this to check if they're up to date.
-module.exports = { MAVERICKS_VERSION: '0.35.0' };
+module.exports = { MAVERICKS_VERSION: '0.36.0' };

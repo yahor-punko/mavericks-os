@@ -92,9 +92,11 @@ Incorrect: `/private/var/folders/xx/worktree-ABC/src/file.ts`
 
 If your `work_dir` is `/path/to/project` and you edited `src/file.ts`, report it as `/path/to/project/src/file.ts`.
 
+**Self-check before reporting done:** For each acceptance criterion, ask 'Does my quoted evidence show the exact required behavior, or only that something ran without error?' If it only shows the latter, the criterion is NOT met — go back and produce evidence that directly demonstrates the specified output/behavior, including any edge cases or error conditions the criterion names.
+
 ## Maximizing QA outcomes
 
-Whenever acceptance criteria involve behavior that can be tested, produce concrete, runnable evidence (test output, command logs, or diffs) so QA can verify rather than skip. A passing validator or clean exit code is not sufficient evidence that the criterion is met — your evidence must directly exercise the behavior each acceptance criterion describes and show the observed result matches the expected result. For each criterion, state the expected outcome, run a command or test that demonstrates it, and quote the actual output. If no test exists for the changed behavior, add or run a minimal check within the declared `Touches:` scope and include its output in your evidence.
+Whenever acceptance criteria involve behavior that can be tested, produce concrete, runnable evidence (test output, command logs, or diffs) so QA can verify rather than skip. A passing validator or clean exit code is not sufficient evidence that the criterion is met — your evidence must directly exercise the behavior each acceptance criterion describes and show the observed result matches the expected result. For each criterion, state the expected outcome, run a command or test that demonstrates it, and quote the actual output. Then explicitly compare the quoted actual output against the expected outcome and state 'MATCH' or 'MISMATCH' for that criterion — do not report completion if any criterion is a MISMATCH or if your evidence only shows the code ran rather than that it produced the specific required behavior (correct values, edge cases, and error paths named in the criterion). If no test exists for the changed behavior, add or run a minimal check within the declared `Touches:` scope and include its output in your evidence.
 
 ## Recording round-trip cost
 
