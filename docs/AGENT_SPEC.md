@@ -195,7 +195,7 @@ The ×1.5 multiplier converts the highest observed turn count for a role class i
 | ui-designer | 20 | Bounded visual-design role; no observed cap pressure. |
 | analyst | 15 | Read-only research; no observed cap pressure. |
 | exa-researcher | 15 | Bounded retrieval; no observed cap pressure. |
-| security-reviewer | 15 | Read-only audit; no observed cap pressure. |
+| security-reviewer | 25 | Cross-repo trust-boundary reviews hit the cap; raised per T-455/T-458. |
 | ux | 15 | Read-only review; no observed cap pressure. |
 
 These values are derived from a small, anecdotal evidence set (see `docs/TURN_BUDGET.md` — "Evidence" and "Confidence & recheck"). They are deliberately generous so under-calibration cannot re-orphan work. Recompute and re-derive per role class once historical `tool_uses` data is instrumented, per the recheck plan in `docs/TURN_BUDGET.md`.

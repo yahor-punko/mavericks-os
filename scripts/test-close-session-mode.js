@@ -2,6 +2,9 @@
 // Regression test: T-253 — resolveMode() precedence in mavp-operator-close-session.js
 // Regression test: T-431 — close-session commit gate: commit on validator exit 0/1,
 // skip only on exit 2, with an explicit "session commit SKIPPED" message.
+// Regression test: T-454 — deploy column renders actual deploy/push state
+// (not mere merge status) per deploy_contours; degrades to a status-only
+// label when reachability can't be determined.
 
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -9,7 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
 
-const { resolveMode } = require('./mavp-operator-close-session.js');
+const { resolveMode, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef } = require('./mavp-operator-close-session.js');
 
 // 1. --interactive flag always wins → 'interactive'
 assert.strictEqual(
@@ -726,6 +729,154 @@ function makeAlreadyMergedFixtureRepo(waveNumber) {
   console.log('Case 18 passed: already-merged task auto-archives without prompting and does not block wave completion');
 
   cleanup(repoDir);
+}
+
+// --- T-454: getDeployLabel() / isCommitReachableFromRemote() / resolveRemoteTrackingRef() ---
+
+/**
+ * Build a bare-plus-clone git fixture: `dir` has a bare "origin" remote and
+ * one commit pushed to origin/main, then a second local-only commit not
+ * pushed. Returns { dir, pushedCommit, unpushedCommit }.
+ */
+function makeRemoteFixtureRepo() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t454-remote-fixture-'));
+  const bareDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t454-bare-'));
+
+  execFileSync('git', ['init', '-q', '--bare'], { cwd: bareDir });
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'fixture: init'], { cwd: dir });
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'a');
+  execFileSync('git', ['add', 'a.txt'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'fixture: pushed commit'], { cwd: dir });
+  execFileSync('git', ['remote', 'add', 'origin', bareDir], { cwd: dir });
+  execFileSync('git', ['push', '-q', 'origin', 'HEAD:main'], { cwd: dir });
+  const pushedCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+
+  fs.writeFileSync(path.join(dir, 'b.txt'), 'b');
+  execFileSync('git', ['add', 'b.txt'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'fixture: unpushed commit'], { cwd: dir });
+  const unpushedCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+
+  return { dir, bareDir, pushedCommit, unpushedCommit };
+}
+
+function makeNoRemoteFixtureRepo() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t454-noremote-fixture-'));
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'fixture: init'], { cwd: dir });
+  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+  return { dir, commit };
+}
+
+// Case 19: deploy_contours=1, merged task, evidence commit reachable from
+// origin/<branch> (no @{upstream} configured — must fall back to
+// origin/<branch>) → auto-deploy label renders.
+{
+  const { dir, bareDir, pushedCommit } = makeRemoteFixtureRepo();
+
+  assert.strictEqual(
+    resolveRemoteTrackingRef(dir),
+    'origin/main',
+    'Case 19 FAIL: expected resolveRemoteTrackingRef() to fall back to origin/<branch> when no @{upstream} is configured'
+  );
+  assert.strictEqual(
+    isCommitReachableFromRemote(dir, pushedCommit),
+    true,
+    'Case 19 FAIL: expected pushed commit to be reachable from origin/main'
+  );
+  assert.strictEqual(
+    getDeployLabel(1, 'merged', pushedCommit, dir),
+    '✓ авто-деплой',
+    'Case 19 FAIL: expected auto-deploy label for a pushed commit under deploy_contours=1'
+  );
+
+  console.log('Case 19 passed: deploy_contours=1 + reachable commit renders auto-deploy label');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(bareDir, { recursive: true, force: true });
+}
+
+// Case 20: deploy_contours=1, merged task, evidence commit NOT reachable
+// from the remote-tracking ref (held on a local-only commit) → "held / not
+// pushed" label, never the auto-deploy label.
+{
+  const { dir, bareDir, unpushedCommit } = makeRemoteFixtureRepo();
+
+  assert.strictEqual(
+    isCommitReachableFromRemote(dir, unpushedCommit),
+    false,
+    'Case 20 FAIL: expected unpushed commit to be reported unreachable from origin/main'
+  );
+  const label = getDeployLabel(1, 'merged', unpushedCommit, dir);
+  assert.ok(
+    /HELD/.test(label) && !/авто-деплой/.test(label),
+    `Case 20 FAIL: expected a held/not-pushed label, got "${label}"`
+  );
+
+  console.log('Case 20 passed: deploy_contours=1 + unreachable commit renders a held/not-pushed label, not auto-deploy');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(bareDir, { recursive: true, force: true });
+}
+
+// Case 21: deploy_contours=0 mirrors the same reachable/unreachable behavior
+// as deploy_contours=1 (terminal "деплоен" label instead of "авто-деплой").
+{
+  const { dir, bareDir, pushedCommit, unpushedCommit } = makeRemoteFixtureRepo();
+
+  assert.strictEqual(
+    getDeployLabel(0, 'merged', pushedCommit, dir),
+    '✓ задеплоен',
+    'Case 21 FAIL: expected terminal deployed label for a pushed commit under deploy_contours=0'
+  );
+  const heldLabel = getDeployLabel(0, 'merged', unpushedCommit, dir);
+  assert.ok(
+    /HELD/.test(heldLabel),
+    `Case 21 FAIL: expected held label for an unpushed commit under deploy_contours=0, got "${heldLabel}"`
+  );
+
+  console.log('Case 21 passed: deploy_contours=0 renders terminal label only when the commit is actually pushed');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(bareDir, { recursive: true, force: true });
+}
+
+// Case 22: deploy_contours=2 — deployed_dev/deployed_prod/merged/other each
+// get their own label; deployed_dev and deployed_prod must NOT fall through
+// to the "not merged" label (the bug this task fixes).
+{
+  const { dir, commit } = makeNoRemoteFixtureRepo();
+
+  assert.strictEqual(getDeployLabel(2, 'deployed_dev', commit, dir), '✓ в dev', 'Case 22 FAIL: deployed_dev label');
+  assert.strictEqual(getDeployLabel(2, 'deployed_prod', commit, dir), '✓ в проде', 'Case 22 FAIL: deployed_prod label');
+  assert.strictEqual(getDeployLabel(2, 'merged', commit, dir), '⏳ не задеплоен', 'Case 22 FAIL: merged, not-deployed label');
+  assert.strictEqual(getDeployLabel(2, 'in_progress', commit, dir), '⏳ не смёрджен', 'Case 22 FAIL: not-merged fallthrough label for a genuinely unmerged status');
+
+  console.log('Case 22 passed: deploy_contours=2 maps deployed_dev/deployed_prod/merged to distinct labels — no fallthrough bug');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// Case 23: no remote configured degrades to a status-only label without
+// throwing (deploy_contours 0 and 1), and resolveRemoteTrackingRef()/
+// isCommitReachableFromRemote() both return null rather than false.
+{
+  const { dir, commit } = makeNoRemoteFixtureRepo();
+
+  assert.strictEqual(resolveRemoteTrackingRef(dir), null, 'Case 23 FAIL: expected null ref with no remote configured');
+  assert.strictEqual(isCommitReachableFromRemote(dir, commit), null, 'Case 23 FAIL: expected null reachability with no remote configured');
+  assert.strictEqual(getDeployLabel(1, 'merged', commit, dir), 'merged', 'Case 23 FAIL: expected status-only label with no remote (contours=1)');
+  assert.strictEqual(getDeployLabel(0, 'merged', commit, dir), 'merged', 'Case 23 FAIL: expected status-only label with no remote (contours=0)');
+  assert.doesNotThrow(() => getDeployLabel(1, 'merged', null, dir), 'Case 23 FAIL: getDeployLabel must not throw with a null evidence commit');
+  assert.doesNotThrow(() => getDeployLabel(1, 'merged', commit, '/nonexistent-git-root-xyz'), 'Case 23 FAIL: getDeployLabel must not throw on a non-git root');
+
+  console.log('Case 23 passed: no remote configured degrades to a status-only label without throwing');
+
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 console.log('All T-445 assertions passed.');

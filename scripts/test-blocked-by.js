@@ -478,8 +478,153 @@ function withProjectRoot(root, fn) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 12 (T-456 fallback-hit): the target repo's artifacts lack the blocker
+// task, but the VALIDATING repo's own backlog records contain it with a
+// Repo/Repos field that includes the referenced repo id — checkBlockedBy()
+// resolves via the hub-local fallback and emits NO blocked_by_unresolvable;
+// the gate applies against the hub-local blocker's status.
+// ---------------------------------------------------------------------------
+{
+  const siblingDir = path.join(TMP_DIR, 'unit-hub-fallback-hit-sibling');
+  // Sibling (target) repo exists and is resolvable, but does NOT contain
+  // T-450 — forcing the fallback path.
+  siblingFixture(siblingDir, 'T-999', 'merged');
+
+  const records = [
+    { taskId: 'T-610', status: 'qa_passed', blockedBy: 'other-repo/T-450' },
+    // Hub-local blocker, tracked in the validating repo's OWN backlog,
+    // declaring Repo: other-repo (matches the ref) and status merged.
+    { taskId: 'T-450', status: 'merged', repo: 'other-repo', blockedBy: null },
+  ];
+  const repoMap = { 'other-repo': { path: siblingDir } };
+
+  const findings = checkBlockedBy(records, { repoMap });
+
+  const unresolvable = findings.filter((f) => f.checkName === 'blocked_by_unresolvable');
+  assert.strictEqual(
+    unresolvable.length,
+    0,
+    `Test 12 FAIL: expected no blocked_by_unresolvable findings when the hub-local fallback resolves, got: ${JSON.stringify(findings)}`
+  );
+  assert.strictEqual(
+    findings.length,
+    0,
+    `Test 12 FAIL: expected no findings at all (hub-local blocker is merged), got: ${JSON.stringify(findings)}`
+  );
+
+  console.log('Test 12 passed: checkBlockedBy() resolves via the hub-local fallback when the target repo lacks the blocker task, emitting no blocked_by_unresolvable');
+}
+
+// ---------------------------------------------------------------------------
+// Test 12b: same fallback-hit setup, but the hub-local blocker is NOT merged
+// — blocked_by_open still fires at the existing severity against the
+// hub-local blocker's status (gate semantics unchanged by the fallback).
+// ---------------------------------------------------------------------------
+{
+  const siblingDir = path.join(TMP_DIR, 'unit-hub-fallback-hit-open-sibling');
+  siblingFixture(siblingDir, 'T-999', 'merged'); // target repo exists, lacks T-451
+
+  const records = [
+    { taskId: 'T-611', status: 'qa_passed', blockedBy: 'other-repo/T-451' },
+    { taskId: 'T-451', status: 'in_progress', repo: 'other-repo', blockedBy: null },
+  ];
+  const repoMap = { 'other-repo': { path: siblingDir } };
+
+  const findings = checkBlockedBy(records, { repoMap });
+
+  assert.strictEqual(findings.length, 1, `Test 12b FAIL: expected exactly 1 finding, got: ${JSON.stringify(findings)}`);
+  assert.strictEqual(findings[0].checkName, 'blocked_by_open', 'Test 12b FAIL: checkName mismatch');
+  assert.strictEqual(findings[0].severity, 'failure', 'Test 12b FAIL: expected FAILURE severity for qa_passed blocked task');
+  assert.ok(/other-repo\/T-451/.test(findings[0].message), 'Test 12b FAIL: message should name the blocker reference');
+  assert.ok(/in_progress/.test(findings[0].message), 'Test 12b FAIL: message should report the hub-local blocker status');
+
+  console.log('Test 12b passed: checkBlockedBy() still fires blocked_by_open at the existing severity when the hub-local fallback blocker is not merged');
+}
+
+// ---------------------------------------------------------------------------
+// Test 13 (T-456 repo-mismatch-rejected): a local task with the same taskId
+// exists in the validating repo's own records, but its Repo/Repos field does
+// NOT include the referenced repo id — the precision guard rejects the
+// fallback and blocked_by_unresolvable still fires (no false-positive
+// resolution against an unrelated same-numbered local task).
+// ---------------------------------------------------------------------------
+{
+  const siblingDir = path.join(TMP_DIR, 'unit-hub-mismatch-sibling');
+  siblingFixture(siblingDir, 'T-999', 'merged'); // target repo exists, lacks T-452
+
+  const records = [
+    { taskId: 'T-612', status: 'merged', blockedBy: 'other-repo/T-452' },
+    // Local T-452 exists but belongs to a DIFFERENT repo namespace —
+    // must not be mistaken for other-repo/T-452.
+    { taskId: 'T-452', status: 'merged', repo: 'unrelated-repo', blockedBy: null },
+  ];
+  const repoMap = { 'other-repo': { path: siblingDir } };
+
+  const findings = checkBlockedBy(records, { repoMap });
+
+  assert.strictEqual(findings.length, 1, `Test 13 FAIL: expected exactly 1 finding, got: ${JSON.stringify(findings)}`);
+  assert.strictEqual(findings[0].checkName, 'blocked_by_unresolvable', 'Test 13 FAIL: expected blocked_by_unresolvable when the local Repo field does not match');
+  assert.strictEqual(findings[0].severity, 'info', 'Test 13 FAIL: expected INFO severity');
+  assert.ok(/other-repo\/T-452/.test(findings[0].message), 'Test 13 FAIL: message should name the unresolvable reference');
+
+  console.log('Test 13 passed: checkBlockedBy() rejects the hub-local fallback when the local same-numbered task\'s Repo field does not include the referenced repo id');
+}
+
+// ---------------------------------------------------------------------------
+// Test 14 (T-456 genuinely-unresolvable): neither the target repo nor the
+// validating repo's own records contain the referenced task — unresolvable
+// as today, unaffected by the new fallback.
+// ---------------------------------------------------------------------------
+{
+  const siblingDir = path.join(TMP_DIR, 'unit-hub-genuinely-unresolvable-sibling');
+  siblingFixture(siblingDir, 'T-999', 'merged'); // target repo exists, lacks T-453
+
+  const records = [
+    { taskId: 'T-613', status: 'merged', blockedBy: 'other-repo/T-453' },
+    // No local task named T-453 at all.
+    { taskId: 'T-900', status: 'merged', repo: 'other-repo', blockedBy: null },
+  ];
+  const repoMap = { 'other-repo': { path: siblingDir } };
+
+  const findings = checkBlockedBy(records, { repoMap });
+
+  assert.strictEqual(findings.length, 1, `Test 14 FAIL: expected exactly 1 finding, got: ${JSON.stringify(findings)}`);
+  assert.strictEqual(findings[0].checkName, 'blocked_by_unresolvable', 'Test 14 FAIL: expected blocked_by_unresolvable when neither repo has the task');
+  assert.strictEqual(findings[0].severity, 'info', 'Test 14 FAIL: expected INFO severity');
+
+  console.log('Test 14 passed: checkBlockedBy() still reports blocked_by_unresolvable when neither the target repo nor the local hub backlog has the blocker task');
+}
+
+// ---------------------------------------------------------------------------
+// Test 15 (T-456 no-op for non-hub / normal-resolution path): when the
+// target repo resolves the blocker normally, the hub-local fallback is never
+// consulted, even if a colliding same-numbered local task with a matching
+// Repo field exists. Confirms the fallback is purely additive.
+// ---------------------------------------------------------------------------
+{
+  const siblingDir = path.join(TMP_DIR, 'unit-hub-normal-path-sibling');
+  siblingFixture(siblingDir, 'T-454', 'in_progress'); // target repo HAS T-454, status in_progress
+
+  const records = [
+    { taskId: 'T-614', status: 'qa_passed', blockedBy: 'other-repo/T-454' },
+    // A colliding local T-454 that (if consulted) would resolve as merged —
+    // must NOT be used since the target repo already resolved it.
+    { taskId: 'T-454', status: 'merged', repo: 'other-repo', blockedBy: null },
+  ];
+  const repoMap = { 'other-repo': { path: siblingDir } };
+
+  const findings = checkBlockedBy(records, { repoMap });
+
+  assert.strictEqual(findings.length, 1, `Test 15 FAIL: expected exactly 1 finding (target repo's in_progress status), got: ${JSON.stringify(findings)}`);
+  assert.strictEqual(findings[0].checkName, 'blocked_by_open', 'Test 15 FAIL: expected blocked_by_open using the TARGET repo status, not the local one');
+  assert.ok(/in_progress/.test(findings[0].message), 'Test 15 FAIL: expected the target repo\'s in_progress status in the message, not the local merged status');
+
+  console.log('Test 15 passed: checkBlockedBy() never consults the hub-local fallback when the target repo resolves the blocker normally');
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
 
-console.log('\nAll T-393 assertions passed.');
+console.log('\nAll T-393/T-456 assertions passed.');

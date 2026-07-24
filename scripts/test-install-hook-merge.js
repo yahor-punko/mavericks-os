@@ -26,10 +26,14 @@
 //   4. a second --update leaves settings.local.json deep-equal (no dup hook,
 //      no further command change);
 //   5. --no-hooks leaves the hooks block completely untouched;
-//   6. executing the composed managed command with a stubbed hook payload for
-//      a BACKLOG.md edit produces validator output on stderr (exit 0 always,
-//      per the hook's own advisory-only contract), while a payload for an
-//      unrelated file path exits 0 with no output at all.
+//   6. (T-457) the hook always exits 0, and full validator output is printed
+//      to stderr ONLY when the validator itself exits 2 (repair required):
+//      (a) a validator exit-1 condition (ENOENT on a missing BACKLOG.md)
+//          produces NO stderr; (b) an unrelated file path exits 0 silently;
+//      (c) a genuine validator exit-1 (drifting/warning-only) fixture
+//          produces NO stderr; (d) a genuine validator exit-2 (repair
+//          required/failure) fixture prints the full validator report on
+//          stderr.
 //   7. (T-430) buildPostToolUseHookCommand() self-preference: a self-hosting
 //      checkout (own scripts/mavp-validator.js) resolves MAVERICKS to its own
 //      scripts/, never a stale MAVERICKS_HOME.
@@ -43,6 +47,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
+const { composePostToolUseHookCommand } = require('./mavp-install.js');
 
 const INSTALL_SCRIPT = path.join(__dirname, 'mavp-install.js');
 // This checkout's own repo root — used as MAVERICKS_HOME when *executing* the
@@ -189,11 +194,22 @@ try {
   console.log('Assertion 5 passed: --no-hooks leaves hooks block completely untouched');
 
   // ============================================================
-  // Assertion 6: executing the composed managed command
+  // Assertion 6 (T-457): executing the composed managed command — the
+  // exit-2-only stderr gate. The hook must ALWAYS exit 0, but full validator
+  // output is printed to stderr ONLY when the validator itself exits 2
+  // (repair required). Exit 1 (drifting) must stay silent at edit time.
   // ============================================================
   const execEnv = Object.assign({}, process.env, { MAVERICKS_HOME: FRAMEWORK_ROOT });
 
-  // (a) BACKLOG.md edit payload — should run the validator; output observed on stderr.
+  // (a) BACKLOG.md edit payload, no BACKLOG.md present in the fixture — the
+  // validator throws ENOENT and its own catch-block sets exitCode 1 (not the
+  // "repair required" exit 2). Two independent stderr sources exist in the
+  // composed command: (i) the sync-status pre-step, which always emits its
+  // own "BACKLOG.md not found" diagnostic unconditionally (not gated by
+  // VCODE — orthogonal to this task's scope, unchanged by T-457), and (ii)
+  // the validator's own VOUT, gated by the T-457 VCODE>=2 rule. Since the
+  // validator here exits 1 (not 2), its own full report must NOT appear in
+  // stderr, even though sync-status's unrelated diagnostic does.
   const backlogPayload = JSON.stringify({ tool_input: { file_path: path.join(scratch, 'BACKLOG.md') } });
   const backlogRun = spawnSync('bash', ['-c', managedCmd], {
     input: backlogPayload,
@@ -203,10 +219,10 @@ try {
   });
   assert.strictEqual(backlogRun.status, 0, 'FAIL: managed hook did not exit 0 on a BACKLOG.md edit (must always exit 0)');
   assert.ok(
-    backlogRun.stderr && backlogRun.stderr.trim().length > 0,
-    'FAIL: managed hook produced no stderr output for a BACKLOG.md edit (expected validator output, project fixture has no BACKLOG.md so validator should report a failure)'
+    !backlogRun.stderr.includes('MavP Validator Report'),
+    'FAIL: managed hook printed the full validator report on stderr for a validator exit-1 condition — exit 1 must stay silent under the exit-2-only gate'
   );
-  console.log('Assertion 6a passed: BACKLOG.md payload runs the validator, output observed on stderr, hook exits 0');
+  console.log('Assertion 6a passed: BACKLOG.md payload with validator exit 1 (ENOENT) produces no full-validator-report stderr, hook exits 0');
 
   // (b) unrelated file path payload — should exit 0 silently, no output at all.
   const unrelatedPayload = JSON.stringify({ tool_input: { file_path: path.join(scratch, 'README.md') } });
@@ -227,6 +243,160 @@ try {
   // resolves via the MAVERICKS_HOME env var exactly as before self-preference
   // was added.
 
+  // (c) T-457: a fixture whose validator run exits 1 (drifting — warning
+  // severity only, e.g. an in_progress task missing its Repo: field) must
+  // still produce NO stderr — silent covers exit 0 AND exit 1.
+  const warnScratch = makeScratchDir('mavp-hook-exit1-');
+  cleanupDirs.push(warnScratch);
+  fs.writeFileSync(
+    path.join(warnScratch, 'BACKLOG.md'),
+    [
+      '# BACKLOG',
+      '',
+      '## Active Wave',
+      '',
+      '### T-200 — Warning-only test',
+      '- **Status:** in_progress',
+      '- **Owner:** developer',
+      '- **Depends on:** —',
+      '- **Acceptance criteria:** n/a',
+      '- **Verification type:** artifact',
+      '- **Evidence expected:** n/a',
+      '',
+      '## Completed tasks',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(warnScratch, 'TASK_STATUS.md'),
+    [
+      '# TASK STATUS',
+      '',
+      '## Active tasks',
+      '',
+      '### T-200 — Warning-only test',
+      '- **Status:** in_progress',
+      '- **Owner:** developer',
+      '- **Verification type:** artifact',
+      '- **Last verified by:** —',
+      '- **Evidence:** —',
+      '- **Notes:** —',
+      '',
+      '## Recently completed tasks',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+  // Sanity: confirm this fixture really does trigger validator exit 1 (drifting),
+  // not exit 0 or exit 2, before relying on it to prove the gate.
+  const directWarnRun = spawnSync('node', [path.join(FRAMEWORK_ROOT, 'scripts', 'mavp-validator.js'), warnScratch], {
+    encoding: 'utf8',
+    timeout: 15000,
+  });
+  assert.strictEqual(directWarnRun.status, 1, `FAIL: exit-1 fixture sanity check — expected validator exit 1, got ${directWarnRun.status}`);
+
+  // MAVROOT is baked into the composed command at build time (not derived
+  // from the hook payload's file_path), so a command bound to `scratch` would
+  // always validate `scratch`, not warnScratch — build a fresh command whose
+  // MAVROOT is warnScratch itself.
+  const warnCmd = composePostToolUseHookCommand(warnScratch);
+  const warnPayload = JSON.stringify({ tool_input: { file_path: path.join(warnScratch, 'BACKLOG.md') } });
+  const warnRun = spawnSync('bash', ['-c', warnCmd], {
+    input: warnPayload,
+    encoding: 'utf8',
+    env: execEnv,
+    timeout: 15000,
+  });
+  assert.strictEqual(warnRun.status, 0, 'FAIL: managed hook did not exit 0 on a validator exit-1 (drifting) fixture');
+  assert.strictEqual(
+    warnRun.stderr,
+    '',
+    'FAIL: managed hook produced stderr for a validator exit-1 (drifting) fixture — exit 1 must stay silent'
+  );
+  console.log('Assertion 6c passed: validator exit-1 (drifting) fixture produces NO stderr, hook exits 0');
+
+  // (d) T-457: a fixture whose validator run exits 2 (repair required — a
+  // failure-severity finding, e.g. a duplicated T-NNN in BACKLOG.md) MUST
+  // produce the full validator report on stderr.
+  const failScratch = makeScratchDir('mavp-hook-exit2-');
+  cleanupDirs.push(failScratch);
+  fs.writeFileSync(
+    path.join(failScratch, 'BACKLOG.md'),
+    [
+      '# BACKLOG',
+      '',
+      '## Active Wave',
+      '',
+      '### T-100 — Dup test',
+      '- **Status:** planned',
+      '- **Owner:** developer',
+      '- **Depends on:** —',
+      '- **Acceptance criteria:** n/a',
+      '- **Verification type:** artifact',
+      '- **Evidence expected:** n/a',
+      '',
+      '### T-100 — Dup test',
+      '- **Status:** planned',
+      '- **Owner:** developer',
+      '- **Depends on:** —',
+      '- **Acceptance criteria:** n/a',
+      '- **Verification type:** artifact',
+      '- **Evidence expected:** n/a',
+      '',
+      '## Completed tasks',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(failScratch, 'TASK_STATUS.md'),
+    [
+      '# TASK STATUS',
+      '',
+      '## Active tasks',
+      '',
+      '### T-100 — Dup test',
+      '- **Status:** planned',
+      '- **Owner:** developer',
+      '- **Verification type:** artifact',
+      '- **Last verified by:** —',
+      '- **Evidence:** —',
+      '- **Notes:** —',
+      '',
+      '## Recently completed tasks',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+  // Sanity: confirm this fixture really does trigger validator exit 2 (repair
+  // required), not exit 0 or exit 1, before relying on it to prove the gate.
+  const directFailRun = spawnSync('node', [path.join(FRAMEWORK_ROOT, 'scripts', 'mavp-validator.js'), failScratch], {
+    encoding: 'utf8',
+    timeout: 15000,
+  });
+  assert.strictEqual(directFailRun.status, 2, `FAIL: exit-2 fixture sanity check — expected validator exit 2, got ${directFailRun.status}`);
+
+  // Same reasoning as warnCmd above: build a fresh command bound to failScratch.
+  const failCmd = composePostToolUseHookCommand(failScratch);
+  const failPayload = JSON.stringify({ tool_input: { file_path: path.join(failScratch, 'BACKLOG.md') } });
+  const failRun = spawnSync('bash', ['-c', failCmd], {
+    input: failPayload,
+    encoding: 'utf8',
+    env: execEnv,
+    timeout: 15000,
+  });
+  assert.strictEqual(failRun.status, 0, 'FAIL: managed hook did not exit 0 on a validator exit-2 (repair required) fixture');
+  assert.ok(
+    failRun.stderr && failRun.stderr.includes('duplicate_task_id'),
+    'FAIL: managed hook did not print full validator output on stderr for a validator exit-2 (repair required) fixture'
+  );
+  assert.ok(
+    failRun.stderr.includes('REPAIR REQUIRED'),
+    'FAIL: managed hook stderr for the exit-2 fixture does not contain the validator\'s full repair-required report'
+  );
+  console.log('Assertion 6d passed: validator exit-2 (repair required) fixture prints full validator output on stderr, hook exits 0');
+
   // ============================================================
   // Assertion 7 (T-430): self-preference — a target project that IS a full
   // mavericks checkout (has its own scripts/mavp-validator.js) must resolve
@@ -234,11 +404,15 @@ try {
   // deliberately stale sibling installation. Uses stub validator scripts with
   // distinct markers so we can tell which one actually ran.
   // ============================================================
+  // T-457: the stub validator must exit(2) — not exit(1) — so its stderr
+  // marker still leaks through the hook's exit-2-only stderr gate (VCODE>=2).
+  // An exit(1) stub would be silent under the new gate and this assertion
+  // would no longer be able to tell which validator ran.
   function seedStubMavericksScripts(dir, marker) {
     fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
     fs.writeFileSync(
       path.join(dir, 'scripts', 'mavp-validator.js'),
-      `#!/usr/bin/env node\nprocess.stderr.write(${JSON.stringify(marker)} + '\\n');\nprocess.exit(1);\n`,
+      `#!/usr/bin/env node\nprocess.stderr.write(${JSON.stringify(marker)} + '\\n');\nprocess.exit(2);\n`,
       'utf8'
     );
     fs.writeFileSync(

@@ -1,8 +1,8 @@
 ---
 name: qa
-description: Validates completed slices against acceptance criteria. TRIGGER when: (1) developer marks a slice dev_done or ready_for_qa, (2) runtime or manual verification is required. SKIP: artifact-only tasks (validator run serves as QA), tasks still in_progress.
+description: Validates completed slices against acceptance criteria. TRIGGER when: (1) developer marks a slice dev_done or ready_for_qa, (2) runtime or manual verification is required. SKIP: artifact-only or unit-only tasks (validator run / test suite serves as QA), tasks still in_progress.
 model: sonnet
-tools: Read Glob Grep Bash(node *) Bash(./scripts/mavp-operator --agent) Bash(node scripts/mavp-validator.js*)
+tools: Read Glob Grep Bash(node *) Bash(./scripts/mavp-operator --agent) Bash(node scripts/mavp-validator.js*) Bash(git log *) Bash(git show *) Bash(git diff *)
 deny-tools: Edit Write Agent
 permissions-mode: default
 maxTurns: 20
@@ -63,10 +63,12 @@ Blocker report format:
 
 ## Output format
 
-Return one of:
+Return one of these four outcomes — no other verdict is valid:
 - `qa_passed` — with evidence for each criterion met
 - `needs_fix` — with a numbered list of specific issues, each referencing the criterion it fails
+- `needs_human_review` — for `visual`/`manual` verification types (see the gates above): list the specific items requiring human inspection
+- `blocked:` — for a failure mode that prevents verification (e.g. `blocked: artifact_missing`): name what is missing and its expected location
 
-Do not return partial results. Either all criteria are met (qa_passed) or the slice needs work (needs_fix).
+A partial verification must still be returned — as `needs_fix` or `blocked:` — with explicit coverage of what was and was not checked. Do not stay silent or withhold a verdict while attempting to reach full coverage; converge on one of the four outcomes above and state the residual gap explicitly rather than omitting a report.
 
 If this is a second (or later) QA pass — meaning the developer had to fix issues before this pass — include `needs_fix_rounds: N` in your evidence summary, where N is the number of fix cycles observed. If this is the first pass, note `needs_fix_rounds: 0` or omit the field. This signal is used for skill reflection.

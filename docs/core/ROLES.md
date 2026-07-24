@@ -138,7 +138,7 @@ Primary responsibilities:
 - produce a structured design brief with task decomposition in MavP T-NNN format
 - surface technical risks, interface changes, and new infrastructure requirements
 
-When to use (before BACKLOG task creation, when ANY trigger is met):
+When to use — **mandatory before BACKLOG task creation for every task**, with the sole sanctioned exception of the XS fast lane (`--quick-merge`). See `CLAUDE.md` — "Orchestrator checklist — before touching any file" (source of truth) and `docs/core/ORCHESTRATION_RULES.md` — "Pre-task gate" / "XS fast lane (quick-merge)". The following are **signals the decomposition will be non-trivial** — useful context, not preconditions that gate whether architect is spawned (architect is spawned regardless):
 - feature touches 2 or more services or repos
 - introduces new infrastructure (queue, database, scheduled job, serverless function, etc.)
 - changes an inter-service interface or message schema

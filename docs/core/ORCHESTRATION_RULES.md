@@ -12,19 +12,19 @@
 8. Approval-heavy actions (runtime exec, shell inspection, git checks, commits, host inspection) should stay with the orchestrator, not as “continue the sub-agent” loops.
 9. For long-lived projects, the orchestrator must maintain restartability: a new chat should be able to resume from project docs and recent status snapshots without depending on deep conversational history.
 10. When a slice completes or changes state materially, update durable artifacts before relying on chat summaries.
-11. Before creating BACKLOG tasks, apply the pre-task gate: spawn `architect` or `analyst` when the conditions below are met. Neither role produces tasks — their briefs inform the Main Agent, who then registers tasks in BACKLOG.md.
+11. Before creating BACKLOG tasks, apply the pre-task gate: architect decomposition is **mandatory for every task**, with the sole sanctioned exception being the XS fast lane (`--quick-merge`, see below); `analyst` is spawned additionally when external-world research must be resolved before scoping. Neither role produces tasks — their briefs inform the Main Agent, who then registers tasks in BACKLOG.md. `CLAUDE.md` — "Orchestrator checklist — before touching any file" is the source of truth for this gate.
 
 ## Pre-task gate
 
-Run before registering any task in BACKLOG.md.
+Run before registering any task in BACKLOG.md. **Architect spawn is mandatory for all tasks, unconditionally** — not gated by feature complexity or scope — with the sole sanctioned exception of the XS fast lane (`--quick-merge`; see "XS fast lane (quick-merge)" below). `CLAUDE.md` — "Orchestrator checklist — before touching any file" is the source of truth for this rule; this section restates it for orchestration-rules readers.
 
-**architect** (internal codebase analysis — reads the codebase, returns a design brief and task decomposition):
+**architect** (internal codebase analysis — reads the codebase, returns a design brief and task decomposition): spawn first, always, for every task not covered by the XS fast lane exception. Simple or well-understood tasks still go through the gate — the architect returns a minimal single-task decomposition quickly in that case. The following are **signals that the decomposition will be non-trivial**, useful for anticipating scope — they are not preconditions that determine whether architect is spawned:
 - Feature touches 2+ services or repos
 - Feature introduces new infrastructure (queue, database, scheduled job, serverless function, etc.)
 - Feature changes an inter-service interface
 - Feature requires choosing between architectural approaches
 
-**analyst** (external world research — web research, returns a decision brief):
+**analyst** (external world research — web research, returns a decision brief), spawned in addition to architect, before it, when:
 - A technology choice, library/API selection, or external landscape research must be resolved before scoping can begin
 
 Neither role produces BACKLOG tasks. Their briefs inform the Main Agent before task registration.
@@ -67,6 +67,16 @@ When a task's `work_dir` points to a different repo, the following three-step se
    - File found and current → declare key findings from the doc.
    - File not found → include `MISSING_DOC: <path>/CLAUDE.md` in the report so the Main Agent can register a documentation task.
    - File found but appears stale relative to observed code or config → include `OUTDATED_DOC: <path>/CLAUDE.md — <what specifically is stale>` so the Main Agent can register an update task.
+
+## Cross-repo security reviews
+
+`.claude/agents/security-reviewer.md` scopes each spawn to exactly one repo per invocation (see its "Scope" section) — a chained multi-repo review is refused as a blocker, not attempted. When a security review must cover a trust boundary spanning more than one repo, the Main Agent — never a single sub-agent spawn — owns the decomposition:
+
+1. **Decompose per repo.** Spawn one `security-reviewer` invocation per repo involved in the boundary, each with its own narrow `Repo:` / `work_dir:` brief.
+2. **Inject the shared contract.** Each per-repo brief must include the relevant interface or trust-boundary contract (e.g. the request/response shape, auth handoff, or data contract crossing the boundary) so each reviewer can judge its side of the interface without needing the other repo's source.
+3. **Synthesize the cross-boundary verdict.** The Main Agent — not any sub-agent — combines the per-repo findings and reasons about the boundary itself (e.g. does repo A's output satisfy repo B's trust assumptions), then issues the overall `security_passed` / `security_needs_fix` verdict for the cross-repo change.
+
+This mirrors the "Cross-repo task pre-flight" sequence above but is specific to security review: never let a single sub-agent spawn attempt to chain analysis across repos on its own, even if the harness would technically allow it — the turn/token budget for a single review is sized for one repo (see `docs/AGENT_SPEC.md` — "Per-role maxTurns table"), and a chained multi-repo review is the failure mode that produces a truncated, zero-output non-report instead of a usable verdict.
 
 ## Worktree integration — Main Agent
 

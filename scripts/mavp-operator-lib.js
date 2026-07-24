@@ -2579,6 +2579,43 @@ function resolveRepoMapPath(root) {
 }
 
 /**
+ * Shared meta-heading skip-sets for the `## <id>` registry docs (docs/MODULES.md,
+ * docs/REPO_MAP.md). Each schema doc's own explanatory sections (What/Required/
+ * Example/How[/Module]) render as `## <heading>` too, so every parser that walks
+ * these files needs to skip them to avoid treating prose headings as real ids.
+ *
+ * Single source of truth (T-461) — consumed by both the full-registry parsers
+ * below (parseModuleRegistry/parseRepoMap) and mavp-validator.js's ID-only
+ * parsers (parseKnownModuleIds/parseKnownRepoIds), so there is exactly one
+ * skip-set per registry instead of one copy per consumer.
+ */
+const MODULE_META_HEADINGS = new Set(['How', 'Module', 'What', 'Required', 'Example']);
+const REPO_META_HEADINGS = new Set(['What', 'Required', 'Example', 'How']);
+
+/**
+ * Extract `## <id>` heading ids from markdown content, filtering out a given
+ * meta-heading skip-set. Single shared extraction (T-461) for both the
+ * ID-only registry readers (mavp-validator.js's parseKnownModuleIds/
+ * parseKnownRepoIds) and as the id source for the full-registry parsers below.
+ *
+ * @param {string} content - Raw markdown file content.
+ * @param {Set<string>} metaHeadings - Heading ids to exclude (schema prose sections).
+ * @returns {Set<string>} Ids in first-seen order, meta headings removed.
+ */
+function extractHeadingIds(content, metaHeadings) {
+  const ids = new Set();
+  const matches = content.match(/^##\s+(\S+)/gm) || [];
+  for (const match of matches) {
+    const m = match.match(/^##\s+(\S+)/);
+    if (m) ids.add(m[1].trim());
+  }
+  if (metaHeadings) {
+    for (const meta of metaHeadings) ids.delete(meta);
+  }
+  return ids;
+}
+
+/**
  * Parse the repo-map registry from docs/REPO_MAP.md.
  * Same project-owns-instance pattern as parseModuleRegistry() (mavp-operator-agent.js)
  * for docs/MODULES.md — the framework only defines the schema (see docs/REPO_MAP.md);
@@ -2598,7 +2635,7 @@ function parseRepoMap(root) {
     const registry = {};
     // Split on ## <id> headings (skip meta headings used in the schema spec)
     const sections = content.split(/^(?=##\s+\S)/m).filter(Boolean);
-    const META_HEADINGS = new Set(['What', 'Required', 'Example', 'How']);
+    const META_HEADINGS = REPO_META_HEADINGS;
     for (const section of sections) {
       const headingMatch = section.match(/^##\s+(\S+)/);
       if (!headingMatch) continue;
@@ -2697,7 +2734,7 @@ function parseModuleRegistry(root) {
     const content = fs.readFileSync(modulesPath, 'utf8');
     const registry = {};
     const sections = content.split(/^(?=##\s+\S)/m).filter(Boolean);
-    const META_HEADINGS = new Set(['How', 'Module', 'What', 'Required', 'Example']);
+    const META_HEADINGS = MODULE_META_HEADINGS;
     for (const section of sections) {
       const headingMatch = section.match(/^##\s+(\S+)/);
       if (!headingMatch) continue;
@@ -3157,25 +3194,24 @@ function mergeCommitEvidence(existingEvidence, hash, branch) {
 }
 
 /**
- * Return the full list of commit hashes reachable from HEAD in `root`, via a
- * single batched `git rev-list HEAD` call (T-448). Used by the validator's
- * commit_unreachable check to detect merged-task evidence commit: hashes that
- * were never actually integrated onto HEAD — e.g. a worktree-local hash pasted
- * into evidence before the cherry-pick landed. A mere existence check (like
- * `git cat-file -e <hash>`) is insufficient here: worktrees share the object
- * database, so it would pass even for a hash that never reached HEAD.
- * Reachability from HEAD is the only check that actually catches this.
+ * Return the full list of commit hashes reachable from an arbitrary `revspec`
+ * (e.g. `HEAD`, `origin/main`, `@{upstream}`) in `root`, via a single batched
+ * `git rev-list <revspec>` call. Generalized from the HEAD-only helper below
+ * (T-448) so T-454/T-455 can reuse the same batched-call pattern to test
+ * reachability from a remote-tracking ref or a local branch, not just HEAD.
  *
  * Degrades silently (returns null, never throws) when `root` is not a git
- * repository, git is not installed, or the repo has no commits yet — mirrors
- * the pattern used by findPreviousCloseSessionCommit() above.
+ * repository, git is not installed, `revspec` does not resolve (e.g. no
+ * upstream configured), or the repo has no commits yet — mirrors the pattern
+ * used by findPreviousCloseSessionCommit() above.
  *
  * @param {string} root - Absolute path to the git working tree.
- * @returns {string[]|null} Full hashes reachable from HEAD, or null when git/HEAD is unavailable.
+ * @param {string} revspec - A git revspec (e.g. 'HEAD', 'origin/main', '@{upstream}').
+ * @returns {string[]|null} Full hashes reachable from revspec, or null when git/revspec is unavailable.
  */
-function getCommitHashesReachableFromHead(root) {
+function getCommitHashesReachable(root, revspec) {
   try {
-    const output = cp.execSync('git rev-list HEAD', {
+    const output = cp.execSync(`git rev-list ${revspec}`, {
       cwd: root,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -3184,6 +3220,30 @@ function getCommitHashesReachableFromHead(root) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Return the full list of commit hashes reachable from HEAD in `root`, via a
+ * single batched `git rev-list HEAD` call (T-448). Used by the validator's
+ * commit_unreachable check to detect merged-task evidence commit: hashes that
+ * were never actually integrated onto HEAD — e.g. a worktree-local hash pasted
+ * into evidence before the cherry-pick landed. A mere existence check (like
+ * `git cat-file -e <hash>`) is insufficient here: worktrees share the object
+ * database, so it would pass even for a hash that never reached HEAD.
+ * This is the HEAD tier of the validator's two-tier reachability model
+ * (T-455): a hash unreachable from HEAD but reachable from some local branch
+ * (via getCommitHashesReachable(root, '--branches')) is treated as a lesser,
+ * info-severity condition rather than the full footgun — only a hash
+ * reachable from no local ref at all is the real defect this pairing catches.
+ *
+ * Thin wrapper over getCommitHashesReachable(root, 'HEAD') — kept as its own
+ * named export so existing callers (validator, tests) are unaffected.
+ *
+ * @param {string} root - Absolute path to the git working tree.
+ * @returns {string[]|null} Full hashes reachable from HEAD, or null when git/HEAD is unavailable.
+ */
+function getCommitHashesReachableFromHead(root) {
+  return getCommitHashesReachable(root, 'HEAD');
 }
 
 module.exports = {
@@ -3201,10 +3261,12 @@ module.exports = {
   collectOperatorData,
   computeDueRechecks,
   computeMustRead,
+  extractHeadingIds,
   extractTrajectories,
   findPreviousCloseSessionCommit,
   formatIsoTime,
   generateProcessStateMd,
+  getCommitHashesReachable,
   getCommitHashesReachableFromHead,
   getDeployPendingForRepo,
   getFilesChangedSincePreviousCloseSession,
@@ -3215,6 +3277,7 @@ module.exports = {
   isValidHashFormat,
   lookupTaskTitle,
   mergeCommitEvidence,
+  MODULE_META_HEADINGS,
   moveActiveBlocksToParkedSection,
   moveParkedBlocksToActiveSection,
   normalizeWhitespace,
@@ -3237,6 +3300,7 @@ module.exports = {
   renameTask,
   renderThinSnapshot,
   readUtf8,
+  REPO_META_HEADINGS,
   resolveCommitHash,
   resolveContextBundlePath,
   resolveModuleRegistryPath,

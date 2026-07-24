@@ -7,6 +7,86 @@ docs in [`docs/core/`](docs/core/).
 
 ## [Unreleased]
 
+## [0.38.0] — 2026-07-24
+
+### Changed
+
+- Validator internals consolidated (behavior-preserving; output byte-identical):
+  a single `getProjectRoot()` helper replaces five copies of the
+  `MAVERICKS_PROJECT_ROOT`-or-cwd idiom; `parseArtifacts()` reuses the
+  existing `mergeFindings()` instead of a hand-rolled inline duplicate;
+  and module/repo registry ID-extraction is deduplicated onto a single
+  shared `extractHeadingIds()` + `META_HEADINGS` source in
+  `mavp-operator-lib.js` (was four independently-maintained skip-sets).
+  (T-460, T-461)
+- Validator checks are now driven by a declarative `CHECKS` registry in
+  `parseArtifacts()` instead of accreted per-feature `mergeFindings`
+  call-sites and a drifted "Check N" comment scheme; each future check is
+  a one-entry addition. Execution order and output are unchanged. (T-462)
+
+### Fixed
+
+- Agent-spec hardening from a full architect review of the 11 role specs
+  (`docs/AGENT_SPEC_REVIEW.md`): the `developer` git allowlist no longer
+  permits a pre-push bypass (`Bash(git -C *)` removed, `git diff`/`git log`
+  wildcarded, `git merge --ff-only main` added, PreToolUse hook now blocks
+  plain `git push`); `frontend-design` can commit its own work
+  (git add/commit/status + npm run, commit-before-exit rule,
+  BACKLOG/TASK_STATUS guard, Escalation section); the `qa` output contract
+  enumerates all four legal outcomes and drops the "no partial results"
+  convergence trap, plus read-only git for commit-evidence checks; and the
+  architect-gate policy is reconciled across `ORCHESTRATION_RULES.md` and
+  `ROLES.md` to match CLAUDE.md's mandatory-for-all-tasks language.
+  (T-464, T-465, T-466, T-467, T-468)
+
+### Added
+
+- `.claude/rules/` added to `product-docs`' writable scope so
+  RCA-codification rules-edit routings are executable. (T-469)
+- `scripts/test-agent-spec-sync.js` — a mechanical guard asserting every
+  `.claude/agents/*.md` frontmatter `model`/`maxTurns` matches
+  `docs/AGENT_SPEC.md`, closing the drift class T-459 exposed. (T-470)
+
+## [0.37.0] — 2026-07-24
+
+### Changed
+
+- Close-session deploy column now reflects actual deploy/push state
+  instead of collapsing every status into "deployed". Respects
+  `deploy_contours`: with contours 0/1 a merged task whose evidence
+  commit is not reachable from the remote-tracking ref renders as
+  "held / not pushed"; with contours ≥2, `deployed_dev` / `deployed_prod`
+  render distinct labels and `merged` renders "not deployed" (fixes the
+  fallthrough that previously showed deployed tasks as "not merged").
+  Degrades to a status-only label when no remote is configured. (T-454)
+- Validator `commit_unreachable` (Check 9) is now two-tier: a merged
+  task's evidence hash held on a local branch but not on HEAD emits an
+  info-severity "held on a local branch" finding that never affects the
+  exit code (the normal state for pre-push / feature-branch workflows),
+  while a hash reachable from no local ref preserves the original
+  warning/info severities — killing the mass-warning noise floor without
+  losing the pasted-worktree-hash footgun catch. (T-455)
+- Validator `Blocked by:` resolution (Check 12) gains a hub-backlog
+  fallback: when `<repo>/T-NNN` is not found in the target repo, the
+  validating repo's own backlog is consulted before emitting
+  `blocked_by_unresolvable`, accepted only when the local task's
+  `Repo:`/`Repos:` field includes the referenced repo id. Makes the
+  gate work for hub-model projects that track cross-repo tasks in one
+  backlog; a no-op for single-repo projects. (T-456)
+- PostToolUse validator hook stderr policy: full validator output now
+  surfaces only on exit 2 (repair required); exit 1 (drifting) stays
+  silent at edit time, keeping the "silent means no repair required"
+  convention coherent and preventing persistent advisory warnings from
+  acting as a de-facto per-edit block. The hook still always exits 0.
+  (T-457)
+- `security-reviewer` agent re-contracted to converge: one repo per
+  invocation (multi-repo briefs report a blocker), a budget-awareness
+  rule requiring a report with an explicit Coverage section instead of
+  "no partial results", `maxTurns` raised 15 → 25, and an opus-escalation
+  note for trust-boundary reviews. A new "Cross-repo security reviews"
+  rule in `ORCHESTRATION_RULES.md` decomposes cross-repo reviews into
+  per-repo spawns synthesized by the Main Agent. (T-458, T-459)
+
 ## [0.36.0] — 2026-07-24
 
 ### Added

@@ -173,6 +173,8 @@ If the commit is skipped (exit 2), fix the reported artifact drift, re-run `--cl
 
 Separate from the git pre-commit hook above, mavericks manages three Claude Code hooks in `.claude/settings.local.json`: `SessionStart`, `PostCompact`, and `PostToolUse` (the hardened validator hook, composed with the doc-sync and manifest-guard fragments).
 
+**Stderr policy (T-457).** The `PostToolUse` validator hook always exits 0 — it never blocks the Edit/Write tool call. Full validator output is printed to stderr ONLY when the validator itself exits 2 (repair required); when the validator exits 1 (drifting), the hook stays silent at edit time — that advisory is already surfaced by `--agent`, `--snapshot`, `--close-session`, and the pre-commit hook, so it does not need per-edit stderr noise. Silence at edit time therefore means "no repair required" (validator exit 0 or 1), not merely "healthy."
+
 **Default-on activation.** Both a fresh install and `--update` activate all three hooks automatically — no manual JSON editing or template copying required:
 - **Fresh install** seeds `.claude/settings.local.json` from scratch with all three hooks already wired in (see "What gets installed" above).
 - **`--update`** merges hooks into an existing `.claude/settings.local.json` idempotently (`mergeManagedHooks()` in `scripts/mavp-install.js`): it replaces the command of the installer-managed `PostToolUse` entry with the freshly composed one — picking up new fragments (e.g. doc-sync, manifest-guard) and any validator-filename migrations — appends that entry if none is found, and adds `SessionStart`/`PostCompact` only if they are absent.

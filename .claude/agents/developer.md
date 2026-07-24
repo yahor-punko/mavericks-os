@@ -2,7 +2,7 @@
 name: developer
 description: Implements bounded delivery slices with clear acceptance criteria. TRIGGER when: (1) task has explicit files-to-modify and definition of done, (2) slice is single-role with no architectural uncertainty. SKIP: strategic decisions, cross-role work, tasks needing architect review first.
 model: sonnet
-tools: Read Glob Grep Edit Write Bash(node *) Bash(npm *) Bash(git add *) Bash(git commit -m *) Bash(git -C *) Bash(git diff) Bash(git status) Bash(git log) Bash(./scripts/mavp-operator --agent) Bash(node scripts/mavp-validator.js*)
+tools: Read Glob Grep Edit Write Bash(node *) Bash(npm *) Bash(git add *) Bash(git commit -m *) Bash(git diff *) Bash(git status) Bash(git log *) Bash(git merge --ff-only main) Bash(./scripts/mavp-operator --agent) Bash(node scripts/mavp-validator.js*)
 deny-tools: Agent
 permissions-mode: default
 isolation: worktree
@@ -10,7 +10,7 @@ maxTurns: 90
 hooks:
   - event: PreToolUse
     match: Bash
-    condition: "input contains 'git reset --hard' or 'git push --force' or 'git checkout -- ' or 'git clean -f'"
+    condition: "input contains 'git reset --hard' or 'git push --force' or 'git push' or 'git checkout -- ' or 'git clean -f'"
     action: block
     message: "Destructive git operation blocked. Only proceed if the user has explicitly requested this action."
 ---

@@ -1,6 +1,7 @@
 'use strict';
 // Regression test: T-448 — Validator advisory: merged evidence commit hashes
-// unreachable from HEAD.
+// unreachable from HEAD. Extended by T-455 with two-tier reachability
+// (held-on-a-local-branch vs reachable-from-no-local-ref).
 //
 // Covers:
 //   1. extractCommitHashesFromEvidence() extracts one or more commit: hashes
@@ -11,20 +12,25 @@
 //   3. resolveSelfRepoId() resolves the repo id whose docs/REPO_MAP.md path:
 //      matches the validated root, and returns null when no entry matches.
 //   4. checkCommitReachable(): a merged Active-tasks entry citing a hash NOT
-//      reachable from HEAD fires commit_unreachable at WARNING severity,
-//      naming the task and hash; the same condition on a Recently-completed
-//      entry fires INFO severity; a reachable hash fires no finding; a
-//      non-terminal status is skipped; a task whose Repo:/Repos: names a
-//      different repo (per docs/REPO_MAP.md) is skipped; the check degrades
-//      silently (no finding, no crash) when git is unavailable (non-git dir).
-//   5. Reachability is computed with exactly ONE batched `git rev-list HEAD`
-//      subprocess call, regardless of how many evidence hashes are checked
-//      (verified via an execSync call-count spy).
+//      reachable from HEAD or any local branch fires commit_unreachable at
+//      WARNING severity, naming the task and hash; the same condition on a
+//      Recently-completed entry fires INFO severity; a hash reachable from
+//      HEAD fires no finding; a hash reachable from a local branch but NOT
+//      HEAD fires an INFO finding (T-455, "held on a local branch") even in
+//      the Active tasks section; a non-terminal status is skipped; a task
+//      whose Repo:/Repos: names a different repo (per docs/REPO_MAP.md) is
+//      skipped; the check degrades silently (no finding, no crash) when git
+//      is unavailable (non-git dir).
+//   5. Reachability is computed with exactly TWO batched `git rev-list`
+//      subprocess calls (HEAD, then --branches), regardless of how many
+//      evidence hashes are checked (verified via an execSync call-count spy).
 //   6. Full-stack: `node scripts/mavp-validator.js <fixtureRoot>` against a
-//      real fixture repo — Active-tasks unreachable hash -> exit 1
-//      (usable_but_drifting) with a commit_unreachable WARNING finding;
-//      Recently-completed-only unreachable hash -> exit 0 (healthy) with the
-//      finding still surfaced as INFO (never flips the exit code).
+//      real fixture repo — Active-tasks unreachable-from-any-ref hash -> exit
+//      1 (usable_but_drifting) with a commit_unreachable WARNING finding;
+//      Recently-completed-only unreachable-from-any-ref hash -> exit 0
+//      (healthy) with the finding still surfaced as INFO (never flips the
+//      exit code); Active-tasks hash held on a local branch (not HEAD) ->
+//      exit 0 (healthy) with the finding surfaced as INFO.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -250,6 +256,36 @@ function taskBlock({ taskId, status, repo, evidenceLine }) {
   // 4f: getSeverityForCheck default for commit_unreachable is warning (the worse of the two cases).
   assert.strictEqual(getSeverityForCheck('commit_unreachable'), 'warning', 'Test 4f FAIL: default severity for commit_unreachable should be warning');
   console.log('Test 4f passed: getSeverityForCheck("commit_unreachable") defaults to warning');
+
+  // 4g (T-455): a hash held on a local branch but NOT on HEAD -> INFO finding
+  // stating it's held on a local branch, even when the task is in the Active
+  // tasks section (which would otherwise be WARNING for the no-local-ref tier).
+  {
+    const currentBranch = git(root, 'rev-parse --abbrev-ref HEAD').trim();
+    git(root, 'checkout -q -b feature-branch-t455');
+    fs.writeFileSync(path.join(root, 'branch-only.md'), 'branch-only content\n', 'utf8');
+    git(root, 'add -A');
+    git(root, 'commit -q -m "branch-only commit"');
+    const branchHash = git(root, 'rev-parse HEAD').trim();
+    git(root, `checkout -q ${currentBranch}`);
+
+    const activeRecords = [
+      {
+        taskId: 'T-806',
+        status: 'merged',
+        repo: 'this-repo',
+        rawBlock: taskBlock({ taskId: 'T-806', status: 'merged', repo: 'this-repo', evidenceLine: `commit: ${branchHash}` }),
+      },
+    ];
+    const findings = checkCommitReachable({ activeRecords, recentlyCompletedRecords: [], root, repoMap });
+    assert.strictEqual(findings.length, 1, `Test 4g FAIL: expected exactly 1 finding, got: ${JSON.stringify(findings)}`);
+    const finding = findings[0];
+    assert.strictEqual(finding.checkName, 'commit_unreachable', 'Test 4g FAIL: checkName mismatch');
+    assert.strictEqual(finding.severity, 'info', 'Test 4g FAIL: expected INFO severity for a hash held on a local branch, even in the Active tasks section');
+    assert.ok(finding.message.includes('local branch'), `Test 4g FAIL: expected message to mention "held on a local branch": ${finding.message}`);
+    assert.ok(finding.message.includes('T-806') && finding.message.includes(branchHash), 'Test 4g FAIL: message should name the task and hash');
+  }
+  console.log('Test 4g passed: a hash held on a local branch (not HEAD) fires commit_unreachable at INFO severity even in the Active tasks section');
 }
 
 // ---------------------------------------------------------------------------
@@ -282,8 +318,9 @@ function taskBlock({ taskId, status, repo, evidenceLine }) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: reachability is computed with exactly ONE batched `git rev-list
-// HEAD` subprocess call, regardless of how many evidence hashes are checked.
+// Test 6: reachability is computed with exactly TWO batched `git rev-list`
+// subprocess calls (HEAD, then --branches), regardless of how many evidence
+// hashes are checked.
 // ---------------------------------------------------------------------------
 {
   const { root, headHash, orphanHash } = makeGitFixture('spy-fixture');
@@ -311,10 +348,10 @@ function taskBlock({ taskId, status, repo, evidenceLine }) {
     cp.execSync = originalExecSync;
   }
 
-  assert.strictEqual(callCount, 1, `Test 6 FAIL: expected exactly 1 subprocess call (batched git rev-list HEAD), got ${callCount}`);
+  assert.strictEqual(callCount, 2, `Test 6 FAIL: expected exactly 2 subprocess calls (batched git rev-list HEAD + git rev-list --branches), got ${callCount}`);
   assert.strictEqual(findings.length, 2, `Test 6 FAIL: expected 2 findings (T-811 warning + T-812 info), got: ${JSON.stringify(findings)}`);
 
-  console.log('Test 6 passed: reachability is computed with exactly one batched git rev-list HEAD subprocess call');
+  console.log('Test 6 passed: reachability is computed with exactly two batched git rev-list subprocess calls (HEAD + --branches)');
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +427,48 @@ function writeFullStackFixture(root, { evidenceStatus, sectionHeading }) {
   assert.ok(/healthy/i.test(output), `Test 7b FAIL: expected overall result to be Healthy:\n${output}`);
 
   console.log('Test 7b passed: full-stack validator run against a Recently-completed-only unreachable hash exits 0 (healthy) with commit_unreachable surfaced as INFO');
+}
+
+{
+  const root = path.join(TMP_DIR, 'e2e-active-held-on-branch');
+  fs.mkdirSync(root, { recursive: true });
+  git(root, 'init -q');
+  git(root, 'config user.email demo@example.invalid');
+  git(root, 'config user.name "Test Fixture"');
+  fs.writeFileSync(path.join(root, 'README.md'), '# fixture\n', 'utf8');
+  git(root, 'add -A');
+  git(root, 'commit -q -m "initial commit"');
+
+  const mainBranch = git(root, 'rev-parse --abbrev-ref HEAD').trim();
+  git(root, 'checkout -q -b feature-branch-t455');
+  fs.writeFileSync(path.join(root, 'branch-only.md'), 'branch-only content\n', 'utf8');
+  git(root, 'add -A');
+  git(root, 'commit -q -m "branch-only commit"');
+  const branchHash = git(root, 'rev-parse HEAD').trim();
+  git(root, `checkout -q ${mainBranch}`);
+
+  fs.mkdirSync(path.join(root, 'docs'), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, 'docs', 'REPO_MAP.md'),
+    `# Repo Map\n\n## this-repo\n\n- **label:** This Repo\n- **path:** ${root}\n`,
+    'utf8'
+  );
+  fs.writeFileSync(root + '/BACKLOG.md', `# BACKLOG\n\n## Active Wave\n\n`, 'utf8');
+  const block = `### T-901 — Fixture held-on-branch task\n\n- **Status:** merged\n- **Repo:** this-repo\n- **Verification type:** runtime\n- **Evidence:** commit: ${branchHash}\n`;
+  fs.writeFileSync(root + '/TASK_STATUS.md', `# TASK_STATUS\n\n## Active tasks\n\n${block}\n## Recently completed tasks\n\n`, 'utf8');
+
+  git(root, 'add -A');
+  git(root, 'commit -q -m "seed fixture artifacts"');
+
+  const result = spawnSync(process.execPath, [VALIDATOR_SCRIPT, root], { cwd: root, encoding: 'utf8' });
+  const output = (result.stdout || '') + (result.stderr || '');
+
+  assert.strictEqual(result.status, 0, `Test 7c FAIL: expected exit 0 (healthy) — a held-on-branch info finding must never flip the exit code, got ${result.status}. Output:\n${output}`);
+  assert.ok(output.includes('commit_unreachable'), `Test 7c FAIL: expected "commit_unreachable" in output:\n${output}`);
+  assert.ok(output.includes('T-901'), `Test 7c FAIL: expected "T-901" in output:\n${output}`);
+  assert.ok(/healthy/i.test(output), `Test 7c FAIL: expected overall result to be Healthy:\n${output}`);
+
+  console.log('Test 7c passed: full-stack validator run against an Active-tasks hash held on a local branch (not HEAD) exits 0 (healthy) with commit_unreachable surfaced as INFO');
 }
 
 // ---------------------------------------------------------------------------

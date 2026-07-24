@@ -46,7 +46,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode, printRepoIdentityHeader } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode, printRepoIdentityHeader, getCommitHashesReachable } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
@@ -320,6 +320,103 @@ function buildTaskStatusMap(markdown, taskIds) {
 }
 
 /**
+ * Resolve the remote-tracking ref for the current checkout in `root`:
+ * prefers `@{upstream}` (the branch's configured tracking ref); falls back
+ * to `origin/<current-branch>` when no upstream is configured but an
+ * `origin/<branch>` ref exists. Returns null (never throws) when neither
+ * resolves — no remote configured, detached HEAD, git unavailable, etc.
+ *
+ * @param {string} root - Absolute path to the git working tree.
+ * @returns {string|null} A revspec naming the remote-tracking ref, or null.
+ */
+function resolveRemoteTrackingRef(root) {
+  try {
+    const upstream = execSync('git rev-parse --abbrev-ref --symbolic-full-name @{upstream}', {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (upstream) return upstream;
+  } catch { /* no upstream configured — try origin/<branch> fallback below */ }
+
+  try {
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (!branch || branch === 'HEAD') return null; // detached HEAD
+    const candidate = `origin/${branch}`;
+    execSync(`git rev-parse --verify ${candidate}`, {
+      cwd: root,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True/false when reachability from the remote-tracking ref could be
+ * determined; null when it could not (no remote, no commit hash, git
+ * unavailable) — callers must treat null as "degrade to a status-only
+ * label", never as "not reachable".
+ *
+ * @param {string} root - Absolute path to the git working tree.
+ * @param {string|null} commitHash - Evidence commit hash (short or full).
+ * @returns {boolean|null}
+ */
+function isCommitReachableFromRemote(root, commitHash) {
+  if (!commitHash) return null;
+  const ref = resolveRemoteTrackingRef(root);
+  if (!ref) return null;
+  const reachableHashes = getCommitHashesReachable(root, ref);
+  if (reachableHashes === null) return null;
+  return reachableHashes.some((full) => full.startsWith(commitHash));
+}
+
+/**
+ * Compute the deploy-column label for a single task (T-454).
+ *
+ * deploy_contours >= 2 (dev+prod contours): derives directly from the task's
+ * actual status — deployed_prod / deployed_dev / merged each get their own
+ * label; anything else falls through to "not merged". This eliminates the
+ * former bug where deployed_dev/deployed_prod tasks rendered as "not merged"
+ * (the fallthrough only ever checked for `merged`).
+ *
+ * deploy_contours 0/1 (terminal-on-merge / auto-deploy-on-merge): the
+ * terminal/auto-deploy label renders ONLY when the evidence commit is
+ * reachable from the remote-tracking ref (origin/<branch> or @{upstream}) —
+ * otherwise a "held, not pushed" label renders so an unpushed merge is never
+ * mistaken for a live deploy. When reachability can't be determined at all
+ * (no remote configured, git unavailable, no evidence commit) this degrades
+ * to a status-only label instead of guessing either way.
+ *
+ * @param {number} deployContours
+ * @param {string|null} status - task's current status (from TASK_STATUS.md)
+ * @param {string|null} evidenceCommit - evidence commit hash, or null
+ * @param {string} root - absolute path to the git working tree
+ * @returns {string}
+ */
+function getDeployLabel(deployContours, status, evidenceCommit, root) {
+  if (deployContours >= 2) {
+    if (status === 'deployed_prod') return '✓ в проде';
+    if (status === 'deployed_dev') return '✓ в dev';
+    if (status === 'merged') return '⏳ не задеплоен';
+    return '⏳ не смёрджен';
+  }
+
+  // deploy_contours 0 or 1
+  const terminalLabel = deployContours === 0 ? '✓ задеплоен' : '✓ авто-деплой';
+  const reachable = isCommitReachableFromRemote(root, evidenceCommit);
+  if (reachable === true) return terminalLabel;
+  if (reachable === false) return '⚠ смёрджен — HELD, не запушен';
+  // reachable === null: can't verify (no remote / no commit / git unavailable) — degrade
+  return status || '—';
+}
+
+/**
  * Print a session-completed table for tasks that reached merged/qa_passed/dev_done
  * during this close-session run.
  *
@@ -328,10 +425,12 @@ function buildTaskStatusMap(markdown, taskIds) {
  * @param {string}   backlogContent        BACKLOG.md content
  * @param {number}   deployContours        from PROCESS_STATE.json
  * @param {Map}      taskStatusMap         taskId -> final status (from TASK_STATUS)
+ * @param {string}   [root]                absolute path to the git working tree (defaults to ROOT)
  */
-function printSessionCompletedTable(sessionCompletedIds, taskStatusContent, backlogContent, deployContours, taskStatusMap) {
+function printSessionCompletedTable(sessionCompletedIds, taskStatusContent, backlogContent, deployContours, taskStatusMap, root) {
   if (!sessionCompletedIds || sessionCompletedIds.length === 0) return;
 
+  const gitRoot = root || ROOT;
   const evidenceMap = parseTasksEvidence(taskStatusContent, sessionCompletedIds);
   const repoMap = parseBacklogRepos(backlogContent, sessionCompletedIds);
 
@@ -342,15 +441,6 @@ function printSessionCompletedTable(sessionCompletedIds, taskStatusContent, back
   function pad(str, len) {
     const s = String(str || '');
     return s.length >= len ? s.slice(0, len) : s + ' '.repeat(len - s.length);
-  }
-
-  function deployLabel(taskId) {
-    const status = taskStatusMap ? taskStatusMap.get(taskId) : null;
-    if (deployContours === 0) return '✓ задеплоен';
-    if (deployContours === 1) return '✓ авто-деплой';
-    // deploy_contours >= 2
-    if (status === 'merged') return '⏳ не запущен в прод';
-    return '⏳ не смёрджен';
   }
 
   const separator = '── Сессия завершена ' + '─'.repeat(40);
@@ -365,7 +455,8 @@ function printSessionCompletedTable(sessionCompletedIds, taskStatusContent, back
     const taskLabel = repo ? `${id}  ${repo}` : id;
     const commitStr = ev.commit ? ev.commit.slice(0, 7) : '—';
     const branchStr = ev.branch || '—';
-    const deploy = deployLabel(id);
+    const status = taskStatusMap ? taskStatusMap.get(id) : null;
+    const deploy = getDeployLabel(deployContours, status, ev.commit, gitRoot);
     console.log(` ${pad(taskLabel, COL_TASK)}${pad(commitStr, COL_COMMIT)}${pad(branchStr, COL_BRANCH)}${deploy}`);
   }
   console.log('');
@@ -1041,7 +1132,7 @@ async function runNonInteractive(args) {
   // review artifact (omitted when no tasks completed this session).
   const finalStatusMap = buildTaskStatusMap(updatedContent, sessionCompletedIds);
   const backlogContent = fs.existsSync(BACKLOG_MD) ? readUtf8(BACKLOG_MD) : '';
-  printSessionCompletedTable(sessionCompletedIds, updatedContent, backlogContent, deployContours, finalStatusMap);
+  printSessionCompletedTable(sessionCompletedIds, updatedContent, backlogContent, deployContours, finalStatusMap, ROOT);
 
   // Wave complete: push (if --push flag set) or print reminder — runs AFTER
   // commit AND after the results table above. Under bypassPermissions, --push
@@ -1375,7 +1466,7 @@ async function runInteractive() {
   // push (omitted when no tasks completed this session).
   const finalStatusMap = buildTaskStatusMap(updatedContent, sessionCompletedIds);
   const backlogContent = fs.existsSync(BACKLOG_MD) ? readUtf8(BACKLOG_MD) : '';
-  printSessionCompletedTable(sessionCompletedIds, updatedContent, backlogContent, deployContours, finalStatusMap);
+  printSessionCompletedTable(sessionCompletedIds, updatedContent, backlogContent, deployContours, finalStatusMap, ROOT);
 
   // Wave complete → prompt git push. The [Y/n] prompt IS the human
   // authorization — valid because the results table above already printed.
@@ -1425,4 +1516,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, runValidator };
+module.exports = { moveTaskToCompleted, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable };

@@ -34,7 +34,7 @@ Task registration is never delegated to this role — if a brief asks you to reg
 - Read the slice entry in BACKLOG.md. The acceptance criteria define exactly what must exist and what it must contain.
 
 <!-- protected -->
-- Write to `docs/`, `templates/`, root-level markdown files, or `.claude/agents/` only. Do not touch scripts or configuration.
+- Write to `docs/`, `templates/`, `.claude/rules/`, root-level markdown files, or `.claude/agents/` only. Do not touch scripts or configuration.
 - Commit your changes with `git add` + `git commit -m` before reporting done. Do not leave uncommitted edits for the Main Agent.
 - Do not run scripts or shell commands beyond git and the MavP validator (`node scripts/mavp-validator.js`).
 - When updating an existing doc, preserve its structure unless the criteria explicitly require restructuring.

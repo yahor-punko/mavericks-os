@@ -340,8 +340,11 @@ fi
  *      the validator; earlier invocations exit 0 silently once superseded.
  *   3. Auto-sync — BACKLOG.md edits run mavp-operator-sync-status.js BEFORE
  *      validating, so mirrored status edits do not trip a transient mismatch.
- * The hook always exits 0: validator output is advisory only, surfaced via
- * stderr, never blocking the tool call.
+ * The hook always exits 0 — validator output never blocks the tool call.
+ * Full validator output is printed to stderr ONLY when the validator itself
+ * exits 2 (repair required). Exit 1 (drifting) stays silent at edit time —
+ * that advisory is already surfaced by --agent, --snapshot, --close-session,
+ * and the pre-commit hook, so it does not need per-edit stderr noise.
  *
  * MAVERICKS_PROJECT_ROOT is exported before invoking framework scripts:
  * mavp-operator-sync-status.js resolves its target root from that env var
@@ -364,7 +367,7 @@ fi
  * unchanged.
  */
 function buildPostToolUseHookCommand(targetDir) {
-  return `INPUT=$(cat); FP=$(node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write((d.tool_input&&d.tool_input.file_path)||'')}catch(e){}" <<< "$INPUT"); case "$FP" in *BACKLOG.md|*TASK_STATUS.md) ;; *) exit 0 ;; esac; MAVROOT="${targetDir}"; if [ -f "$MAVROOT/scripts/mavp-validator.js" ]; then MAVERICKS="$MAVROOT/scripts"; else MAVERICKS="\${MAVERICKS_HOME:-$( [ -d "$HOME/.mavericks" ] && printf %s "$HOME/.mavericks" || printf %s "$HOME/Documents/mavericks" )}/scripts"; fi; export MAVERICKS_PROJECT_ROOT="$MAVROOT"; TS=$(node -e "process.stdout.write(String(Date.now()))"); echo "$TS" > "$MAVROOT/.mavp-hook-ts"; sleep 1.5; CURRENT_TS=$(cat "$MAVROOT/.mavp-hook-ts" 2>/dev/null); if [ "$CURRENT_TS" != "$TS" ]; then exit 0; fi; rm -f "$MAVROOT/.mavp-hook-ts"; cd "$MAVROOT"; case "$FP" in *BACKLOG.md) node "$MAVERICKS/mavp-operator-sync-status.js" 1>&2 ;; esac; VOUT=$(node "$MAVERICKS/mavp-validator.js" 2>&1); VCODE=$?; [ $VCODE -ne 0 ] && printf '%s\\n' "$VOUT" >&2 || true; exit 0`;
+  return `INPUT=$(cat); FP=$(node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write((d.tool_input&&d.tool_input.file_path)||'')}catch(e){}" <<< "$INPUT"); case "$FP" in *BACKLOG.md|*TASK_STATUS.md) ;; *) exit 0 ;; esac; MAVROOT="${targetDir}"; if [ -f "$MAVROOT/scripts/mavp-validator.js" ]; then MAVERICKS="$MAVROOT/scripts"; else MAVERICKS="\${MAVERICKS_HOME:-$( [ -d "$HOME/.mavericks" ] && printf %s "$HOME/.mavericks" || printf %s "$HOME/Documents/mavericks" )}/scripts"; fi; export MAVERICKS_PROJECT_ROOT="$MAVROOT"; TS=$(node -e "process.stdout.write(String(Date.now()))"); echo "$TS" > "$MAVROOT/.mavp-hook-ts"; sleep 1.5; CURRENT_TS=$(cat "$MAVROOT/.mavp-hook-ts" 2>/dev/null); if [ "$CURRENT_TS" != "$TS" ]; then exit 0; fi; rm -f "$MAVROOT/.mavp-hook-ts"; cd "$MAVROOT"; case "$FP" in *BACKLOG.md) node "$MAVERICKS/mavp-operator-sync-status.js" 1>&2 ;; esac; VOUT=$(node "$MAVERICKS/mavp-validator.js" 2>&1); VCODE=$?; [ $VCODE -ge 2 ] && printf '%s\\n' "$VOUT" >&2 || true; exit 0`;
 }
 
 // Sentinel-prefixed identity token for the opt-in transcript-archive SessionStart
