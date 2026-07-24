@@ -743,7 +743,7 @@ function makeRemoteFixtureRepo() {
   const bareDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t454-bare-'));
 
   execFileSync('git', ['init', '-q', '--bare'], { cwd: bareDir });
-  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['-c', 'init.defaultBranch=main', 'init', '-q'], { cwd: dir });
   execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
   execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'fixture: init'], { cwd: dir });
@@ -764,7 +764,7 @@ function makeRemoteFixtureRepo() {
 
 function makeNoRemoteFixtureRepo() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t454-noremote-fixture-'));
-  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['-c', 'init.defaultBranch=main', 'init', '-q'], { cwd: dir });
   execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
   execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'fixture: init'], { cwd: dir });

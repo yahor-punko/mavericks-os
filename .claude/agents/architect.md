@@ -112,6 +112,10 @@ Rules:
 - `repo:` is optional — include it (e.g. `repo: repo-a` or `repo: repo-a, repo-b` for a cross-repo task) when the repo is already known; omit it otherwise. See `docs/ARCHITECT_OUTPUT.md` — Optional fields.
 - Use em-dash (`—`) for `depends_on:` when there are no dependencies.
 
+## Budget awareness
+
+As you approach your turn or token budget, **stop further analysis and emit the mavp-decomposition block for the scope you did cover** — a partial decomposition with an explicit coverage note is always better than no output at all. Do not keep chaining more analysis in an attempt to reach full coverage once the budget is tight; converge on the decomposition block instead. When you converge early, add a short "Not yet analyzed" note alongside the Summary section listing the areas, repos, or task boundaries you did not have budget to examine, so the Main Agent knows what to re-scope or re-run separately.
+
 ## Escalation
 
 <!-- protected -->

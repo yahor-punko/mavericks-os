@@ -7,6 +7,35 @@ docs in [`docs/core/`](docs/core/).
 
 ## [Unreleased]
 
+## [0.38.1] — 2026-07-24
+
+### Fixed
+
+- CI: `test-close-session-mode.js` Case 19 was environment-fragile — the
+  git fixture relied on the ambient `init.defaultBranch`, so it passed
+  locally (default `main`) but failed on CI runners defaulting to
+  `master`. Fixtures now force `init.defaultBranch=main` explicitly. No
+  production-code change (the `resolveRemoteTrackingRef()` behavior it
+  exercises was already correct). (T-476)
+
+### Changed
+
+- Agent-spec consistency polish: read-only `git diff`/`git show` added to
+  `security-reviewer`; a standard Escalation section added to
+  `exa-researcher`; `technical-writer`'s floating protected bullet merged
+  into Rules and its BACKLOG/TASK_STATUS guard given a protected block;
+  `developer`'s description reworded to match the mandatory architect
+  gate. (T-473)
+- `architect` spec gains a Budget-awareness clause (converge and emit the
+  decomposition block under budget pressure with a coverage note rather
+  than dying silently), applied from a human-approved SKILL_PROPOSALS
+  entry. (T-474)
+- Worktree integration rule codified framework-wide in
+  `docs/core/ORCHESTRATION_RULES.md`: record the on-branch hash produced
+  by cherry-pick/merge as `commit:` evidence, never the sub-agent's
+  worktree hash (they differ; using the worktree hash trips the validator's
+  `commit_unreachable` check). (T-475)
+
 ## [0.38.0] — 2026-07-24
 
 ### Changed

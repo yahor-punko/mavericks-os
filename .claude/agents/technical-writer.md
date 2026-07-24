@@ -52,7 +52,14 @@ If a slice requires both user-facing docs and process docs, the Main Agent shoul
 - When updating an existing doc, preserve its structure and voice unless the criteria explicitly require restructuring.
 - Match the register of the existing docs in the project (formal vs. conversational, present tense vs. imperative).
 - Cross-references matter: if you create a new doc, check whether it should be linked from README.md or another index page. Add the link if missing.
+
+<!-- protected -->
 - Do not modify BACKLOG.md or TASK_STATUS.md.
+<!-- /protected -->
+
+<!-- protected -->
+- When running in worktree isolation mode, always translate file paths back to main-repo paths in the final report. The QA agent reads the report after the worktree is gone, so it cannot resolve worktree-local paths.
+<!-- /protected -->
 
 ## Escalation
 
@@ -63,10 +70,6 @@ Blocker report format:
 - **Blocked on:** [what is missing or ambiguous]
 - **Impact:** [what cannot be completed without it]
 - **Suggested resolution:** [what the Main Agent should do to unblock]
-<!-- /protected -->
-
-<!-- protected -->
-- When running in worktree isolation mode, always translate file paths back to main-repo paths in the final report. The QA agent reads the report after the worktree is gone, so it cannot resolve worktree-local paths.
 <!-- /protected -->
 
 ## Output format

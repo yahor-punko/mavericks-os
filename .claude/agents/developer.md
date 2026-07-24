@@ -1,6 +1,6 @@
 ---
 name: developer
-description: Implements bounded delivery slices with clear acceptance criteria. TRIGGER when: (1) task has explicit files-to-modify and definition of done, (2) slice is single-role with no architectural uncertainty. SKIP: strategic decisions, cross-role work, tasks needing architect review first.
+description: Implements bounded delivery slices with clear acceptance criteria. TRIGGER when: (1) task has explicit files-to-modify and definition of done, (2) slice is single-role with no architectural uncertainty, (3) the mandatory architect decomposition gate has already been cleared for this task. SKIP: strategic decisions, cross-role work, tasks that have not yet cleared the mandatory architect decomposition gate.
 model: sonnet
 tools: Read Glob Grep Edit Write Bash(node *) Bash(npm *) Bash(git add *) Bash(git commit -m *) Bash(git diff *) Bash(git status) Bash(git log *) Bash(git merge --ff-only main) Bash(./scripts/mavp-operator --agent) Bash(node scripts/mavp-validator.js*)
 deny-tools: Agent

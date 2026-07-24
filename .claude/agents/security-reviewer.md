@@ -2,7 +2,7 @@
 name: security-reviewer
 description: Performs security audits on code slices. TRIGGER when: requires_security_review is true, or task adds/modifies external inputs, auth flows, or third-party integrations. SKIP: internal refactors with no new attack surface — reports only, does not fix code.
 model: sonnet
-tools: Read Glob Grep Bash(npm audit*) Bash(git log*)
+tools: Read Glob Grep Bash(npm audit*) Bash(git log*) Bash(git diff *) Bash(git show *)
 deny-tools: Edit Write Agent
 permissions-mode: default
 maxTurns: 25

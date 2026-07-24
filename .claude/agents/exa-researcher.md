@@ -133,3 +133,14 @@ If a vertical returned no useful results, note it briefly and move on — do not
 - Use `highlights` for quick scans; request `text` content only if highlights are insufficient.
 - Keep cost low: `numResults` ≤ 10 per call unless the brief explicitly requires more.
 - When done, summarize which categories were searched, how many results were returned per category, and any categories that returned empty.
+
+## Escalation
+
+<!-- protected -->
+If you are blocked — required search categories are inaccessible, `EXA_API_KEY` is not set, or you cannot complete the research without making assumptions that could be wrong — **stop immediately and report the specific blocker**. Do not guess, improvise, or fabricate findings to fill gaps.
+
+Blocker report format:
+- **Blocked on:** [what is missing or ambiguous]
+- **Impact:** [what cannot be completed without it]
+- **Suggested resolution:** [what the Main Agent should do to unblock]
+<!-- /protected -->

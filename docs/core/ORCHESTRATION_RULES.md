@@ -94,6 +94,8 @@ Harness worktrees are frequently branched from an older commit of main. The file
 
 The developer.md "Worktree mechanics" section (lines 52-66) owns committing inside the worktree and confirming the correct branch. This section picks up strictly after control returns here.
 
+**Evidence hash — record the on-branch hash, not the worktree hash.** `git cherry-pick` and `git merge` both create a NEW commit object on the target branch whose hash differs from the sub-agent's original worktree commit hash — even though the diff content is identical. When recording `commit: <hash>` in `TASK_STATUS.md` evidence, use the hash printed by the integration command itself (the `[<branch> <hash>]` line git prints on a successful cherry-pick or merge commit), never the hash from the sub-agent's report or from `git log` inside the worktree. Recording the worktree hash produces evidence that is unreachable from the target branch, which trips the validator's `commit_unreachable` check after the fact. Do not pipe the cherry-pick/merge output through a filter (e.g. `tail`) aggressive enough to discard that `[<branch> <hash>]` line — capture the full output, or re-resolve the hash with `git rev-parse HEAD` on the target branch immediately after integrating, before writing evidence.
+
 ### GAP B — Orphaned work: recovery before integration
 
 The developer-side mandatory exit check (developer.md lines 64-65) only fires if the agent survives to the end of its turn. Agents can abort mid-turn — the last message ending "Now update…" or similar — leaving code written but uncommitted inside the worktree.
