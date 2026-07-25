@@ -21,6 +21,7 @@
  *   node /path/to/mavericks/scripts/mavp-install.js --update <target-dir> [--transcript-archive]
  *   node /path/to/mavericks/scripts/mavp-install.js --hooks-only <target-dir> [--transcript-archive]
  *   node /path/to/mavericks/scripts/mavp-install.js --strip <target-dir> [--keep-artifacts]
+ *   node /path/to/mavericks/scripts/mavp-install.js <target-dir> --stale-source-ok
  *
  * Modes:
  *   (default)    — copy project-specific templates if missing, show status
@@ -48,6 +49,28 @@
  *              asking (works at a real TTY too). Ignored (no effect, prints a notice) in
  *              --strip mode — it never bypasses the strip refuse/confirm gates. Accepted and
  *              ignored by --update / --check, which have no prompts.
+ *
+ * --stale-source-ok (T-477) — deterministic escape hatch for the behind-upstream
+ *              guard. The resolved framework source (path.join(FRAMEWORK_DIR,'..') —
+ *              i.e. wherever this script itself lives, MAVERICKS_HOME > ~/.mavericks >
+ *              legacy) may be a git clone of the public mirror that is behind its own
+ *              upstream (e.g. an adopter's ~/.mavericks that was never `git pull`ed
+ *              after a release shipped) — installing from a behind-upstream source
+ *              silently syncs stale framework files and stamps a stale
+ *              mavericks_version. Fresh install / --update / --hooks-only refuse
+ *              (exit 1, no file written) when confirmed behind, printing the exact
+ *              remediation (`git -C <sourceRoot> pull`); pass --stale-source-ok to
+ *              proceed anyway. --check prints the same warning but always continues
+ *              (read-only). --strip skips the guard entirely. Identical behavior in
+ *              TTY and non-TTY sessions — this is not an interactive confirm, so it
+ *              does not conflict with the non-TTY auto-proceed contract described
+ *              below. See detectBehindUpstreamGuard() for the full no-op-condition
+ *              contract (not a git work tree, no upstream/detached HEAD, fetch
+ *              failure, etc. all degrade silently with no warning and no exit-code
+ *              change). Orthogonal to the T-444 stale-source guard above (that one
+ *              compares semver against a sibling install on self-install only; this
+ *              one checks the source's relationship to its own git remote,
+ *              regardless of self-install).
  *
  * --transcript-archive (T-422) — opt-in, default OFF. When set, merges a sentinel-identified
  *              managed SessionStart hook that sweeps this project's Claude Code session
@@ -870,6 +893,82 @@ function detectStaleSourceGuard(frameworkOwnRoot) {
   }
 }
 
+/**
+ * Behind-upstream guard (T-477): orthogonal to detectStaleSourceGuard() above
+ * (which compares semver against a sibling install and only fires on
+ * self-install). This guard instead asks a different question of the resolved
+ * framework SOURCE root (path.join(FRAMEWORK_DIR,'..')) — regardless of
+ * self-install: is this source itself a git clone that is behind its OWN
+ * upstream? That is the incident this guards against: an adopter's resolved
+ * source (MAVERICKS_HOME / ~/.mavericks / legacy) is a clone of the public
+ * mirror that nobody ever `git pull`ed after a release shipped, so the
+ * installer silently syncs stale framework files and stamps a stale
+ * mavericks_version — detectStaleSourceGuard() cannot catch this because there
+ * is no "newer sibling" involved, only a stale relationship to a remote.
+ *
+ * Steps, each wrapped so ANY failure degrades to a no-op (never throws):
+ *   1. `git -C <sourceRoot> rev-parse --is-inside-work-tree` — if this is not
+ *      a git work tree at all (e.g. an npm-installed or tarball-extracted
+ *      copy), there is no upstream concept — no-op.
+ *   2. `git -C <sourceRoot> rev-parse --abbrev-ref @{upstream}` — resolves the
+ *      configured upstream for the current branch. Fails (throws) when there
+ *      is no upstream configured or HEAD is detached — no-op in both cases.
+ *   3. Best-effort `git -C <sourceRoot> fetch --quiet` with a hard ~4s timeout
+ *      (execFileSync `timeout` option — sends SIGTERM and throws on expiry).
+ *      ANY failure here (offline, timeout, no network) is swallowed — fetch
+ *      failing must never hang the installer or throw. Deliberately NOT
+ *      skipped when it fails: a purely-local compare without ever attempting
+ *      a fetch would be a false-clean in exactly the incident scenario (the
+ *      clone's local tracking ref equals HEAD until the next fetch runs), so
+ *      the fetch attempt is mandatory even though its result is discarded.
+ *   4. `git -C <sourceRoot> rev-list --count HEAD..@{upstream}` — the number
+ *      of commits reachable from upstream that HEAD does not have, i.e. how
+ *      far behind. Computed regardless of whether step 3's fetch succeeded —
+ *      so a previously-fetched tracking ref that already shows behind>0
+ *      still gates even when this run's fetch itself failed (offline).
+ *
+ * Returns the behind count (a positive integer) when confirmed behind, or
+ * null in every no-op case (not a work tree, no upstream/detached HEAD, git
+ * binary absent, rev-list failure, or count is 0/unparseable).
+ */
+function detectBehindUpstreamGuard(sourceRoot) {
+  try {
+    execFileSync('git', ['-C', sourceRoot, 'rev-parse', '--is-inside-work-tree'], { stdio: 'pipe' });
+  } catch {
+    return null;
+  }
+
+  try {
+    const upstream = execFileSync(
+      'git', ['-C', sourceRoot, 'rev-parse', '--abbrev-ref', '@{upstream}'],
+      { stdio: 'pipe', encoding: 'utf8' }
+    ).trim();
+    if (!upstream) return null;
+  } catch {
+    return null;
+  }
+
+  // Best-effort fetch — mandatory attempt, discarded result (see step 3 above).
+  try {
+    execFileSync('git', ['-C', sourceRoot, 'fetch', '--quiet'], { stdio: 'pipe', timeout: 4000 });
+  } catch {
+    // offline / timeout / no network — swallow and fall through to the
+    // rev-list below, which still gates on a previously-fetched tracking ref.
+  }
+
+  try {
+    const countOut = execFileSync(
+      'git', ['-C', sourceRoot, 'rev-list', '--count', 'HEAD..@{upstream}'],
+      { stdio: 'pipe', encoding: 'utf8' }
+    ).trim();
+    const count = parseInt(countOut, 10);
+    if (!Number.isFinite(count) || count <= 0) return null;
+    return count;
+  } catch {
+    return null;
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const checkOnly = args.includes('--check');
@@ -879,6 +978,7 @@ async function main() {
   const yesFlag = args.includes('--yes') || args.includes('-y');
   const noHooksFlag = args.includes('--no-hooks');
   const transcriptArchiveFlag = args.includes('--transcript-archive');
+  const staleSourceOkFlag = args.includes('--stale-source-ok');
   const targetArg = args.find(a => !a.startsWith('-'));
   const targetDir = targetArg ? path.resolve(targetArg) : process.cwd();
   const targetScripts = path.join(targetDir, 'scripts');
@@ -922,6 +1022,41 @@ async function main() {
     console.log(`${RED}  Newer sibling:  ${staleSourceGuard.siblingDir} ${BOLD}v${staleSourceGuard.siblingVersion}${RESET}`);
     console.log(`${RED}  Re-run the installer from the newer source instead:${RESET}`);
     console.log(`${RED}    cd ${staleSourceGuard.siblingDir} && node scripts/mavp-install.js ${targetDir} --update${RESET}\n`);
+  }
+
+  // Behind-upstream guard (T-477): the resolved framework SOURCE (not the
+  // target — path.join(FRAMEWORK_DIR,'..')) may itself be a git clone that is
+  // behind its own upstream (e.g. an adopter's ~/.mavericks that nobody ever
+  // `git pull`ed after a release). Applies regardless of self-install — this
+  // is orthogonal to detectStaleSourceGuard() above. See
+  // detectBehindUpstreamGuard() for the full no-op-condition contract; it
+  // never throws and never hangs (hard ~4s fetch timeout).
+  //
+  // --strip skips this entirely (handled further below, before any guard
+  // gating happens — --strip removes files, it never syncs FROM the source).
+  // --check prints the warning but continues (read-only reporting mode).
+  // Fresh install / --update / --hooks-only: gate — print the warning and the
+  // exact remediation command, then exit 1 BEFORE any file write, unless
+  // --stale-source-ok is passed (a deterministic escape hatch — identical in
+  // TTY and non-TTY, never an interactive confirm).
+  if (!stripMode) {
+    const sourceRootForGate = path.join(FRAMEWORK_DIR, '..');
+    const behindCount = detectBehindUpstreamGuard(sourceRootForGate);
+    if (behindCount !== null && behindCount > 0) {
+      console.log(`${RED}${BOLD}WARNING: local framework source is ${behindCount} commit(s) behind its upstream${RESET}`);
+      console.log(`${RED}  Source:      ${sourceRootForGate}${RESET}`);
+      console.log(`${RED}  Remediation: git -C ${sourceRootForGate} pull${RESET}\n`);
+      if (checkOnly) {
+        console.log(`${YELLOW}--check: continuing in read-only reporting mode despite behind-upstream source.${RESET}\n`);
+      } else if (!staleSourceOkFlag) {
+        console.error(`${RED}Refusing to proceed with a behind-upstream framework source.${RESET}`);
+        console.error(`${RED}Pull the source first (see remediation above), or pass --stale-source-ok to override.${RESET}\n`);
+        process.exitCode = 1;
+        return;
+      } else {
+        console.log(`${YELLOW}--stale-source-ok — proceeding despite behind-upstream source.${RESET}\n`);
+      }
+    }
   }
 
   // --hooks-only (T-406): sync ONLY the managed hooks (+ their .mavp-hook-ts gitignore

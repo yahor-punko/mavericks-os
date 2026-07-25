@@ -114,13 +114,44 @@ const EMAIL_ALLOWLIST = new Set([
   'yahorpunko@gmail.com',
   // RFC-2606/6761 reserved (.invalid) dummy address used as the throwaway
   // git-commit author in mavp-operator-demo.js's session-phase fixture
-  // seeding — deliberately non-resolvable, never a real address.
+  // seeding — deliberately non-resolvable, never a real address. (Also
+  // subsumed by RESERVED_EXAMPLE_DOMAINS/RESERVED_EXAMPLE_TLD_SUFFIXES
+  // below; kept explicit here for documentation clarity.)
   'demo@example.invalid',
 ]);
 
+// RFC 2606 ("Reserved Top Level DNS Names") and RFC 6761 ("Special-Use
+// Domain Names") permanently reserve example.com/.net/.org and the
+// .invalid/.test/.example/.localhost TLDs as non-routable documentation
+// placeholders — no real or private address can ever be hosted there. Any
+// local-part@ these domains is therefore safe to allow-list wholesale
+// instead of requiring a one-off exact-string EMAIL_ALLOWLIST entry per new
+// throwaway dummy address, which eliminates a recurring release-blocker:
+// each new test fixture email (e.g. test@example.com) previously tripped
+// the publish-scan email gate until manually allow-listed.
+const RESERVED_EXAMPLE_DOMAINS = new Set(['example.com', 'example.net', 'example.org']);
+const RESERVED_EXAMPLE_TLD_SUFFIXES = ['.invalid', '.test', '.example', '.localhost'];
+
+function isReservedExampleDomain(domain) {
+  const lowerDomain = domain.toLowerCase();
+  if (RESERVED_EXAMPLE_DOMAINS.has(lowerDomain)) {
+    return true;
+  }
+  return RESERVED_EXAMPLE_TLD_SUFFIXES.some((suffix) => lowerDomain.endsWith(suffix));
+}
+
 function isAllowed(categoryName, matchText) {
   if (categoryName === 'Email address') {
-    return EMAIL_ALLOWLIST.has(matchText.toLowerCase());
+    const lowerMatch = matchText.toLowerCase();
+    if (EMAIL_ALLOWLIST.has(lowerMatch)) {
+      return true;
+    }
+    const atIndex = lowerMatch.lastIndexOf('@');
+    if (atIndex === -1) {
+      return false;
+    }
+    const domain = lowerMatch.slice(atIndex + 1);
+    return isReservedExampleDomain(domain);
   }
   return false;
 }

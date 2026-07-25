@@ -7,6 +7,30 @@ docs in [`docs/core/`](docs/core/).
 
 ## [Unreleased]
 
+## [0.38.2] — 2026-07-25
+
+### Added
+
+- **Behind-upstream source guard** in `mavp-install.js`: when the resolved
+  framework source (`MAVERICKS_HOME` > `~/.mavericks` > legacy) is a git
+  clone that is behind its own upstream, install / `--update` /
+  `--hooks-only` now abort (exit 1, before any file write) with the exact
+  remediation (`git -C <sourceRoot> pull`) instead of silently syncing a
+  stale framework and stamping a stale `mavericks_version`. Uses a
+  best-effort `git fetch` (4s timeout) then `rev-list --count
+  HEAD..@{upstream}`; `--stale-source-ok` overrides, `--check` warns but
+  continues, `--strip` skips. Silent no-op when the source is non-git, has
+  no upstream, or the network is unavailable with a clean tracking ref.
+  Complements the existing (T-444) stale-source guard — orthogonal
+  mechanism. (T-477)
+
+### Changed
+
+- Release runbook (`docs/PUBLIC_RELEASE_STRATEGY.md`) now ends with an
+  explicit `git -C ~/.mavericks pull` step so the adopter-facing source
+  clone matches each freshly published release; `docs/core/BOOTSTRAP_GUIDE.md`
+  documents the new gate and `--stale-source-ok` override. (T-478)
+
 ## [0.38.1] — 2026-07-24
 
 ### Fixed

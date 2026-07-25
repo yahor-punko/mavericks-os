@@ -25,6 +25,22 @@ Generated wrappers and hooks resolve the mavericks install location in this orde
 
 **Maintainer caveat:** if you develop the framework itself from a checkout at `~/Documents/mavericks` *and* a `~/.mavericks` directory also exists on the same machine (e.g. from installing mavericks into another project), the `~/.mavericks` copy will silently shadow your `Documents` checkout for every wrapper or hook that doesn't set `MAVERICKS_HOME` explicitly — because step 2 resolves before step 3 ever runs. Framework developers should set `MAVERICKS_HOME` explicitly in their shell profile to avoid running against the wrong checkout.
 
+### Behind-upstream source guard
+
+The resolved framework source above (wherever `mavp-install.js` itself lives — `MAVERICKS_HOME` > `~/.mavericks` > legacy) may itself be a git clone that has fallen behind its own upstream — e.g. a `~/.mavericks` checkout that was never `git pull`ed after a newer release shipped. Installing from a behind-upstream source silently syncs stale framework files and stamps a stale `mavericks_version`, which is exactly the failure mode this guard closes.
+
+Before any file write, the installer does a best-effort `git fetch` (hard 4-second timeout — never hangs) against the source, then checks `git rev-list --count HEAD..@{upstream}`:
+
+- **Confirmed behind (count > 0):** prints a prominent warning naming the exact commit count and the remediation command (`git -C <sourceRoot> pull`), then:
+  - **Fresh install, `--update`, `--hooks-only`:** exits 1 before any file is written, unless `--stale-source-ok` is passed to proceed anyway. This behavior is identical in TTY and non-TTY sessions — it is a deterministic gate, not an interactive confirm.
+  - **`--check`:** prints the same warning but always continues (read-only reporting mode).
+  - **`--strip`:** skips the guard entirely — strip only removes files, it never syncs from the source.
+- **Everything else — silent no-op, no warning, no exit-code change:** the source is not a git work tree, has no upstream / is on a detached HEAD, the fetch fails (offline/timeout — falls through to `rev-list` against the last-known tracking ref), or the count comes back `0` or unparseable.
+
+```bash
+node "$HOME/.mavericks/scripts/mavp-install.js" /path/to/your-project --stale-source-ok
+```
+
 This first install is a one-time human-run command: an agent session opened before Mavericks is installed may lack shell/edit permission entirely, since the permissive default (`bypassPermissions`) is created *by* this install and can't exist before it runs.
 
 ## Step 2 — Edit PROCESS_STATE.json
