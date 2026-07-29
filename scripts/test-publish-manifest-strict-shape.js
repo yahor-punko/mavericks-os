@@ -230,25 +230,67 @@ console.log(`Passed: ${CHECKER_ONLY_CASES.length} checker-only exclude/preserve 
 // PINNED CONTROL — this repo's own real, committed scripts/publish-manifest.json
 // still passes both consumers unchanged (behaviour-neutral for the real
 // manifest, run against the REAL scripts/ directory, not a fixture copy).
+//
+// T-570: this control's original unconditional exit-0 assertion only holds
+// in the canonical (private) repo — a mirror/adopter tracked set never
+// contains the manifest's exclude-keyed paths, so the unflagged claim
+// always failed there for reasons that are not bugs (same class as
+// scripts/test-publish-overlay.js Tests 4/35/39, whose loud-skip shape
+// this follows rather than inventing a new one). Gate BOTH consumer
+// halves — checker AND assembler — on the exported `isCanonicalRepo()`
+// (no new heuristic); leaving the assembler half ungated would keep the
+// same silent-degradation class latent for an adopter who later deletes a
+// shipped file.
+//
+// `isCanonicalRepo()` only answers a binary "are ALL exclude keys
+// tracked?", which shares a blind spot with `--if-canonical`: a MIXED
+// repo (SOME but not all exclude keys tracked) would read as
+// non-canonical and silently skip — exactly the state that most needs to
+// fail loudly, since it means this IS the canonical repo with a stale
+// manifest. Count the tracked-exclude ratio directly so the three states
+// (all / none / mixed) are distinguished rather than collapsed to two.
 // ---------------------------------------------------------------------------
 {
-  const checkerResult = spawnSync(process.execPath, [CHECK_SCRIPT_SRC], { cwd: REAL_ROOT, encoding: 'utf8' });
-  assert.strictEqual(
-    checkerResult.status,
-    0,
-    `PINNED CONTROL FAIL: check-publish-manifest.js exited ${checkerResult.status} on this repo's own real manifest:\n${checkerResult.stdout}\n${checkerResult.stderr}`
-  );
+  const { isCanonicalRepo } = require(CHECK_SCRIPT_SRC);
+  const manifest = JSON.parse(fs.readFileSync(path.join(REAL_ROOT, 'scripts', 'publish-manifest.json'), 'utf8'));
+  const trackedOutput = execFileSync('git', ['ls-files'], { cwd: REAL_ROOT, encoding: 'utf8' });
+  const trackedList = trackedOutput.split('\n').filter(Boolean);
+  const trackedSet = new Set(trackedList);
 
-  const outParent = mkTempDir('mavp-t550-real-assemble-out-parent-');
-  const outDir = path.join(outParent, 'out');
-  const assemblerResult = spawnSync(process.execPath, [ASSEMBLE_SCRIPT_SRC, outDir], { cwd: REAL_ROOT, encoding: 'utf8' });
-  assert.strictEqual(
-    assemblerResult.status,
-    0,
-    `PINNED CONTROL FAIL: mavp-publish-assemble.js exited ${assemblerResult.status} on this repo's own real manifest:\n${assemblerResult.stdout}\n${assemblerResult.stderr}`
-  );
+  const excludeKeys = manifest.exclude && typeof manifest.exclude === 'object' ? Object.keys(manifest.exclude) : [];
+  const trackedExcludeCount = excludeKeys.filter((k) => trackedSet.has(k)).length;
+  const totalExcludeCount = excludeKeys.length;
+  const ratio = `${trackedExcludeCount}/${totalExcludeCount}`;
+  const isCanonical = isCanonicalRepo(manifest, trackedList); // true iff ALL exclude keys tracked
+  const isMixed = trackedExcludeCount > 0 && trackedExcludeCount < totalExcludeCount;
 
-  console.log("Passed (pinned control): this repo's own real committed scripts/publish-manifest.json passes both consumers unchanged.");
+  if (isMixed) {
+    assert.fail(
+      `PINNED CONTROL FAIL: ${ratio} exclude keys are git-tracked — a MIXED state means this IS the canonical repo with stale manifest entries (canonical-with-stale-manifest), not a legitimate mirror/adopter checkout (which tracks 0 by construction, since exclude paths never ship). Fix the manifest before this control can run.`
+    );
+  } else if (!isCanonical) {
+    console.log(
+      `PINNED CONTROL SKIPPED: ${ratio} exclude keys are git-tracked — this repo's own real manifest exit-0 claim only holds in the canonical (private) repo (test-publish-overlay.js Tests 4/35/39 gate the identical claim the same way).`
+    );
+  } else {
+    const checkerResult = spawnSync(process.execPath, [CHECK_SCRIPT_SRC], { cwd: REAL_ROOT, encoding: 'utf8' });
+    assert.strictEqual(
+      checkerResult.status,
+      0,
+      `PINNED CONTROL FAIL: check-publish-manifest.js exited ${checkerResult.status} on this repo's own real manifest:\n${checkerResult.stdout}\n${checkerResult.stderr}`
+    );
+
+    const outParent = mkTempDir('mavp-t550-real-assemble-out-parent-');
+    const outDir = path.join(outParent, 'out');
+    const assemblerResult = spawnSync(process.execPath, [ASSEMBLE_SCRIPT_SRC, outDir], { cwd: REAL_ROOT, encoding: 'utf8' });
+    assert.strictEqual(
+      assemblerResult.status,
+      0,
+      `PINNED CONTROL FAIL: mavp-publish-assemble.js exited ${assemblerResult.status} on this repo's own real manifest:\n${assemblerResult.stdout}\n${assemblerResult.stderr}`
+    );
+
+    console.log("Passed (pinned control): this repo's own real committed scripts/publish-manifest.json passes both consumers unchanged.");
+  }
 }
 
 console.log('\nAll T-550 shared strict manifest-shape loader assertions passed.');

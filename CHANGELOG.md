@@ -5,9 +5,76 @@ inspired by [Keep a Changelog](https://keepachangelog.com/). For how the
 framework actually works, see [README.md](README.md) and the core process
 docs in [`docs/core/`](docs/core/).
 
+## [0.39.1] — 2026-07-29
+
+### Fixed
+
+- **Shipped manifest tests no longer assert a canonical-only property outside
+  the canonical repo** (T-570) — the public mirror's CI (run 30453337655, all
+  three ubuntu cells) was RED on `test-publish-build.js` and
+  `test-publish-manifest-strict-shape.js` immediately after the 0.39.0
+  release, even though the private repo's own run was green: a mirror-shaped
+  repo trips three distinct classes against `check-publish-manifest.js`'s
+  completeness claim — UNCLASSIFIED (the two `.github/ISSUE_TEMPLATE/*.md`
+  files that exist only in the mirror), STALE (all 18 `exclude` keys, which
+  are by construction never tracked outside the canonical repo), and PRESERVE
+  entries shadowing git-tracked paths (the same two template files) — because
+  the completeness rule is written from the canonical repo's perspective and
+  the mirror is not that repo. `runPreflightCompletenessCheck()` in
+  `scripts/mavp-publish-assemble.js` now invokes the checker with
+  `--if-canonical` (T-401), which stands the whole claim down with a loud
+  SKIP line outside the canonical repo; canonical-repo behavior is
+  byte-identical (flagged vs. unflagged output diffed empty, both exit 0).
+  This alone fixes every clone-based e2e test in `test-publish-build.js`,
+  which all pass through the same assembler preflight. The PINNED CONTROL in
+  `scripts/test-publish-manifest-strict-shape.js` (asserting the checker and
+  assembler both exit 0 on this repo's own real manifest) is now gated on the
+  exported `isCanonicalRepo()` for BOTH consumer halves, plus a directly
+  computed tracked-exclude ratio that distinguishes three states rather than
+  a binary: all 18 exclude keys tracked → enforce unchanged; none tracked →
+  a loud `SKIPPED` line naming the ratio (e.g. `0/18`); some-but-not-all
+  tracked → FAIL loudly, naming the state as canonical-with-stale-manifest —
+  closing a blind spot `--if-canonical`'s binary heuristic shares (deleting
+  one tracked exclude-keyed file would otherwise read as non-canonical and
+  silently disarm pre-commit and manifest-guard together). Follows the
+  existing loud-skip precedent already used by `test-publish-overlay.js`
+  Tests 4/35/39 rather than inventing a new gate shape. Verified with a
+  hand-built non-canonical harness (assemble to a temp dir, `git init`, add
+  the two `.github/ISSUE_TEMPLATE/*.md` files, commit) reproducing the
+  mirror's exact pre-fix failure text and going green post-fix, plus a
+  mixed-state fixture (one exclude-keyed path added and committed) confirmed
+  to fail loudly as designed. Not a regression — both touched test files were
+  new in the 0.39.0 window.
+
 ## [0.39.0] — 2026-07-29
 
 ### Added
+
+- **Validator `commit_unreachable` now detects a shallow git clone and stands
+  down rather than reporting unsound warnings** (T-565) — every CI run was
+  annotating `validator drift (exit 1)` for evidence commit hashes that ARE on
+  main but simply weren't fetched by `actions/checkout@v7`'s default
+  fetch-depth-1 clone (measured on run 30445260691: 3 spurious
+  `commit_unreachable` warnings for hashes confirmed present locally and by
+  the Quick Start proxy step in the same job). The check was UNSOUND there,
+  not merely noisy: `git rev-list` in a depth-1 clone enumerates one commit,
+  so "not reachable from any local ref" is indistinguishable from "lives in
+  history deliberately never fetched." A new `isShallowRepository(root)`
+  helper (`scripts/mavp-operator-lib.js`) classifies shallow ONLY on an exact
+  `"true"` match from `git rev-parse --is-shallow-repository`; any other
+  output or a thrown error falls through to non-shallow (containment for
+  git < 2.15). `checkCommitReachable()` now suppresses the individual
+  "no local ref" warning in a shallow clone and collapses every indeterminate
+  hash into exactly ONE info-severity stand-down finding naming the affected
+  tasks — emitted only when at least one hash was actually indeterminate, so
+  a clean shallow clone gets no line at all. Positive reachability (HEAD or
+  `--branches`) is untouched regardless of clone depth — only the negative
+  "no local ref" tier was unsound. Full (non-shallow) clone behavior is
+  unchanged. Verified via a real `git clone --depth 1 file://<src>` fixture
+  (plain-path clones silently ignore `--depth`, so the file:// protocol is
+  load-bearing) asserting `git rev-parse --is-shallow-repository` prints
+  exactly `true`, plus direct-unit, full-stack, and zero-indeterminate-hash
+  coverage in `scripts/test-commit-reachable.js`.
 
 - **Shipped test suite is now git-identity-hermetic by construction** (T-562)
   — `scripts/run-tests.js`'s `runOne()` now spawns every `scripts/test-*.js`

@@ -3,7 +3,12 @@
 // unreachable from HEAD. Extended by T-455 with two-tier reachability
 // (held-on-a-local-branch vs reachable-from-no-local-ref). Extended by
 // T-489 with hub-aware per-hash cross-repo annotation skipping and
-// archived-section noise aggregation.
+// archived-section noise aggregation. Extended by T-565 with shallow-clone
+// detection: the "no local ref" tier is unsound in a shallow clone (e.g.
+// actions/checkout@v7's default fetch-depth: 1), since a hash absent from
+// the fetched window is indistinguishable from one whose history was
+// deliberately never fetched — indeterminate hashes are collapsed into a
+// single info-severity stand-down finding instead of individual warnings.
 //
 // Covers:
 //   1. extractCommitHashesFromEvidence() extracts one or more commit: hashes
@@ -23,9 +28,11 @@
 //      whose Repo:/Repos: names a different repo (per docs/REPO_MAP.md) is
 //      skipped; the check degrades silently (no finding, no crash) when git
 //      is unavailable (non-git dir).
-//   5. Reachability is computed with exactly TWO batched `git rev-list`
-//      subprocess calls (HEAD, then --branches), regardless of how many
-//      evidence hashes are checked (verified via an execSync call-count spy).
+//   5. Reachability is computed with exactly THREE batched subprocess calls —
+//      git rev-list HEAD, git rev-list --branches, and (T-565) the
+//      git rev-parse --is-shallow-repository shallow-clone detection call —
+//      regardless of how many evidence hashes are checked (verified via an
+//      execSync call-count spy).
 //   6. Full-stack: `node scripts/mavp-validator.js <fixtureRoot>` against a
 //      real fixture repo — Active-tasks unreachable-from-any-ref hash -> exit
 //      1 (usable_but_drifting) with a commit_unreachable WARNING finding;
@@ -46,6 +53,33 @@
 //      completed unreachable findings stay individual; above it, they
 //      collapse into one aggregate info finding naming the count. The
 //      Active tasks section is never aggregated, regardless of count.
+//  11. (T-565) checkCommitReachable() against a REAL shallow clone (built via
+//      `git clone --depth 1 file://<src>` — the file:// protocol is
+//      load-bearing, since a plain local-path clone silently ignores --depth
+//      — verified by asserting `git rev-parse --is-shallow-repository`
+//      prints exactly "true"): an evidence hash outside the fetched window
+//      produces NO warning-severity finding, collapsed instead into exactly
+//      ONE info-severity stand-down finding naming the affected task; an
+//      evidence hash INSIDE the fetched window (the clone's HEAD) produces
+//      no finding of any kind, in the same run.
+//  12. (T-565) a shallow clone with ZERO indeterminate evidence hashes emits
+//      no commit_unreachable finding at all — nothing stood down, so no
+//      advisory.
+//  13. (T-565) full-stack `node scripts/mavp-validator.js <shallowFixture>`
+//      against a real shallow clone with an out-of-window evidence hash
+//      exits 0 (healthy) — the stand-down finding never affects the exit
+//      code.
+//  14. (T-565) isShallowRepository() classifies shallow ONLY on an exact
+//      "true" match (via the execSync-spy pattern): non-"true" output (e.g.
+//      "false", wrong case) and a thrown error both fall through to false
+//      (non-shallow / existing behavior).
+//  15. (T-565) the stand-down message caps the ENUMERATED task ids at
+//      ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD (reusing the existing
+//      archived-section aggregation cap) and summarizes the remainder as
+//      "(+N more)", while still stating the TRUE total indeterminate count
+//      in full — otherwise a shallow clone of a repo's whole history (what
+//      CI actually does) enumerates every indeterminate task in one
+//      unreadable line.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -64,7 +98,7 @@ const {
   resolveSelfRepoId,
   getSeverityForCheck,
 } = require('./mavp-validator.js');
-const { getCommitHashesReachableFromHead } = require('./mavp-operator-lib.js');
+const { getCommitHashesReachableFromHead, isShallowRepository } = require('./mavp-operator-lib.js');
 
 const VALIDATOR_SCRIPT = path.join(__dirname, 'mavp-validator.js');
 
@@ -335,9 +369,13 @@ function taskBlock({ taskId, status, repo, evidenceLine }) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: reachability is computed with exactly TWO batched `git rev-list`
-// subprocess calls (HEAD, then --branches), regardless of how many evidence
-// hashes are checked.
+// Test 6: reachability is computed with exactly THREE batched subprocess
+// calls — git rev-list HEAD, git rev-list --branches, and (T-565) the
+// git rev-parse --is-shallow-repository shallow-clone detection call —
+// regardless of how many evidence hashes are checked. (Pre-T-565 this
+// asserted exactly 2 calls; the third call is the mandated new shallow
+// check, added once per checkCommitReachable() invocation, never once per
+// hash — batching is still preserved, just over one more command.)
 // ---------------------------------------------------------------------------
 {
   const { root, headHash, orphanHash } = makeGitFixture('spy-fixture');
@@ -365,10 +403,10 @@ function taskBlock({ taskId, status, repo, evidenceLine }) {
     cp.execSync = originalExecSync;
   }
 
-  assert.strictEqual(callCount, 2, `Test 6 FAIL: expected exactly 2 subprocess calls (batched git rev-list HEAD + git rev-list --branches), got ${callCount}`);
-  assert.strictEqual(findings.length, 2, `Test 6 FAIL: expected 2 findings (T-811 warning + T-812 info), got: ${JSON.stringify(findings)}`);
+  assert.strictEqual(callCount, 3, `Test 6 FAIL: expected exactly 3 subprocess calls (batched git rev-list HEAD + git rev-list --branches + is-shallow-repository), got ${callCount}`);
+  assert.strictEqual(findings.length, 2, `Test 6 FAIL: expected 2 findings (T-811 warning + T-812 info) — this fixture is a plain (non-shallow) git init, so behavior is byte-identical to pre-T-565, got: ${JSON.stringify(findings)}`);
 
-  console.log('Test 6 passed: reachability is computed with exactly two batched git rev-list subprocess calls (HEAD + --branches)');
+  console.log('Test 6 passed: reachability is computed with exactly three batched subprocess calls (HEAD + --branches + is-shallow-repository), and a non-shallow fixture still produces the pre-T-565 finding set unchanged');
 }
 
 // ---------------------------------------------------------------------------
@@ -669,8 +707,254 @@ function writeFullStackFixture(root, { evidenceStatus, sectionHeading }) {
 }
 
 // ---------------------------------------------------------------------------
+// T-565 shallow-clone fixture helper.
+//
+// FIXTURE TRAP — verified directly (twice): `git clone --depth 1
+// <plain-local-path>` SILENTLY IGNORES `--depth`. Git itself prints
+// "warning: --depth is ignored in local clones; use file:// instead", the
+// clone reports is-shallow-repository = false, and ALL commits are present.
+// Only `git clone --depth 1 file://<path>` produces a genuinely shallow
+// clone (is-shallow-repository = true, only the tip commit present). A
+// fixture written the obvious way (plain path) would pass vacuously while
+// testing nothing — hence the file:// protocol below, plus the exact-"true"
+// assertion that makes a future accidental rewrite fail loudly by name.
+//
+// Builds a 2-commit source repo, clones it with --depth 1 via file://, and
+// returns both roots plus the two commit hashes: outOfWindowHash (the first/
+// older commit — absent from the depth-1 clone's fetched history) and
+// inWindowHash (the second/tip commit — the shallow clone's own HEAD,
+// genuinely reachable).
+// ---------------------------------------------------------------------------
+function makeShallowFixture(name) {
+  const srcRoot = path.join(TMP_DIR, `${name}-src`);
+  fs.mkdirSync(srcRoot, { recursive: true });
+  git(srcRoot, 'init -q');
+  git(srcRoot, 'config user.email demo@example.invalid');
+  git(srcRoot, 'config user.name "Test Fixture"');
+
+  fs.writeFileSync(path.join(srcRoot, 'README.md'), '# fixture\n', 'utf8');
+  git(srcRoot, 'add -A');
+  git(srcRoot, 'commit -q -m "initial commit"');
+  const outOfWindowHash = git(srcRoot, 'rev-parse HEAD').trim();
+
+  fs.writeFileSync(path.join(srcRoot, 'file2.md'), 'second\n', 'utf8');
+  git(srcRoot, 'add -A');
+  git(srcRoot, 'commit -q -m "second commit"');
+  const inWindowHash = git(srcRoot, 'rev-parse HEAD').trim();
+
+  const shallowRoot = path.join(TMP_DIR, `${name}-shallow`);
+  execSync(`git clone -q --depth 1 file://${srcRoot} ${shallowRoot}`, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  const isShallowOutput = git(shallowRoot, 'rev-parse --is-shallow-repository').trim();
+  assert.strictEqual(
+    isShallowOutput,
+    'true',
+    `FIXTURE TRAP: expected the file:// clone at ${shallowRoot} to report "git rev-parse --is-shallow-repository" = "true", got "${isShallowOutput}". A plain local-path clone silently ignores --depth; this fixture MUST use the file:// protocol (verified directly: a plain-path clone here would report false and retain all commits).`
+  );
+
+  return { srcRoot, shallowRoot, outOfWindowHash, inWindowHash };
+}
+
+// ---------------------------------------------------------------------------
+// Test 11 (T-565): shallow-clone stand-down — an out-of-window evidence hash
+// produces NO warning finding (collapsed into one info stand-down advisory
+// naming the task), while an in-window evidence hash (the clone's own HEAD)
+// produces no finding at all, in the same run.
+// ---------------------------------------------------------------------------
+{
+  const { shallowRoot, outOfWindowHash, inWindowHash } = makeShallowFixture('t565-mixed');
+  const repoMap = { 'this-repo': { path: shallowRoot } };
+
+  const activeRecords = [
+    {
+      taskId: 'T-960',
+      status: 'merged',
+      repo: 'this-repo',
+      rawBlock: taskBlock({ taskId: 'T-960', status: 'merged', repo: 'this-repo', evidenceLine: `commit: ${outOfWindowHash}` }),
+    },
+    {
+      taskId: 'T-961',
+      status: 'merged',
+      repo: 'this-repo',
+      rawBlock: taskBlock({ taskId: 'T-961', status: 'merged', repo: 'this-repo', evidenceLine: `commit: ${inWindowHash}` }),
+    },
+  ];
+
+  const findings = checkCommitReachable({ activeRecords, recentlyCompletedRecords: [], root: shallowRoot, repoMap });
+
+  assert.strictEqual(
+    findings.length,
+    1,
+    `Test 11a FAIL: expected exactly ONE finding in the shallow fixture (the stand-down advisory) — no per-task warning for the out-of-window hash (T-960), no finding at all for the in-window hash (T-961). Got: ${JSON.stringify(findings)}`
+  );
+  const [finding] = findings;
+  assert.strictEqual(finding.checkName, 'commit_unreachable', 'Test 11a FAIL: checkName mismatch');
+  assert.strictEqual(finding.severity, 'info', 'Test 11a FAIL: the stand-down finding must be info severity — it must never affect the exit code');
+  assert.ok(!findings.some((f) => f.severity === 'warning'), 'Test 11a FAIL: no warning-severity commit_unreachable finding may be present in a shallow clone');
+  assert.ok(finding.message.includes('T-960'), 'Test 11a FAIL: stand-down message should name the affected task (T-960)');
+  assert.ok(!finding.message.includes('T-961'), 'Test 11a FAIL: the in-window task (T-961) is genuinely reachable and must not be named as indeterminate');
+  assert.ok(/shallow/i.test(finding.message), 'Test 11a FAIL: stand-down message should state the repository is shallow');
+
+  console.log('Test 11a passed: shallow-fixture out-of-window evidence hash produces NO warning-severity finding, collapsed into one info stand-down advisory naming the affected task; the in-window hash produces no finding of any kind');
+}
+
+// ---------------------------------------------------------------------------
+// Test 12 (T-565): a shallow repo with ZERO indeterminate evidence hashes
+// emits no commit_unreachable finding at all.
+// ---------------------------------------------------------------------------
+{
+  const { shallowRoot, inWindowHash } = makeShallowFixture('t565-clean');
+  const repoMap = { 'this-repo': { path: shallowRoot } };
+
+  const activeRecords = [
+    {
+      taskId: 'T-962',
+      status: 'merged',
+      repo: 'this-repo',
+      rawBlock: taskBlock({ taskId: 'T-962', status: 'merged', repo: 'this-repo', evidenceLine: `commit: ${inWindowHash}` }),
+    },
+  ];
+
+  const findings = checkCommitReachable({ activeRecords, recentlyCompletedRecords: [], root: shallowRoot, repoMap });
+  assert.strictEqual(
+    findings.length,
+    0,
+    `Test 12 FAIL: expected NO commit_unreachable finding when a shallow repo has zero indeterminate hashes (nothing stood down), got: ${JSON.stringify(findings)}`
+  );
+
+  console.log('Test 12 passed: a shallow repo with zero indeterminate evidence hashes emits no commit_unreachable finding at all');
+}
+
+// ---------------------------------------------------------------------------
+// Test 13 (T-565): full-stack — `node scripts/mavp-validator.js <shallowRoot>`
+// against a real shallow clone with an out-of-window evidence hash. Confirms
+// the stand-down finding never affects the exit code end-to-end (not just at
+// the checkCommitReachable() unit level).
+// ---------------------------------------------------------------------------
+{
+  const { shallowRoot, outOfWindowHash } = makeShallowFixture('t565-e2e');
+
+  fs.mkdirSync(path.join(shallowRoot, 'docs'), { recursive: true });
+  fs.writeFileSync(
+    path.join(shallowRoot, 'docs', 'REPO_MAP.md'),
+    `# Repo Map\n\n## this-repo\n\n- **label:** This Repo\n- **path:** ${shallowRoot}\n`,
+    'utf8'
+  );
+  fs.writeFileSync(shallowRoot + '/BACKLOG.md', `# BACKLOG\n\n## Active Wave\n\n`, 'utf8');
+  const block = `### T-963 — Fixture shallow-clone task\n\n- **Status:** merged\n- **Repo:** this-repo\n- **Verification type:** runtime\n- **Evidence:** commit: ${outOfWindowHash}\n`;
+  fs.writeFileSync(shallowRoot + '/TASK_STATUS.md', `# TASK_STATUS\n\n## Active tasks\n\n${block}\n## Recently completed tasks\n\n`, 'utf8');
+
+  const result = spawnSync(process.execPath, [VALIDATOR_SCRIPT, shallowRoot], { cwd: shallowRoot, encoding: 'utf8' });
+  const output = (result.stdout || '') + (result.stderr || '');
+
+  assert.strictEqual(result.status, 0, `Test 13 FAIL: expected exit 0 (healthy) — a shallow clone's out-of-window evidence hash must not affect the exit code, got ${result.status}. Output:\n${output}`);
+  assert.ok(!/## Warnings/.test(output), `Test 13 FAIL: expected no "## Warnings" section (the stand-down finding is info severity, not warning):\n${output}`);
+  assert.ok(output.includes('commit_unreachable'), `Test 13 FAIL: expected the stand-down advisory to still be surfaced (as info) in output:\n${output}`);
+  assert.ok(output.includes('T-963'), `Test 13 FAIL: expected T-963 named in output:\n${output}`);
+  assert.ok(/healthy/i.test(output), `Test 13 FAIL: expected overall result to be Healthy:\n${output}`);
+
+  console.log('Test 13 passed: full-stack validator run against a shallow clone with an out-of-window evidence hash exits 0 (healthy) — commit_unreachable is stood down to INFO, never affecting the exit code');
+}
+
+// ---------------------------------------------------------------------------
+// Test 14 (T-565): isShallowRepository() exact-match detection robustness —
+// classifies shallow ONLY on an exact "true" match; any other output or a
+// thrown error falls through to false (non-shallow / existing behavior).
+// ---------------------------------------------------------------------------
+{
+  const originalExecSync = cp.execSync;
+
+  cp.execSync = () => 'false\n';
+  assert.strictEqual(isShallowRepository('/any/path'), false, 'Test 14a FAIL: "false" output must classify as NOT shallow');
+
+  cp.execSync = () => 'true\n';
+  assert.strictEqual(isShallowRepository('/any/path'), true, 'Test 14b FAIL: exact "true" output must classify as shallow');
+
+  cp.execSync = () => 'True\n'; // wrong case — must NOT be treated as a match
+  assert.strictEqual(isShallowRepository('/any/path'), false, 'Test 14c FAIL: non-exact-match output ("True") must NOT classify as shallow');
+
+  cp.execSync = () => 'true extra garbage';
+  assert.strictEqual(isShallowRepository('/any/path'), false, 'Test 14d FAIL: trailing garbage after "true" must NOT classify as shallow — exact match only');
+
+  cp.execSync = () => {
+    throw new Error('git: command not found');
+  };
+  assert.strictEqual(isShallowRepository('/any/path'), false, 'Test 14e FAIL: a thrown error must fall through to false (non-shallow / existing behavior)');
+
+  cp.execSync = originalExecSync;
+
+  console.log('Test 14 passed: isShallowRepository() classifies shallow ONLY on an exact "true" match; any other output or a thrown error falls through to false');
+}
+
+// ---------------------------------------------------------------------------
+// Test 15 (T-565): the stand-down message caps the ENUMERATED task ids at
+// ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD (reusing the existing archived-
+// section aggregation cap rather than inventing a fresh magic number) while
+// still stating the TRUE total count in full. A real shallow clone of a
+// repo's whole history (exactly what CI does) can indeterminate hundreds of
+// tasks at once; enumerating every one of them would recreate the "operator
+// stops reading" failure mode this task exists to close.
+// ---------------------------------------------------------------------------
+{
+  const { shallowRoot, outOfWindowHash } = makeShallowFixture('t565-cap');
+  const repoMap = { 'this-repo': { path: shallowRoot } };
+
+  const count = ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD + 6; // well past the cap
+  const activeRecords = Array.from({ length: count }, (_, i) => {
+    const taskId = `T-${980 + i}`;
+    return {
+      taskId,
+      status: 'merged',
+      repo: 'this-repo',
+      rawBlock: taskBlock({ taskId, status: 'merged', repo: 'this-repo', evidenceLine: `commit: ${outOfWindowHash}` }),
+    };
+  });
+
+  const findings = checkCommitReachable({ activeRecords, recentlyCompletedRecords: [], root: shallowRoot, repoMap });
+
+  assert.strictEqual(
+    findings.length,
+    1,
+    `Test 15 FAIL: expected exactly ONE stand-down finding regardless of how many tasks are indeterminate, got: ${JSON.stringify(findings)}`
+  );
+  const [finding] = findings;
+
+  // The true total count must be stated in full — it is genuinely useful
+  // (it tells the operator how much of history is out of window).
+  assert.ok(
+    finding.message.includes(String(count)),
+    `Test 15 FAIL: expected the true total count (${count}) named in the message: ${finding.message}`
+  );
+
+  // Enumerated ids must be capped at ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD:
+  // count how many of the generated task ids actually appear as substrings
+  // of the message (this is the mutant killer — removing the cap would name
+  // all ${count}, not just the threshold's worth).
+  const namedCount = activeRecords.filter((r) => finding.message.includes(r.taskId)).length;
+  assert.strictEqual(
+    namedCount,
+    ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD,
+    `Test 15 FAIL: expected exactly ${ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD} task ids named (the cap), got ${namedCount}: ${finding.message}`
+  );
+
+  // The uncapped remainder must be summarized, not silently dropped.
+  const remaining = count - ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD;
+  assert.ok(
+    finding.message.includes(`+${remaining} more`),
+    `Test 15 FAIL: expected a "+${remaining} more" summary for the uncapped remainder: ${finding.message}`
+  );
+
+  console.log(
+    `Test 15 passed: the stand-down message names at most ${ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD} task ids (the existing archived-aggregation cap) while still stating the true total count (${count}) and summarizing the remainder`
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
 
-console.log('\nAll T-448/T-489 assertions passed.');
+console.log('\nAll T-448/T-489/T-565 assertions passed.');

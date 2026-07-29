@@ -38,6 +38,7 @@ const {
   parseRepoMap,
   getCommitHashesReachableFromHead,
   getCommitHashesReachable,
+  isShallowRepository,
 } = require('./mavp-operator-lib');
 
 /**
@@ -1745,6 +1746,26 @@ function resolveSelfRepoId(root, repoMap) {
  *   only the `--branches` call fails while HEAD succeeds, the branch tier is
  *   skipped and the check falls back to the original HEAD-only behavior for
  *   the "no local ref" tier.
+ * - T-565 — the "no local ref" tier is UNSOUND in a shallow clone (e.g.
+ *   actions/checkout@v7's default fetch-depth: 1): `git rev-list` only
+ *   enumerates the fetched window, so "not reachable from any local ref" is
+ *   indistinguishable from "lives in history that was deliberately never
+ *   fetched". Shallowness invalidates only this NEGATIVE tier — a hash found
+ *   reachable from HEAD or from `--branches` stays a sound positive result
+ *   regardless of clone depth. When `isShallowRepository(root)` is true,
+ *   every individual "no local ref" finding is suppressed and its task id
+ *   collected instead; the collected ids are collapsed into exactly ONE
+ *   info-severity stand-down finding after both sections are scanned (never
+ *   zero-to-many individual warnings, and never silent skip with no signal
+ *   at all). In a full (non-shallow) clone this branch never triggers and
+ *   behavior is byte-identical to pre-T-565. The stand-down message states
+ *   the true total count in full but caps the enumerated task ids at
+ *   ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD (reusing this file's existing
+ *   convention for collapsing a long finding list rather than inventing a
+ *   second one), appending "(+N more)" for the remainder — a CI shallow
+ *   clone of a repo's full history can indeterminate hundreds of tasks at
+ *   once, and enumerating all of them would recreate the "operator stops
+ *   reading" failure mode this task exists to close.
  *
  * @param {object} options
  * @param {Array} options.activeRecords - TASK_STATUS.md "## Active tasks" records.
@@ -1762,6 +1783,12 @@ function checkCommitReachable({ activeRecords, recentlyCompletedRecords, root, r
   const reachableFromBranchesHashes = getCommitHashesReachable(root, '--branches');
   const reachableFromBranchesIndex =
     reachableFromBranchesHashes === null ? null : buildReachableHashIndex(reachableFromBranchesHashes);
+
+  // T-565: a shallow clone makes the "no local ref" tier unsound — see the
+  // doc comment above. Detected once per call; only the negative-result
+  // branch of buildHashFinding below consults it.
+  const isShallow = isShallowRepository(root);
+  const shallowIndeterminateTaskIds = [];
 
   const resolvedRepoMap = repoMap || parseRepoMap(root);
   const selfRepoId = resolveSelfRepoId(root, resolvedRepoMap);
@@ -1790,6 +1817,13 @@ function checkCommitReachable({ activeRecords, recentlyCompletedRecords, root, r
     }
 
     // Reachable from no local ref at all — the original T-448 footgun.
+    if (isShallow) {
+      // T-565: unsound in a shallow clone — suppress the individual finding
+      // and stand it down collectively after both sections are scanned.
+      shallowIndeterminateTaskIds.push(record.taskId);
+      return null;
+    }
+
     return createFinding({
       checkName: 'commit_unreachable',
       severity: noRefSeverity,
@@ -1847,6 +1881,38 @@ function checkCommitReachable({ activeRecords, recentlyCompletedRecords, root, r
 
   scanSection(activeRecords, 'warning');
   scanSection(recentlyCompletedRecords, 'info', { aggregate: true });
+
+  // T-565: emit the single shallow-clone stand-down finding ONLY when at
+  // least one hash was actually indeterminate — an adopter's shallow clone
+  // with no merged-task evidence gaps gets no line at all, since nothing
+  // stood down. A shallow clone of a long-lived repo's FULL history (exactly
+  // what CI does) can indeterminate hundreds of tasks at once; enumerating
+  // every id turns the advisory into an unreadable wall — the very "operator
+  // stops reading" failure mode this task exists to close, just via a
+  // different mechanism than the original noisy warning. Reuse the same cap
+  // this file already uses for exactly this shape of problem
+  // (ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD, which collapses archived-
+  // section unreachable findings above the threshold) rather than inventing
+  // a second magic number: name up to that many task ids, then summarize the
+  // remainder as "(+N more)". The true total count is always stated in full
+  // — that number is genuinely useful (it tells the operator how much of
+  // history is out of window) — only the id enumeration is capped.
+  if (isShallow && shallowIndeterminateTaskIds.length > 0) {
+    const uniqueTaskIds = [...new Set(shallowIndeterminateTaskIds)];
+    const shownTaskIds = uniqueTaskIds.slice(0, ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD);
+    const remainingCount = uniqueTaskIds.length - shownTaskIds.length;
+    const taskIdsSummary = remainingCount > 0 ? `${shownTaskIds.join(', ')} (+${remainingCount} more)` : shownTaskIds.join(', ');
+    findings.push(
+      createFinding({
+        checkName: 'commit_unreachable',
+        severity: 'info',
+        taskId: 'AGGREGATE',
+        message: `Shallow git clone detected (git rev-parse --is-shallow-repository) — ${shallowIndeterminateTaskIds.length} evidence commit hash(es) not found in the fetched history stood down rather than reported unreachable, since a shallow clone's fetched window carries no information about history it deliberately never fetched. Affected tasks: ${taskIdsSummary}`,
+        repairTarget: 'TASK_STATUS.md',
+        suggestedAction: 'Informational only — a shallow clone (e.g. CI checkout with fetch-depth: 1) cannot distinguish a genuinely unreachable hash from one that simply lives outside the fetched window. Re-run in a full clone for a sound reachability read; no action required from this signal alone.',
+      })
+    );
+  }
 
   return findings;
 }

@@ -3404,6 +3404,41 @@ function mergeCommitEvidence(existingEvidence, hash, branch) {
 }
 
 /**
+ * Detect whether `root` is a shallow git clone (e.g. actions/checkout@v7's
+ * default fetch-depth: 1) via `git rev-parse --is-shallow-repository` (git >=
+ * 2.15, 2017). Used by the validator's commit_unreachable check (T-565): in a
+ * shallow clone, `git rev-list` only enumerates the fetched window, so a hash
+ * NOT found there is indistinguishable from "reachable, but its history was
+ * deliberately never fetched" — a NEGATIVE reachability result is unsound
+ * there, not merely noisy. A POSITIVE result (hash found within the fetched
+ * window) stays sound regardless of shallowness and is untouched by this
+ * helper — only negative results need the caller to special-case shallowness.
+ *
+ * Classifies as shallow ONLY when the command's trimmed stdout is exactly
+ * `"true"` — any other output (e.g. "false", empty, garbage), a non-zero
+ * exit (git unavailable, not a git repo, git predating 2.15), or a thrown
+ * error all fall through to `false` (non-shallow / existing behavior). This
+ * exact-match containment is deliberate: failing closed to "false" means an
+ * unrecognized/older git never gets misread as shallow, which would silently
+ * suppress a genuine commit_unreachable finding.
+ *
+ * @param {string} root - Absolute path to the git working tree.
+ * @returns {boolean} true only on an exact "true" match; false otherwise.
+ */
+function isShallowRepository(root) {
+  try {
+    const output = cp.execSync('git rev-parse --is-shallow-repository', {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return output.trim() === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Return the full list of commit hashes reachable from an arbitrary `revspec`
  * (e.g. `HEAD`, `origin/main`, `@{upstream}`) in `root`, via a single batched
  * `git rev-list <revspec>` call. Generalized from the HEAD-only helper below
@@ -3488,6 +3523,7 @@ module.exports = {
   isBlockedByEmpty,
   isHoldEmpty,
   isInsideGitRepo,
+  isShallowRepository,
   isValidHashFormat,
   lookupTaskTitle,
   mergeCommitEvidence,

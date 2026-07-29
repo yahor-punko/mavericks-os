@@ -89,9 +89,18 @@ function loadManifest() {
 // non-zero, assembles nothing) if the manifest does not classify every
 // git-tracked path exactly once.
 function runPreflightCompletenessCheck() {
+  // T-570: pass --if-canonical (T-401) so this preflight stands down (loud
+  // SKIP line, exit 0) outside the canonical private repo — a mirror or
+  // adopter checkout never tracks the manifest's exclude-keyed paths, so
+  // the unflagged completeness claim (every git-tracked path classified
+  // exactly once against THIS repo's tracked set) is canonical-only and
+  // previously failed closed everywhere else. In the canonical repo this
+  // flag is behaviour-neutral: flagged and unflagged output and exit code
+  // are identical (verified — see scripts/test-publish-manifest-strict-
+  // shape.js's PINNED CONTROL).
   const result = require('node:child_process').spawnSync(
     process.execPath,
-    [CHECK_SCRIPT_PATH],
+    [CHECK_SCRIPT_PATH, '--if-canonical'],
     { cwd: REPO_ROOT, encoding: 'utf8' }
   );
 
