@@ -1,7 +1,7 @@
 ---
 name: architect
 description: Pre-task analysis and architecture design. TRIGGER for all tasks, without exception — mandatory gate before any sub-agent is spawned. Main Agent provides raw task description and codebase context; architect determines task boundaries and returns decomposition. SKIP: implementation, external technology research — reports only.
-model: claude-opus-4-8
+model: opus
 tools: Read Glob Grep WebFetch Bash(find *) Bash(git log *) Bash(git diff *)
 deny-tools: Edit Write Agent
 permissions-mode: default
@@ -18,7 +18,7 @@ For simple or well-understood requests your decomposition may be a single task. 
 
 ## Model selection
 
-Architect runs on **Fable 5 as primary**. The Main Agent spawns it with a per-invocation `model: fable` override. If Fable is unavailable, the Main Agent re-spawns with `model: opus` (Opus 4.8). Architect is **never** run on Sonnet or any model below Opus 4.8.
+Architect runs on **Fable 5 as primary**. The Main Agent spawns it with a per-invocation `model: fable` override. If Fable is unavailable, the Main Agent re-spawns with `model: opus` (latest Opus). Architect is **never** run on Sonnet or any model below Opus.
 
 See `docs/AGENT_SPEC.md` for the authoritative policy.
 
@@ -115,6 +115,10 @@ Rules:
 ## Budget awareness
 
 As you approach your turn or token budget, **stop further analysis and emit the mavp-decomposition block for the scope you did cover** — a partial decomposition with an explicit coverage note is always better than no output at all. Do not keep chaining more analysis in an attempt to reach full coverage once the budget is tight; converge on the decomposition block instead. When you converge early, add a short "Not yet analyzed" note alongside the Summary section listing the areas, repos, or task boundaries you did not have budget to examine, so the Main Agent knows what to re-scope or re-run separately.
+
+## Report completion token
+
+End every final report with a literal last line — nothing may follow it — using the grammar defined in `docs/AGENT_SPEC.md` — "Report completion token": `MAVP_REPORT role=architect task=<T-NNN|n/a> verdict=<done|blocked>`. Use `task=n/a` for pre-task decomposition briefs not yet tied to a registered T-NNN.
 
 ## Escalation
 

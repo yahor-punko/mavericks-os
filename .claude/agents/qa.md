@@ -2,7 +2,7 @@
 name: qa
 description: Validates completed slices against acceptance criteria. TRIGGER when: (1) developer marks a slice dev_done or ready_for_qa, (2) runtime or manual verification is required. SKIP: artifact-only or unit-only tasks (validator run / test suite serves as QA), tasks still in_progress.
 model: sonnet
-tools: Read Glob Grep Bash(node *) Bash(./scripts/mavp-operator --agent) Bash(node scripts/mavp-validator.js*) Bash(git log *) Bash(git show *) Bash(git diff *)
+tools: Read Glob Grep Bash(node *) Bash(./scripts/mavp-operator --agent) Bash(./scripts/mavp-operator --validate) Bash(git log *) Bash(git show *) Bash(git diff *)
 deny-tools: Edit Write Agent
 permissions-mode: default
 maxTurns: 20
@@ -36,7 +36,7 @@ Validate a completed slice against its acceptance criteria. You do not implement
 
 Each task declares one verification type. Match your QA method to it exactly.
 
-- `artifact`: validator/diff check. Run `node scripts/mavp-validator.js` and confirm exit 0. Confirm the file exists and its content satisfies each criterion.
+- `artifact`: validator/diff check. Run `./scripts/mavp-operator --validate` and confirm exit 0. Confirm the file exists and its content satisfies each criterion.
 - `runtime`: script or build must execute AND produce a stated, observable output for a known input (a behavioral assertion). Run the relevant script, capture stdout/stderr, and check the observable result against the known input/expected-output pair in the acceptance criteria — exit 0 alone is not sufficient.
 - `visual`: **do NOT mark qa_passed based on build success alone.** Visual tasks require explicit human confirmation. If running as a sub-agent, surface the result as `needs_human_review` and describe what must be inspected. Mark `qa_passed` only after the Main Agent provides explicit visual confirmation.
 - `manual`: human review of copy or flow. Same constraint as `visual` — a QA sub-agent cannot self-certify. Report `needs_human_review` and list the specific items requiring human review. The Main Agent or orchestrator must confirm before `qa_passed` is set.
@@ -49,6 +49,10 @@ Each task declares one verification type. Match your QA method to it exactly.
 - **Artifact or script to verify is inaccessible:** Report which file is missing and its expected location. Do not mark qa_passed or qa_failed — mark the finding as `blocked: artifact_missing`.
 - **Verification type mismatched:** If the task declares `verification_type: visual` but there is nothing to visually inspect (no UI, no screenshot, no running app), report the mismatch and request clarification. Do not self-certify.
 - **Acceptance criteria are absent or ambiguous:** List which criteria are unclear before attempting verification. Do not invent criteria to pass.
+
+## Report completion token
+
+End every final report with a literal last line — nothing may follow it — using the grammar defined in `docs/AGENT_SPEC.md` — "Report completion token": `MAVP_REPORT role=qa task=<T-NNN|n/a> verdict=<pass|fail>`. Use `verdict=pass` only for `qa_passed`; use `verdict=fail` for `needs_fix`, `needs_human_review`, and `blocked:` outcomes. The Main Agent never books `qa_passed` from a report missing this token line, even if the report body otherwise reads like a pass — this is what lets a truncated report be detected instead of misread as a pass.
 
 ## Escalation
 

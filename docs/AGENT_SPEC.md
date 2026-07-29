@@ -81,6 +81,27 @@ A complete task entry example with all optional fields:
 - **Evidence expected:** node --check exits 0; feature works end-to-end
 ```
 
+## Report completion token
+
+This section is the **single source of truth** for the sub-agent report completion-token contract. `CLAUDE.md`'s sub-agent brief template and every role spec under `.claude/agents/` reference this section rather than re-defining the grammar.
+
+**The contract:** every sub-agent's final report must end with a literal last line — the completion token — in this exact grammar, with no other text following it:
+
+```
+MAVP_REPORT role=<role> task=<T-NNN|n/a> verdict=<done|blocked|needs_fix|pass|fail>
+```
+
+- `role` — the sub-agent's role name exactly as declared in `.claude/agents/<role>.md` frontmatter (e.g. `developer`, `security-reviewer`).
+- `task` — the task id the report concerns (`T-NNN`), or the literal `n/a` when the report is not tied to a single registered task.
+- `verdict` — one value from the fixed enum `done | blocked | needs_fix | pass | fail`. Which values a given role uses is role-specific — see each role spec's own "Report completion token" paragraph for its applicable subset (implementation-style roles typically use `done` / `blocked` / `needs_fix`; verdict-bearing review roles use `pass` / `fail`).
+
+**Why this works — the rationale must travel with the rule, or it reads as ceremony and gets dropped.** Harness truncation cuts the **tail** of a turn, never the head — a truncated report always shows whatever narration came first, never a coherent ending. Making the mandatory final line a fixed, literal token means a truncated report **cannot** contain it: for the token to be missing, the report must have been cut before reaching its own last line. Token absence is therefore a truncation detector with **zero false positives by construction** — it can never fire on a report that genuinely finished, only on one that was cut short. This is the entire reason the check is worth running on every report; without this property it would just be bureaucratic formatting.
+
+**Explicit limits — this contract does less than it may sound like:**
+- **Detection only.** It does not prevent truncation — the underlying harness behavior that truncates a turn is outside this repo's control. It converts a silent failure into an observable one.
+- **No mechanical enforcement is possible.** Sub-agent reports are in-band chat content, not a file or artifact — no hook, script, or validator check observes them, so there is nothing to add to `mavp-validator.js` or any `PostToolUse` hook here. The check is necessarily manual: a Main-Agent-side reading discipline, defined in `docs/core/ORCHESTRATION_RULES.md` — "Sub-agent report completion check".
+- **Verdict-bearing roles gate on presence, not just wording.** For `qa`, `security-reviewer`, and `ux`, a verdict is never bookable as a pass (`qa_passed` / `security_passed` / `ux_passed`) unless the token's last line is present and its `verdict` is `pass`. A report that reads like a pass in its body but is missing the token must be treated as unresolved, not accepted at face value.
+
 ## Roles reference
 
 | Role | Skill set | Typical tasks |
@@ -109,7 +130,7 @@ All worker roles (developer, qa, ux, product-docs, technical-writer, security-re
 
 #### Worker model-escalation table
 
-`sonnet` is the default for every worker role listed above. The Main Agent escalates a given spawn to `opus` (Opus 4.8) **per-invocation** — via a spawn-time `model: opus` override, not a frontmatter change — when the slice matches one or more of the concrete signals below. The architect is excluded from this table; its model policy is fixed (see "Architect" above) and never follows worker escalation.
+`sonnet` is the default for every worker role listed above. The Main Agent escalates a given spawn to `opus` (latest Opus) **per-invocation** — via a spawn-time `model: opus` override, not a frontmatter change — when the slice matches one or more of the concrete signals below. The architect is excluded from this table; its model policy is fixed (see "Architect" above) and never follows worker escalation.
 
 | Signal | Example | Escalate to |
 |--------|---------|--------------|
@@ -124,13 +145,13 @@ Escalation is a Main Agent judgment call applied at spawn time; it does not chan
 
 ### Architect
 
-The architect's frontmatter default is `model: claude-opus-4-8` — a deliberate exception to the alias-only rule, kept as a safe fallback if the runtime spawn override below is not applied.
+The architect's frontmatter default is `model: opus` — the alias-only rule holds with no exception, and this default still functions as a safe fallback if the runtime spawn override below is not applied.
 
 **Runtime spawn rule (Main Agent):** when spawning the architect sub-agent, the Main Agent passes a per-invocation model override using an alias:
 
 1. Spawn with `model: fable` (Fable 5, primary).
-2. If Fable is unavailable, re-spawn the same brief with `model: opus` (Opus 4.8).
-3. Never spawn architect below Opus 4.8 — in particular, never `model: sonnet`.
+2. If Fable is unavailable, re-spawn the same brief with `model: opus` (latest Opus).
+3. Never spawn architect below Opus — in particular, never `model: sonnet`.
 
 This mirrors the runtime policy already codified in `.claude/agents/architect.md` ("Model selection" section).
 
@@ -186,23 +207,23 @@ The ×1.5 multiplier converts the highest observed turn count for a role class i
 
 | Role | maxTurns | Basis |
 |------|----------|-------|
-| developer | 90 | Implementation role with verify loops; two slices orphaned uncommitted work at the prior cap of 40. |
-| product-docs | 40 | Doc-authoring role; observed marginal pressure at the prior cap of 30. |
-| technical-writer | 40 | Same doc-authoring class as product-docs — aligned for consistency. |
+| developer | 140 | Implementation role with verify loops; a full verify-heavy slice hit the prior cap of 90 twice across resumes (T-552). |
+| product-docs | 70 | Doc-authoring role; a censored cap-hit (T-521, 42 vs the prior cap of 40) drove a third recalibration — see `docs/TURN_BUDGET.md` "T-557 recalibration". |
+| technical-writer | 70 | Same doc-authoring class as product-docs — aligned for consistency (still zero independent observations). |
 | frontend-design | 45 | Implementation role with build/preview verify loops — between docs and developer. |
 | architect | 25 | Read-heavy role; tool-use counts over-count turns for this role class. |
 | qa | 20 | Bounded read → run → verdict; no observed cap pressure. |
 | ui-designer | 20 | Bounded visual-design role; no observed cap pressure. |
 | analyst | 15 | Read-only research; no observed cap pressure. |
 | exa-researcher | 15 | Bounded retrieval; no observed cap pressure. |
-| security-reviewer | 25 | Cross-repo trust-boundary reviews hit the cap; raised per T-455/T-458. |
+| security-reviewer | 40 | A full single-repo self-recon review needs strictly more than the prior cap of 25 — three independent reviews truncated at cap+1 (T-552). |
 | ux | 15 | Read-only review; no observed cap pressure. |
 
 These values are derived from a small, anecdotal evidence set (see `docs/TURN_BUDGET.md` — "Evidence" and "Confidence & recheck"). They are deliberately generous so under-calibration cannot re-orphan work. Recompute and re-derive per role class once historical `tool_uses` data is instrumented, per the recheck plan in `docs/TURN_BUDGET.md`.
 
 ### Why aliases, not full-ids
 
-The Agent-tool `model` parameter accepts **aliases only** (`sonnet`, `opus`, `haiku`, `fable`) — it does not accept full model-ids as a per-invocation override. Frontmatter defaults should follow the same convention (alias for workers) except where a full-id is a deliberate, explicitly-justified exception (architect's `claude-opus-4-8` default). A full-id observed in frontmatter has previously caused silent degradation to the wrong model, and pinning to a specific past-generation Sonnet full-id is the exact drift this policy exists to prevent.
+The Agent-tool `model` parameter accepts **aliases only** (`sonnet`, `opus`, `haiku`, `fable`) — it does not accept full model-ids as a per-invocation override. Frontmatter defaults follow the same convention unconditionally: every role, including architect, declares an alias — there is no full-id exception. A full-id observed in frontmatter has previously caused silent degradation to the wrong model, and pinning to a specific past-generation full-id (Sonnet or Opus) is the exact drift this policy exists to prevent — a version-pinned id freezes a spec on an old generation as newer generations ship.
 
 The `architect` role covers both **pre-task analysis** (idea → T-NNN decomposition) and **mid-project architecture questions**. It is not a BACKLOG task type — it runs before or alongside tasks and reports to the Main Agent.
 

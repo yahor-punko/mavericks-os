@@ -1,0 +1,13 @@
+# T-534 round 2 permanent canary.
+#
+# This file is committed with CRLF line endings ON PURPOSE. It exists so
+# every future publish run live-executes the "clone add/commit transform"
+# defect class end to end, not just in a synthetic unit fixture: the
+# `-c core.autocrlf=false -c core.safecrlf=false` pin on the mirror clone's
+# `git add -A` call site (mavp-publish-build.js, stepCommit) must keep these
+# bytes byte-identical from source HEAD all the way to the pushed mirror
+# tip, regardless of any repo-local core.autocrlf a future operator machine
+# might have configured on that clone.
+#
+# Do not "fix" these line endings. A tool or editor that silently
+# normalizes this file to LF defeats its entire purpose.

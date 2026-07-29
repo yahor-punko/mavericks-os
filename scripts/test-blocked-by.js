@@ -5,9 +5,11 @@
 //   1. parseBlockedBy() (mavp-operator-lib.js) parses `<repo>/T-NNN` tokens,
 //      drops unparsable tokens (bare T-NNN, empty), and treats "—"/null as [].
 //   2. checkBlockedBy() (mavp-validator.js) fires blocked_by_open at FAILURE
-//      severity when a qa_passed/merged task's blocker is not merged.
+//      severity when a merged task's blocker is not merged.
 //   3. checkBlockedBy() fires blocked_by_open at WARNING severity when the
-//      blocked task is ready_for_qa.
+//      blocked task is ready_for_qa OR qa_passed (DR-005 gate-tier
+//      correction, T-487: qa_passed correctly waiting on an unmerged
+//      blocker is not a violation — only merged-ahead-of-blocker is).
 //   4. checkBlockedBy() produces NO finding when the blocker is merged.
 //   5. checkBlockedBy() fires blocked_by_unresolvable at INFO severity when
 //      the repo id has no resolvable path, or the blocker task can't be
@@ -24,6 +26,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert');
+const childProcess = require('node:child_process');
 
 const { parseBlockedBy } = require('./mavp-operator-lib.js');
 const {
@@ -33,6 +36,11 @@ const {
   getExitCode,
   getSeverityForCheck,
 } = require('./mavp-validator.js');
+
+// Absolute path to the validator CLI entrypoint, for the real-process exit
+// code tests (Test 20/21, T-487) — these spawn the actual command an
+// operator runs rather than calling parseArtifacts()/getExitCode() in-process.
+const VALIDATOR_CLI_PATH = path.join(__dirname, 'mavp-validator.js');
 
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 't393-blocked-by-'));
 
@@ -128,14 +136,17 @@ function withProjectRoot(root, fn) {
 
 // ---------------------------------------------------------------------------
 // Test 3: checkBlockedBy() direct unit test — FAILURE severity for a
-// qa_passed task with an open (non-merged) cross-repo blocker.
+// merged task with an open (non-merged) cross-repo blocker. (DR-005,
+// T-487: this is the tier that stays FAILURE — shipping ahead of an unmet
+// dependency. Prior to T-487 this test used status qa_passed, which DR-005
+// downgrades to WARNING — see Test 3b below for that tier.)
 // ---------------------------------------------------------------------------
 {
   const siblingDir = path.join(TMP_DIR, 'unit-open-sibling');
   siblingFixture(siblingDir, 'T-500', 'in_progress');
 
   const records = [
-    { taskId: 'T-600', status: 'qa_passed', blockedBy: 'sibling-repo/T-500' },
+    { taskId: 'T-600', status: 'merged', blockedBy: 'sibling-repo/T-500' },
   ];
   const repoMap = { 'sibling-repo': { path: siblingDir } };
 
@@ -144,11 +155,39 @@ function withProjectRoot(root, fn) {
   assert.strictEqual(findings.length, 1, `Test 3 FAIL: expected exactly 1 finding, got: ${JSON.stringify(findings)}`);
   const finding = findings[0];
   assert.strictEqual(finding.checkName, 'blocked_by_open', 'Test 3 FAIL: checkName mismatch');
-  assert.strictEqual(finding.severity, 'failure', 'Test 3 FAIL: expected FAILURE severity for qa_passed blocked task');
+  assert.strictEqual(finding.severity, 'failure', 'Test 3 FAIL: expected FAILURE severity for merged blocked task');
   assert.strictEqual(finding.taskId, 'T-600', 'Test 3 FAIL: taskId mismatch');
   assert.ok(/sibling-repo\/T-500/.test(finding.message), 'Test 3 FAIL: message should name the blocker reference');
 
-  console.log('Test 3 passed: checkBlockedBy() fires blocked_by_open at FAILURE severity for a qa_passed task with an open blocker');
+  console.log('Test 3 passed: checkBlockedBy() fires blocked_by_open at FAILURE severity for a merged task with an open blocker');
+}
+
+// ---------------------------------------------------------------------------
+// Test 3b (DR-005, T-487): checkBlockedBy() direct unit test — WARNING
+// severity (not FAILURE) for a qa_passed task with an open (non-merged)
+// cross-repo blocker. This is the gate-tier correction itself: a qa_passed
+// task waiting on an unmerged blocker is correct, deliberate behavior, not
+// a violation — it must never latch the validator at exit 2.
+// ---------------------------------------------------------------------------
+{
+  const siblingDir = path.join(TMP_DIR, 'unit-held-qa-passed-sibling');
+  siblingFixture(siblingDir, 'T-505', 'in_progress');
+
+  const records = [
+    { taskId: 'T-630', status: 'qa_passed', blockedBy: 'sibling-repo/T-505' },
+  ];
+  const repoMap = { 'sibling-repo': { path: siblingDir } };
+
+  const findings = checkBlockedBy(records, { repoMap });
+
+  assert.strictEqual(findings.length, 1, `Test 3b FAIL: expected exactly 1 finding, got: ${JSON.stringify(findings)}`);
+  const finding = findings[0];
+  assert.strictEqual(finding.checkName, 'blocked_by_open', 'Test 3b FAIL: checkName mismatch');
+  assert.strictEqual(finding.severity, 'warning', 'Test 3b FAIL: expected WARNING severity for qa_passed blocked task (DR-005 gate-tier correction)');
+  assert.strictEqual(finding.taskId, 'T-630', 'Test 3b FAIL: taskId mismatch');
+  assert.ok(/sibling-repo\/T-505/.test(finding.message), 'Test 3b FAIL: message should name the blocker reference');
+
+  console.log('Test 3b passed: checkBlockedBy() fires blocked_by_open at WARNING severity (not FAILURE) for a qa_passed task with an open blocker — DR-005 gate-tier correction');
 }
 
 // ---------------------------------------------------------------------------
@@ -255,10 +294,17 @@ function withProjectRoot(root, fn) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 8 (full-stack, fixture A — OPEN blocker): parseArtifacts() against a
-// synthetic BACKLOG.md/TASK_STATUS.md/docs/REPO_MAP.md fixture + a sibling
-// repo dir (all under TMP_DIR) produces blocked_by_open at FAILURE severity
-// and getExitCode() === 2. The real mavericks repo is never touched.
+// Test 8 (full-stack, fixture A — OPEN blocker, MERGED tier): parseArtifacts()
+// against a synthetic BACKLOG.md/TASK_STATUS.md/docs/REPO_MAP.md fixture + a
+// sibling repo dir (all under TMP_DIR) produces blocked_by_open at FAILURE
+// severity and getExitCode() === 2 for a MERGED task with an unmerged
+// blocker. The real mavericks repo is never touched.
+//
+// DR-005 / T-487: prior to this task the fixture used status qa_passed —
+// DR-005 downgrades that tier to WARNING/exit 1 (see Test 8b below). This
+// fixture now uses status merged, which is the tier DR-005 keeps at
+// FAILURE/exit 2 — shipping ahead of an unmet dependency is the actual
+// violation this gate exists to prevent.
 // ---------------------------------------------------------------------------
 {
   const mainRoot = path.join(TMP_DIR, 'fixture-open');
@@ -275,7 +321,7 @@ function withProjectRoot(root, fn) {
 ## Active Wave
 
 ### T-700 — Ship feature depending on sibling repo
-- **Status:** qa_passed
+- **Status:** merged
 - **Owner role:** developer
 - **Verification type:** unit
 - **Repo:** main-repo
@@ -286,10 +332,11 @@ function withProjectRoot(root, fn) {
 ## Active tasks
 
 ### T-700 — Ship feature depending on sibling repo
-- **Status:** qa_passed
+- **Status:** merged
 - **Owner role:** developer
 - **Verification type:** unit
-- **Evidence:** —
+- **Evidence:**
+  - commit: abc1234
 
 ## Recently completed tasks
 `,
@@ -316,7 +363,76 @@ function withProjectRoot(root, fn) {
   assert.strictEqual(finding.severity, 'failure', 'Test 8 FAIL: expected FAILURE severity');
   assert.strictEqual(getExitCode(parsed.comparison.overallCandidateState), 2, 'Test 8 FAIL: expected exit code 2');
 
-  console.log('Test 8 passed: full-stack fixture with an OPEN cross-repo blocker fires blocked_by_open (FAILURE) and exits 2');
+  console.log('Test 8 passed: full-stack fixture with a MERGED task and an OPEN cross-repo blocker fires blocked_by_open (FAILURE) and exits 2');
+}
+
+// ---------------------------------------------------------------------------
+// Test 8b (full-stack, fixture A2 — OPEN blocker, QA_PASSED tier, DR-005 /
+// T-487): the gate-tier correction itself, exercised end to end.
+// parseArtifacts() against a synthetic fixture where the blocked task is
+// qa_passed (not merged) with an unmerged cross-repo blocker produces
+// blocked_by_open at WARNING severity and getExitCode() === 1 — NOT 2. This
+// is the exact "held qa_passed chain" shape from the field report: a task
+// that finished its side and is correctly waiting on someone else's must
+// drift (exit 1), never repair-required (exit 2).
+// ---------------------------------------------------------------------------
+{
+  const mainRoot = path.join(TMP_DIR, 'fixture-open-qa-passed');
+  const siblingDir = path.join(TMP_DIR, 'fixture-open-qa-passed-sibling');
+  siblingFixture(siblingDir, 'T-506', 'in_progress');
+
+  writeFixture(mainRoot, {
+    backlog: `# BACKLOG
+
+## Selection rules
+
+- unblockers first
+
+## Active Wave
+
+### T-710 — Ship feature depending on sibling repo (held qa_passed)
+- **Status:** qa_passed
+- **Owner role:** developer
+- **Verification type:** unit
+- **Repo:** main-repo
+- **Blocked by:** sibling-repo/T-506
+`,
+    taskStatus: `# TASK_STATUS
+
+## Active tasks
+
+### T-710 — Ship feature depending on sibling repo (held qa_passed)
+- **Status:** qa_passed
+- **Owner role:** developer
+- **Verification type:** unit
+- **Evidence:** —
+
+## Recently completed tasks
+`,
+    repoMap: `# Repo Map
+
+## sibling-repo
+
+- **label:** Sibling Repo
+- **path:** ${siblingDir}
+`,
+  });
+
+  const parsed = withProjectRoot(mainRoot, () =>
+    parseArtifacts({
+      backlogPath: path.join(mainRoot, 'BACKLOG.md'),
+      taskStatusPath: path.join(mainRoot, 'TASK_STATUS.md'),
+    })
+  );
+
+  const finding = parsed.comparison.findings.find(
+    (f) => f.checkName === 'blocked_by_open' && f.taskId === 'T-710'
+  );
+  assert.ok(finding, `Test 8b FAIL: expected a blocked_by_open finding for T-710, got: ${JSON.stringify(parsed.comparison.findings)}`);
+  assert.strictEqual(finding.severity, 'warning', 'Test 8b FAIL: expected WARNING severity (DR-005 gate-tier correction)');
+  assert.strictEqual(getExitCode(parsed.comparison.overallCandidateState), 1, 'Test 8b FAIL: expected exit code 1 (drifting), NOT 2 (repair required)');
+
+  console.log('Test 8b passed: full-stack fixture with a QA_PASSED task and an OPEN cross-repo blocker fires blocked_by_open (WARNING) and exits 1, not 2 — DR-005 gate-tier correction');
 }
 
 // ---------------------------------------------------------------------------
@@ -519,13 +635,17 @@ function withProjectRoot(root, fn) {
 // Test 12b: same fallback-hit setup, but the hub-local blocker is NOT merged
 // — blocked_by_open still fires at the existing severity against the
 // hub-local blocker's status (gate semantics unchanged by the fallback).
+// Uses status merged (the tier DR-005/T-487 keeps at FAILURE) so this test's
+// intent — the fallback doesn't alter gate severity — stays independent of
+// the qa_passed gate-tier correction, which is exercised separately in
+// Test 3b / Test 8b.
 // ---------------------------------------------------------------------------
 {
   const siblingDir = path.join(TMP_DIR, 'unit-hub-fallback-hit-open-sibling');
   siblingFixture(siblingDir, 'T-999', 'merged'); // target repo exists, lacks T-451
 
   const records = [
-    { taskId: 'T-611', status: 'qa_passed', blockedBy: 'other-repo/T-451' },
+    { taskId: 'T-611', status: 'merged', blockedBy: 'other-repo/T-451' },
     { taskId: 'T-451', status: 'in_progress', repo: 'other-repo', blockedBy: null },
   ];
   const repoMap = { 'other-repo': { path: siblingDir } };
@@ -534,7 +654,7 @@ function withProjectRoot(root, fn) {
 
   assert.strictEqual(findings.length, 1, `Test 12b FAIL: expected exactly 1 finding, got: ${JSON.stringify(findings)}`);
   assert.strictEqual(findings[0].checkName, 'blocked_by_open', 'Test 12b FAIL: checkName mismatch');
-  assert.strictEqual(findings[0].severity, 'failure', 'Test 12b FAIL: expected FAILURE severity for qa_passed blocked task');
+  assert.strictEqual(findings[0].severity, 'failure', 'Test 12b FAIL: expected FAILURE severity for merged blocked task');
   assert.ok(/other-repo\/T-451/.test(findings[0].message), 'Test 12b FAIL: message should name the blocker reference');
   assert.ok(/in_progress/.test(findings[0].message), 'Test 12b FAIL: message should report the hub-local blocker status');
 
@@ -623,8 +743,250 @@ function withProjectRoot(root, fn) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 16 (T-492): an em-dash placeholder Blocked by value on a gated-status
+// task must produce ZERO findings — the placeholder means "no blockers", the
+// same convention parseBlockedBy() already accepts for parsing. Before the
+// T-492 fix, checkBlockedBy() tested the raw field for truthiness before
+// parsing and incorrectly emitted blocked_by_unresolvable for this case.
+// ---------------------------------------------------------------------------
+{
+  const records = [
+    { taskId: 'T-620', status: 'merged', blockedBy: '—' },
+  ];
+
+  const findings = checkBlockedBy(records, { repoMap: {} });
+
+  assert.strictEqual(
+    findings.length,
+    0,
+    `Test 16 FAIL: expected zero findings for an em-dash Blocked by placeholder on a merged task, got: ${JSON.stringify(findings)}`
+  );
+
+  console.log('Test 16 passed: checkBlockedBy() treats an em-dash Blocked by placeholder as "no blockers" — zero findings');
+}
+
+// ---------------------------------------------------------------------------
+// Test 17 (T-492): a plain-hyphen placeholder behaves identically to the
+// em-dash placeholder — zero findings, across all three gated statuses.
+// ---------------------------------------------------------------------------
+{
+  const records = [
+    { taskId: 'T-621', status: 'qa_passed', blockedBy: '-' },
+    { taskId: 'T-622', status: 'ready_for_qa', blockedBy: '-' },
+    { taskId: 'T-623', status: 'merged', blockedBy: '-' },
+  ];
+
+  const findings = checkBlockedBy(records, { repoMap: {} });
+
+  assert.strictEqual(
+    findings.length,
+    0,
+    `Test 17 FAIL: expected zero findings for a plain-hyphen Blocked by placeholder across all gated statuses, got: ${JSON.stringify(findings)}`
+  );
+
+  console.log('Test 17 passed: checkBlockedBy() treats a plain-hyphen Blocked by placeholder as "no blockers" — zero findings across all gated statuses');
+}
+
+// ---------------------------------------------------------------------------
+// Test 18 (T-492): a genuinely malformed, non-empty Blocked by value (does not
+// parse as <repo>/T-NNN and is NOT one of the accepted placeholders) must
+// STILL produce blocked_by_unresolvable — the fix must not make the check
+// permissive toward real garbage input.
+// ---------------------------------------------------------------------------
+{
+  const records = [
+    { taskId: 'T-624', status: 'merged', blockedBy: 'not a valid reference at all' },
+  ];
+
+  const findings = checkBlockedBy(records, { repoMap: {} });
+
+  assert.strictEqual(
+    findings.length,
+    1,
+    `Test 18 FAIL: expected exactly 1 finding for a genuinely malformed Blocked by value, got: ${JSON.stringify(findings)}`
+  );
+  assert.strictEqual(
+    findings[0].checkName,
+    'blocked_by_unresolvable',
+    'Test 18 FAIL: expected blocked_by_unresolvable for a genuinely malformed (non-placeholder) Blocked by value'
+  );
+  assert.strictEqual(findings[0].severity, 'info', 'Test 18 FAIL: expected INFO severity');
+
+  console.log('Test 18 passed: checkBlockedBy() still fires blocked_by_unresolvable for a genuinely malformed, non-placeholder Blocked by value');
+}
+
+// ---------------------------------------------------------------------------
+// Test 19 (T-492): an absent Blocked by field on a gated-status task is
+// unchanged behavior — zero findings, same as before the fix (guards against
+// a regression where the new placeholder handling might require a non-null
+// value).
+// ---------------------------------------------------------------------------
+{
+  const records = [
+    { taskId: 'T-625', status: 'merged', blockedBy: null },
+    { taskId: 'T-626', status: 'qa_passed', blockedBy: undefined },
+  ];
+
+  const findings = checkBlockedBy(records, { repoMap: {} });
+
+  assert.strictEqual(
+    findings.length,
+    0,
+    `Test 19 FAIL: expected zero findings for an absent Blocked by field, got: ${JSON.stringify(findings)}`
+  );
+
+  console.log('Test 19 passed: checkBlockedBy() remains a silent no-op for an absent Blocked by field on a gated-status task');
+}
+
+// ---------------------------------------------------------------------------
+// Test 20 (DR-005 / T-487, decisive): spawn the REAL validator CLI
+// (`node scripts/mavp-validator.js <fixtureRoot>`) as a child process against
+// a fixture with a MERGED task and an unmerged cross-repo blocker. This is
+// the actual command an operator runs, exercising main()/process.exitCode
+// end to end rather than the in-process parseArtifacts()/getExitCode() path
+// used by Tests 8/8b. Must exit 2 (repair required) — the real violation
+// tier, unchanged by the gate-tier correction.
+// ---------------------------------------------------------------------------
+{
+  const mainRoot = path.join(TMP_DIR, 'cli-fixture-merged-open');
+  const siblingDir = path.join(TMP_DIR, 'cli-fixture-merged-open-sibling');
+  siblingFixture(siblingDir, 'T-507', 'in_progress');
+
+  writeFixture(mainRoot, {
+    backlog: `# BACKLOG
+
+## Selection rules
+
+- unblockers first
+
+## Active Wave
+
+### T-720 — Ship feature depending on sibling repo (merged, open blocker)
+- **Status:** merged
+- **Owner role:** developer
+- **Verification type:** unit
+- **Repo:** main-repo
+- **Blocked by:** sibling-repo/T-507
+`,
+    taskStatus: `# TASK_STATUS
+
+## Active tasks
+
+### T-720 — Ship feature depending on sibling repo (merged, open blocker)
+- **Status:** merged
+- **Owner role:** developer
+- **Verification type:** unit
+- **Evidence:**
+  - commit: cli12345
+
+## Recently completed tasks
+`,
+    repoMap: `# Repo Map
+
+## sibling-repo
+
+- **label:** Sibling Repo
+- **path:** ${siblingDir}
+`,
+  });
+
+  const cliEnv = { ...process.env };
+  delete cliEnv.MAVERICKS_PROJECT_ROOT;
+
+  const result = childProcess.spawnSync(
+    process.execPath,
+    [VALIDATOR_CLI_PATH, mainRoot],
+    { cwd: mainRoot, env: cliEnv, encoding: 'utf8' }
+  );
+
+  assert.strictEqual(
+    result.status,
+    2,
+    `Test 20 FAIL: expected the real validator CLI to exit 2 for a merged task with an unmerged blocker, got exit ${result.status}. stdout: ${result.stdout}\nstderr: ${result.stderr}`
+  );
+  assert.ok(
+    /blocked_by_open/.test(result.stdout),
+    `Test 20 FAIL: expected blocked_by_open in the validator CLI report, got: ${result.stdout}`
+  );
+
+  console.log('Test 20 passed: running the REAL validator CLI against a fixture with a MERGED task and an unmerged blocker exits 2 (repair required)');
+}
+
+// ---------------------------------------------------------------------------
+// Test 21 (DR-005 / T-487, decisive): spawn the REAL validator CLI against a
+// fixture with a "held qa_passed chain" — a qa_passed task with an unmerged
+// cross-repo blocker, exactly the field-report shape. This is the test the
+// brief calls decisive: it must exit 1 (drifting), NOT 2 (repair required).
+// Before the T-487 gate-tier correction this fixture exited 2, latching
+// "repair required" on correct, deliberate wait behavior.
+// ---------------------------------------------------------------------------
+{
+  const mainRoot = path.join(TMP_DIR, 'cli-fixture-qa-passed-held');
+  const siblingDir = path.join(TMP_DIR, 'cli-fixture-qa-passed-held-sibling');
+  siblingFixture(siblingDir, 'T-508', 'in_progress');
+
+  writeFixture(mainRoot, {
+    backlog: `# BACKLOG
+
+## Selection rules
+
+- unblockers first
+
+## Active Wave
+
+### T-721 — Ship feature depending on sibling repo (held qa_passed)
+- **Status:** qa_passed
+- **Owner role:** developer
+- **Verification type:** unit
+- **Repo:** main-repo
+- **Blocked by:** sibling-repo/T-508
+`,
+    taskStatus: `# TASK_STATUS
+
+## Active tasks
+
+### T-721 — Ship feature depending on sibling repo (held qa_passed)
+- **Status:** qa_passed
+- **Owner role:** developer
+- **Verification type:** unit
+- **Evidence:** —
+
+## Recently completed tasks
+`,
+    repoMap: `# Repo Map
+
+## sibling-repo
+
+- **label:** Sibling Repo
+- **path:** ${siblingDir}
+`,
+  });
+
+  const cliEnv = { ...process.env };
+  delete cliEnv.MAVERICKS_PROJECT_ROOT;
+
+  const result = childProcess.spawnSync(
+    process.execPath,
+    [VALIDATOR_CLI_PATH, mainRoot],
+    { cwd: mainRoot, env: cliEnv, encoding: 'utf8' }
+  );
+
+  assert.strictEqual(
+    result.status,
+    1,
+    `Test 21 FAIL: expected the real validator CLI to exit 1 (drifting) for a held qa_passed chain, got exit ${result.status}. stdout: ${result.stdout}\nstderr: ${result.stderr}`
+  );
+  assert.ok(
+    /blocked_by_open/.test(result.stdout),
+    `Test 21 FAIL: expected blocked_by_open in the validator CLI report, got: ${result.stdout}`
+  );
+
+  console.log('Test 21 passed: running the REAL validator CLI against a fixture with a HELD qa_passed chain exits 1 (drifting), NOT 2 (repair required) — DR-005 gate-tier correction confirmed end to end');
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
 
-console.log('\nAll T-393/T-456 assertions passed.');
+console.log('\nAll T-393/T-456/T-492/T-487 assertions passed.');

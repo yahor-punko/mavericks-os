@@ -65,6 +65,10 @@ curl -s -X POST https://api.exa.ai/search \
 
 Before reporting done: confirm every dimension of the research question in your brief is addressed, or explicitly state which dimensions lack sufficient source coverage and why. Do not return a partial report as if it covers the full brief.
 
+## Report completion token
+
+End every final report with a literal last line — nothing may follow it — using the grammar defined in `docs/AGENT_SPEC.md` — "Report completion token": `MAVP_REPORT role=analyst task=<T-NNN|n/a> verdict=<done|blocked>`. Use `task=n/a` when the research brief is not tied to a registered T-NNN.
+
 ## Escalation
 
 <!-- protected -->

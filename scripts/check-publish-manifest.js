@@ -9,6 +9,19 @@
 //   - any manifest path that is no longer tracked (a stale entry) is reported.
 //   - any path classified in more than one bucket is reported.
 //
+// Reset-bucket keys may legitimately be UNTRACKED (T-529): a reset destination
+// is a live-state artifact the assembler always repopulates from its mapped
+// `templates/` starter (never from the live file — see
+// scripts/mavp-publish-assemble.js), so nothing requires the destination path
+// itself to be git-tracked. `.claude/settings.json` is untracked deliberately
+// (the Claude Code permission layer appends operator command strings to it,
+// which must never enter the git index — see .gitignore for the fresh-clone
+// seed-from-template note). An untracked reset key is therefore exempt from
+// the STALE-entry check below, but the exemption is narrow, not a blanket
+// pass: its mapped STARTER path (the `templates/` file the assembler actually
+// copies) MUST still be git-tracked, since that is what ships. A reset key
+// whose starter is also untracked is reported as a distinct failure.
+//
 // `preserve` (T-356) is a SEPARATE namespace, not one of the three tracked-path
 // buckets above: it names paths that exist ONLY in the public mirror (e.g.
 // `.github/ISSUE_TEMPLATE/*`), never in the private git index. Its entries are
@@ -33,6 +46,15 @@
 // shared pre-commit hook without breaking non-canonical checkouts. Default
 // (no flag) behavior is completely unchanged.
 //
+// T-550: this script used to accept ANY manifest shape that parsed as JSON,
+// silently defaulting `ship`/`reset`/`exclude`/`preserve` to []/{} on a
+// mistyped or absent bucket (see the old inline `Array.isArray(...) ? ... :
+// []` idiom this replaced) — the exact same vacuous-GREEN class T-534 round
+// 2 closed for the provenance verifier (see that module's own header). A
+// malformed manifest now refuses via validateManifestBucketsShape() below
+// BEFORE the completeness check ever runs, instead of quietly certifying a
+// narrower (or empty) set than the manifest actually declares.
+//
 // No external dependencies — uses only Node's `child_process` + `fs`/`path`.
 
 'use strict';
@@ -43,6 +65,16 @@ const path = require('node:path');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const MANIFEST_PATH = path.join(REPO_ROOT, 'scripts', 'publish-manifest.json');
+const VERIFY_PROVENANCE_SCRIPT = path.join(REPO_ROOT, 'scripts', 'mavp-publish-verify-provenance.js');
+
+// T-550 — reuse (never re-implement) the shape contract T-534 round 2
+// pinned for the provenance verifier, so `ship`/`reset` and the two T-550
+// amendments (bare-"." rejection, reset-starter-under-templates/) stay a
+// SINGLE definition shared by every consumer, instead of drifting out of
+// step the way the pre-T-550 defaulting idiom already had (this script,
+// the assembler, and the verifier each answered "what counts as valid"
+// differently).
+const { validateManifestShape, isPlainObject } = require(VERIFY_PROVENANCE_SCRIPT);
 
 function getTrackedFiles() {
   const out = execFileSync('git', ['ls-files'], { cwd: REPO_ROOT, encoding: 'utf8' });
@@ -52,6 +84,30 @@ function getTrackedFiles() {
 function loadManifest() {
   const raw = fs.readFileSync(MANIFEST_PATH, 'utf8');
   return JSON.parse(raw);
+}
+
+// T-550 — THE SHARED SHAPE CONTRACT for this consumer. Composes
+// validateManifestShape() (the verifier's ship/reset/starter contract,
+// reused unchanged) with the two extra buckets THIS script reads that the
+// verifier never touches: `exclude` and `preserve`. Each is optional — an
+// absent bucket is tolerated (this script's own completeness logic already
+// treats "no exclude entries" and "no preserve entries" as a legitimate,
+// if unusual, manifest) — but a PRESENT-and-malformed one (an array, a
+// string, any non-plain-object) is refused with a named defect rather than
+// silently defaulting to {} the way the pre-T-550 code did (see the old
+// `manifest.exclude && typeof manifest.exclude === 'object' ? ... : {}`
+// idiom this replaced). Never checks `ship`/`reset` itself a second time —
+// that would drift from validateManifestShape() the moment either changed.
+function validateManifestBucketsShape(manifest) {
+  const shapeCheck = validateManifestShape(manifest);
+  if (!shapeCheck.ok) return shapeCheck;
+  if (Object.prototype.hasOwnProperty.call(manifest, 'exclude') && !isPlainObject(manifest.exclude)) {
+    return { ok: false, reason: '`exclude` is present but not a plain (non-array) object' };
+  }
+  if (Object.prototype.hasOwnProperty.call(manifest, 'preserve') && !isPlainObject(manifest.preserve)) {
+    return { ok: false, reason: '`preserve` is present but not a plain (non-array) object' };
+  }
+  return { ok: true };
 }
 
 // Returns the list of tracked paths (from `trackedList`) shadowed by a
@@ -102,8 +158,21 @@ function validateManifest(manifest, trackedList) {
   const trackedSet = new Set(trackedList);
   const manifestPaths = new Set(classification.keys());
 
+  // Reset-bucket keys are allowed to be untracked (T-529) — see the module
+  // comment above. Compute the untracked-reset-key set once so it can both
+  // (a) be exempted from the STALE-entry check and (b) drive the narrow
+  // replacement invariant: the reset key's mapped STARTER path must be
+  // git-tracked, since that is what actually ships.
+  const resetKeys = Object.keys(reset);
+  const untrackedResetKeySet = new Set(resetKeys.filter((k) => !trackedSet.has(k)));
+  const resetStarterUntracked = [...untrackedResetKeySet]
+    .filter((destPath) => !trackedSet.has(reset[destPath]))
+    .map((destPath) => ({ destPath, starterPath: reset[destPath] }));
+
   const missingFromManifest = trackedList.filter((p) => !manifestPaths.has(p));
-  const staleInManifest = [...manifestPaths].filter((p) => !trackedSet.has(p));
+  const staleInManifest = [...manifestPaths].filter(
+    (p) => !trackedSet.has(p) && !untrackedResetKeySet.has(p)
+  );
   const doubleClassified = [...classification.entries()].filter(([, buckets]) => buckets.length > 1);
   const preserveShadowsTracked = findPreserveShadowsTracked(preserve, trackedList);
 
@@ -120,6 +189,17 @@ function validateManifest(manifest, trackedList) {
     problems.push({
       title: `STALE manifest entries (${staleInManifest.length}) — no longer tracked by git:`,
       lines: staleInManifest.sort(),
+    });
+  }
+
+  if (resetStarterUntracked.length > 0) {
+    problems.push({
+      title:
+        `RESET STARTER UNTRACKED (${resetStarterUntracked.length}) — an untracked reset destination's ` +
+        `mapped starter must be git-tracked, since that is what ships:`,
+      lines: resetStarterUntracked
+        .sort((a, b) => a.destPath.localeCompare(b.destPath))
+        .map(({ destPath, starterPath }) => `${destPath} -> starter "${starterPath}" is not git-tracked`),
     });
   }
 
@@ -181,6 +261,18 @@ function main() {
     process.exit(1);
   }
 
+  // T-550 — SHAPE REFUSAL, before a single path is classified. A manifest
+  // that parses as JSON but does not match the shared shape contract (see
+  // validateManifestBucketsShape()'s own comment) refuses here with a
+  // named defect, unconditionally (including under --if-canonical — a
+  // present-but-malformed manifest is a real defect, never grounds to
+  // silently treat the repo as non-canonical).
+  const shapeCheck = validateManifestBucketsShape(manifest);
+  if (!shapeCheck.ok) {
+    console.error(`ERROR: manifest failed shape validation: ${shapeCheck.reason}`);
+    process.exit(1);
+  }
+
   const tracked = getTrackedFiles();
 
   if (ifCanonical && !isCanonicalRepo(manifest, tracked)) {
@@ -209,7 +301,18 @@ function main() {
   process.exit(0);
 }
 
-module.exports = { validateManifest, findPreserveShadowsTracked, isCanonicalRepo };
+module.exports = {
+  validateManifest,
+  findPreserveShadowsTracked,
+  isCanonicalRepo,
+  // T-550 — the shape contract for this consumer's own two extra buckets
+  // (`exclude`/`preserve`, layered on top of the reused ship/reset
+  // contract), exported for its own regression test to exercise directly.
+  // mavp-publish-assemble.js does NOT require this — it never reads
+  // exclude/preserve, so it calls validateManifestShape() directly from
+  // mavp-publish-verify-provenance.js instead of pulling in this extra hop.
+  validateManifestBucketsShape,
+};
 
 if (require.main === module) {
   main();

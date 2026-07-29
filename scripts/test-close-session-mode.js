@@ -12,7 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
 
-const { resolveMode, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef } = require('./mavp-operator-close-session.js');
+const { resolveMode, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, classifyVersionBumpAdvisory, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE } = require('./mavp-operator-close-session.js');
 
 // 1. --interactive flag always wins → 'interactive'
 assert.strictEqual(
@@ -880,3 +880,441 @@ function makeNoRemoteFixtureRepo() {
 }
 
 console.log('All T-445 assertions passed.');
+
+// ---------------------------------------------------------------------------
+// T-530 — checkVersionBump() gained release-awareness: before advising a
+// version bump it now checks whether the CURRENT version is already tagged
+// on the public mirror (resolved via MAVERICKS_HOME, exclusively through
+// check-changelog-frozen.js's exported resolveMirrorHome()/isGitRepo()/
+// getMirrorTags() — never a re-implemented `git -C <mirror> ...` call).
+//
+// Covers the three required cases end-to-end via the real CLI
+// (mavp-operator-close-session.js --non-interactive), with whole-line
+// assertions against the exported VERSION_BUMP_LINE / VERSION_UNRELEASED_LINE
+// constants (not a re-typed substring):
+//
+//   1. current version tagged on the mirror + scripts/ drift -> bump
+//      advisory (today's line, unchanged).
+//   2. current version untagged on the mirror + scripts/ drift -> the
+//      informational "unreleased and accumulating" line, and the bump
+//      advisory line is ABSENT.
+//   3. mirror unresolvable (MAVERICKS_HOME points nowhere) -> degrades to
+//      case 1's bump-advisory behavior, unchanged from before T-530.
+//
+// Plus the GIT_DIR decoy case (T-517's lesson, reused rather than
+// re-learned): GIT_DIR set to the fixture's OWN .git (the realistic
+// hook-execution shape — see check-changelog-frozen.js's GIT_DIR HARDENING
+// comment) while that same fixture repo ALSO carries a tag for the current
+// version — carrying it the way the private canonical repo genuinely can
+// (T-517's comment: "the private canonical repo is NOT guaranteed to be
+// tag-free"). MAVERICKS_HOME points at a separate mirror fixture that does
+// NOT carry that tag. The decision must still follow the MAVERICKS_HOME
+// mirror (untagged -> informational line, no bump advisory) — a call path
+// that dropped mirrorGitEnv() (i.e. read the mirror's tags via a plain
+// `git -C <mirror> tag -l` inheriting the ambient GIT_DIR) would instead
+// see the decoy's tag through GIT_DIR-precedence-over--C and wrongly print
+// the bump advisory.
+// ---------------------------------------------------------------------------
+
+function gitT530(dir, args) {
+  return execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function commitAllT530(dir, message) {
+  gitT530(dir, ['add', '-A']);
+  gitT530(dir, ['commit', '-q', '-m', message]);
+}
+
+// Writes the minimal BACKLOG.md/TASK_STATUS.md/PROCESS_STATE.json triple
+// close-session.js needs to run its non-interactive path cleanly (empty
+// Active Wave — same shape as makeFixtureRepo() above). Does NOT commit —
+// caller commits once mavp-version.js is also written, so the FIRST commit
+// is the "version bump" commit checkVersionBump() diffs everything else
+// against.
+function seedStateFilesT530(dir) {
+  fs.writeFileSync(
+    path.join(dir, 'BACKLOG.md'),
+    ['# Backlog', '', '## Active Wave — Wave 1', '', 'Nothing scheduled.', ''].join('\n')
+  );
+  fs.writeFileSync(
+    path.join(dir, 'TASK_STATUS.md'),
+    ['# Task Status', '', '## Active tasks', '', '## Recently completed tasks', ''].join('\n')
+  );
+  fs.writeFileSync(
+    path.join(dir, 'PROCESS_STATE.json'),
+    JSON.stringify(
+      {
+        initiative: 'T-530 fixture',
+        stage: 'execution',
+        wave: 1,
+        wave_status: 'execution',
+        wave_goal: 'fixture wave goal',
+        parked_waves: [],
+        active_slices: [],
+        next_action: null,
+        blocker: null,
+        stage_owner: 'main_agent',
+        last_task_id: 1,
+        last_updated: '2020-01-01',
+        deploy_contours: 0,
+        wave_summary: null,
+        rechecks: [],
+      },
+      null,
+      2
+    ) + '\n'
+  );
+}
+
+// Builds a throwaway "project" git repo whose scripts/mavp-version.js
+// declares `version`, then commits a SECOND, later change under scripts/ —
+// the drift checkVersionBump() reacts to. Returns the repo dir.
+function makeVersionBumpFixtureRepo(version) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 't530-fixture-'));
+  gitT530(dir, ['init', '-q']);
+  gitT530(dir, ['config', 'user.email', 'demo@example.invalid']);
+  gitT530(dir, ['config', 'user.name', 'Fixture User']);
+
+  seedStateFilesT530(dir);
+  const scriptsDir = path.join(dir, 'scripts');
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(scriptsDir, 'mavp-version.js'),
+    `module.exports = { MAVERICKS_VERSION: '${version}' };\n`
+  );
+  commitAllT530(dir, `fixture: initial state, version ${version}`);
+
+  // Drift: a later commit that touches scripts/ but not mavp-version.js.
+  fs.writeFileSync(path.join(scriptsDir, 'dummy.js'), '// fixture drift file\n');
+  commitAllT530(dir, 'fixture: scripts drift after version bump');
+
+  return dir;
+}
+
+// Builds a throwaway "mirror" git repo, optionally pre-tagged with the
+// given version strings (each normalized to `v<x.y.z>` if not already
+// prefixed).
+function makeMirrorFixtureRepo(taggedVersions) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 't530-mirror-'));
+  gitT530(dir, ['init', '-q']);
+  gitT530(dir, ['config', 'user.email', 'demo@example.invalid']);
+  gitT530(dir, ['config', 'user.name', 'Mirror Fixture']);
+  gitT530(dir, ['commit', '-q', '--allow-empty', '-m', 'fixture: mirror init']);
+  for (const v of taggedVersions || []) {
+    gitT530(dir, ['tag', v.startsWith('v') ? v : `v${v}`]);
+  }
+  return dir;
+}
+
+function runCloseSessionCliWithEnv(repoDir, extraEnv) {
+  return spawnSync(process.execPath, [CLOSE_SESSION_SCRIPT, '--non-interactive'], {
+    cwd: repoDir,
+    env: { ...process.env, MAVERICKS_PROJECT_ROOT: repoDir, MAVERICKS_SCRIPTS: __dirname, ...extraEnv },
+    encoding: 'utf8',
+  });
+}
+
+// --- Pure unit coverage of classifyVersionBumpAdvisory() — no git/fs involved. ---
+{
+  assert.strictEqual(
+    classifyVersionBumpAdvisory({ changes: null, currentVersion: '1.2.3', tags: new Set(['v1.2.3']) }),
+    null,
+    'T-530 Unit FAIL: no changes at all must return null regardless of tag state'
+  );
+  assert.deepStrictEqual(
+    classifyVersionBumpAdvisory({ changes: 'abc', currentVersion: '1.2.3', tags: new Set(['v1.2.3']) }),
+    { kind: 'bump', changes: 'abc' },
+    'T-530 Unit FAIL: tagged current version + changes must classify as bump'
+  );
+  assert.deepStrictEqual(
+    classifyVersionBumpAdvisory({ changes: 'abc', currentVersion: '1.2.3', tags: new Set(['v1.1.0']) }),
+    { kind: 'unreleased', changes: 'abc' },
+    'T-530 Unit FAIL: untagged current version + changes must classify as unreleased'
+  );
+  assert.deepStrictEqual(
+    classifyVersionBumpAdvisory({ changes: 'abc', currentVersion: '1.2.3', tags: null }),
+    { kind: 'bump', changes: 'abc' },
+    'T-530 Unit FAIL: unresolvable mirror (tags null) must degrade to bump, unchanged from pre-T-530 behavior'
+  );
+  assert.deepStrictEqual(
+    classifyVersionBumpAdvisory({ changes: 'abc', currentVersion: null, tags: new Set(['v1.2.3']) }),
+    { kind: 'bump', changes: 'abc' },
+    'T-530 Unit FAIL: unknown current version must degrade to bump'
+  );
+
+  console.log('T-530 unit tests passed: classifyVersionBumpAdvisory() covers tagged/untagged/unresolvable/unknown-version');
+}
+
+// Case 24: current version TAGGED on the mirror + scripts/ drift -> bump
+// advisory (today's line), informational line ABSENT.
+{
+  const repoDir = makeVersionBumpFixtureRepo('1.0.0');
+  const mirrorDir = makeMirrorFixtureRepo(['1.0.0']);
+
+  const result = runCloseSessionCliWithEnv(repoDir, { MAVERICKS_HOME: mirrorDir });
+  const lines = (result.stdout || '').split('\n');
+
+  assert.ok(
+    lines.includes(VERSION_BUMP_LINE),
+    `Case 24 FAIL: expected the exact bump-advisory line in stdout, got:\n${result.stdout}\nstderr: ${result.stderr}`
+  );
+  assert.ok(
+    !lines.includes(VERSION_UNRELEASED_LINE),
+    `Case 24 FAIL: informational unreleased line must be ABSENT when the current version is tagged, got:\n${result.stdout}`
+  );
+
+  console.log('Case 24 passed: current version tagged on the mirror + scripts drift -> bump advisory (unchanged)');
+
+  cleanup(repoDir, mirrorDir);
+}
+
+// Case 25: current version UNTAGGED on the mirror + scripts/ drift ->
+// informational unreleased-and-accumulating line, bump advisory ABSENT.
+// This is the case a mutation removing release-awareness (always advising)
+// must fail — see the mutation check quoted in the developer's evidence.
+{
+  const repoDir = makeVersionBumpFixtureRepo('2.0.0');
+  // Mirror carries A tag, just never 2.0.0 — proves the classification
+  // reads tag NAMES, not merely "does the mirror have any tags at all".
+  const mirrorDir = makeMirrorFixtureRepo(['1.9.0']);
+
+  const result = runCloseSessionCliWithEnv(repoDir, { MAVERICKS_HOME: mirrorDir });
+  const lines = (result.stdout || '').split('\n');
+
+  assert.ok(
+    lines.includes(VERSION_UNRELEASED_LINE),
+    `Case 25 FAIL: expected the exact informational unreleased line in stdout, got:\n${result.stdout}\nstderr: ${result.stderr}`
+  );
+  assert.ok(
+    !lines.includes(VERSION_BUMP_LINE),
+    `Case 25 FAIL: bump advisory must be ABSENT when the current version is untagged (would orphan it), got:\n${result.stdout}`
+  );
+
+  console.log('Case 25 passed: current version untagged on the mirror + scripts drift -> informational line only, no bump advisory');
+
+  cleanup(repoDir, mirrorDir);
+}
+
+// Case 26: mirror unresolvable (MAVERICKS_HOME points at a path that does
+// not exist) -> degrades to Case 24's bump-advisory behavior, unchanged
+// from before T-530.
+{
+  const repoDir = makeVersionBumpFixtureRepo('3.0.0');
+  const noSuchMirror = path.join(os.tmpdir(), `t530-no-such-mirror-${process.pid}-${Date.now()}`);
+
+  const result = runCloseSessionCliWithEnv(repoDir, { MAVERICKS_HOME: noSuchMirror });
+  const lines = (result.stdout || '').split('\n');
+
+  assert.ok(
+    lines.includes(VERSION_BUMP_LINE),
+    `Case 26 FAIL: expected the bump-advisory line when the mirror is unresolvable (degrade unchanged), got:\n${result.stdout}\nstderr: ${result.stderr}`
+  );
+  assert.ok(
+    !lines.includes(VERSION_UNRELEASED_LINE),
+    `Case 26 FAIL: informational line must be ABSENT when the mirror is unresolvable, got:\n${result.stdout}`
+  );
+
+  console.log('Case 26 passed: unresolvable mirror degrades to the unchanged pre-T-530 bump-advisory behavior');
+
+  cleanup(repoDir);
+}
+
+// Case 27 (GIT_DIR decoy — the load-bearing T-517-reuse proof): GIT_DIR set
+// to the fixture repo's OWN .git (the realistic hook-execution shape) while
+// that SAME repo carries a tag for the current version (the decoy). A
+// SEPARATE MAVERICKS_HOME mirror fixture does NOT carry that tag. The
+// decision must still follow the MAVERICKS_HOME mirror (untagged) ->
+// informational line, bump advisory ABSENT — proving the tag read actually
+// went through mirrorGitEnv() (via isGitRepo()/getMirrorTags()) rather than
+// being shadowed by the ambient GIT_DIR.
+{
+  const repoDir = makeVersionBumpFixtureRepo('4.0.0');
+  // The decoy tag: the fixture repo (== GIT_DIR target == cwd) carries a
+  // tag for the CURRENT version — exactly the "private repo carries a
+  // version tag ahead of the mirror" shape check-changelog-frozen.js's
+  // header comment describes as real and expected.
+  gitT530(repoDir, ['tag', 'v4.0.0']);
+
+  // Non-vacuousness check (per the brief): the decoy repo genuinely has the
+  // tag, and the mirror genuinely does not.
+  const decoyTags = gitT530(repoDir, ['tag', '-l']).trim().split('\n');
+  assert.ok(decoyTags.includes('v4.0.0'), 'Case 27 FAIL (fixture bug): decoy repo must carry v4.0.0');
+
+  const mirrorDir = makeMirrorFixtureRepo(['3.9.0']); // never 4.0.0
+  const mirrorTags = gitT530(mirrorDir, ['tag', '-l']).trim().split('\n').filter(Boolean);
+  assert.ok(!mirrorTags.includes('v4.0.0'), 'Case 27 FAIL (fixture bug): mirror must NOT carry v4.0.0');
+
+  const result = runCloseSessionCliWithEnv(repoDir, {
+    MAVERICKS_HOME: mirrorDir,
+    GIT_DIR: path.join(repoDir, '.git'),
+  });
+  const lines = (result.stdout || '').split('\n');
+
+  assert.ok(
+    lines.includes(VERSION_UNRELEASED_LINE),
+    `Case 27 FAIL: expected the decision to follow the MAVERICKS_HOME mirror (untagged) even with GIT_DIR pointed at a decoy carrying the tag, got:\n${result.stdout}\nstderr: ${result.stderr}`
+  );
+  assert.ok(
+    !lines.includes(VERSION_BUMP_LINE),
+    `Case 27 FAIL: bump advisory must be ABSENT — a call path that dropped mirrorGitEnv() would read the decoy's tag via GIT_DIR and wrongly print it, got:\n${result.stdout}`
+  );
+
+  console.log('Case 27 passed: GIT_DIR decoy carrying the current version tag does not override the MAVERICKS_HOME mirror\'s (untagged) tag state');
+
+  cleanup(repoDir, mirrorDir);
+}
+
+console.log('All T-530 assertions passed.');
+
+// ---------------------------------------------------------------------------
+// T-542 — end-to-end reproduction of the 2026-07-26 close-session incident:
+// a task heading that merely MENTIONS another task's ID (e.g. "### T-541 —
+// Close the four T-540 security residuals — ...") must never be treated as
+// that other task's heading by the status/move helpers. Before the fix,
+// running --close-session over this exact layout fabricated `merged` onto
+// T-541 (still `planned`, never touched) and stranded T-540's real merged
+// block in Active tasks. Mutant demonstration: reverting
+// isTaskHeadingFor()/moveTaskToCompleted()'s identity guard back to the
+// substring `includes(taskId + ' ')` test reproduces exactly that
+// corruption and fails this case.
+// ---------------------------------------------------------------------------
+
+// Case 28: real scripts + real validator (MAVERICKS_SCRIPTS = __dirname).
+// T-540 already sits at Status: merged in TASK_STATUS.md's Active tasks
+// (mirrors the incident: Main Agent had already set it merged before this
+// close-session run); T-541 is `planned` and was never touched by anyone.
+{
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t542-fixture-'));
+
+  execFileSync('git', ['init', '-q'], { cwd: repoDir });
+  execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: repoDir });
+  execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: repoDir });
+
+  fs.writeFileSync(
+    path.join(repoDir, 'BACKLOG.md'),
+    [
+      '# BACKLOG',
+      '',
+      '## Active Wave',
+      '',
+      '### T-540 — Fix the four security residuals',
+      '- **Status:** merged',
+      '- **Owner role:** developer',
+      '- **Repo:** mavericks',
+      '- **Verification type:** artifact',
+      '',
+      '### T-541 — Close the four T-540 security residuals — follow-up audit',
+      '- **Status:** planned',
+      '- **Owner role:** developer',
+      '- **Repo:** mavericks',
+      '- **Verification type:** artifact',
+      '',
+    ].join('\n')
+  );
+
+  fs.writeFileSync(
+    path.join(repoDir, 'TASK_STATUS.md'),
+    [
+      '# TASK_STATUS',
+      '',
+      '## Active tasks',
+      '',
+      '### T-540 — Fix the four security residuals',
+      '- **Status:** merged',
+      '- **Owner role:** developer',
+      '- **Verification type:** artifact',
+      '- **Last verified by:** qa',
+      '- **Evidence:** commit: aaaaaaa branch: main',
+      '- **Notes:** —',
+      '',
+      '### T-541 — Close the four T-540 security residuals — follow-up audit',
+      '- **Status:** planned',
+      '- **Owner role:** developer',
+      '- **Verification type:** artifact',
+      '- **Last verified by:** —',
+      '- **Evidence:** —',
+      '- **Notes:** —',
+      '',
+      '## Recently completed tasks',
+      '',
+    ].join('\n')
+  );
+
+  fs.writeFileSync(
+    path.join(repoDir, 'PROCESS_STATE.json'),
+    JSON.stringify(
+      {
+        initiative: 'T-542 fixture',
+        stage: 'execution',
+        wave: 1,
+        wave_status: 'execution',
+        wave_goal: 'fixture wave goal',
+        parked_waves: [],
+        active_slices: ['T-541'],
+        next_action: 'T-541 → developer → follow-up audit',
+        blocker: null,
+        stage_owner: 'main_agent',
+        last_task_id: 541,
+        last_updated: '2020-01-01',
+        deploy_contours: 0,
+        wave_summary: null,
+        rechecks: [],
+      },
+      null,
+      2
+    ) + '\n'
+  );
+
+  execFileSync('git', ['add', '-A'], { cwd: repoDir });
+  execFileSync('git', ['commit', '-q', '-m', 'fixture: initial state'], { cwd: repoDir });
+
+  const result = runCloseSessionCli(repoDir, __dirname, ['--non-interactive']);
+
+  const backlogAfter = fs.readFileSync(path.join(repoDir, 'BACKLOG.md'), 'utf8');
+  const taskStatusAfter = fs.readFileSync(path.join(repoDir, 'TASK_STATUS.md'), 'utf8');
+
+  // (a) TASK_STATUS.md: T-540 moved to Recently completed; T-541 stays in
+  // Active tasks, still `planned`, NOT archived.
+  const completedIdx = taskStatusAfter.indexOf('## Recently completed tasks');
+  assert.ok(
+    taskStatusAfter.indexOf('### T-540') > completedIdx,
+    `Case 28 FAIL: T-540 must be moved to TASK_STATUS Recently completed, got:\n${taskStatusAfter}`
+  );
+  const activeSectionTS = taskStatusAfter.slice(taskStatusAfter.indexOf('## Active tasks'), completedIdx);
+  assert.ok(
+    /### T-541 — Close the four T-540 security residuals — follow-up audit\n- \*\*Status:\*\* planned/.test(activeSectionTS),
+    `Case 28 FAIL: T-541 must remain in TASK_STATUS Active tasks, still planned, got:\n${activeSectionTS}`
+  );
+
+  // (b) BACKLOG.md: T-540 archived (mid-wave); T-541 remains under Active
+  // Wave, still `planned`, untouched.
+  const midWaveArchiveIdx = backlogAfter.indexOf('## Wave 1 — Archived (mid-wave)');
+  assert.ok(
+    midWaveArchiveIdx !== -1,
+    `Case 28 FAIL: expected a mid-wave archive heading in BACKLOG.md, got:\n${backlogAfter}`
+  );
+  const activeWaveSection = backlogAfter.slice(backlogAfter.indexOf('## Active Wave'), midWaveArchiveIdx);
+  assert.ok(
+    !activeWaveSection.includes('### T-540'),
+    `Case 28 FAIL: T-540 must not remain under BACKLOG Active Wave, got:\n${activeWaveSection}`
+  );
+  assert.ok(
+    /### T-541 — Close the four T-540 security residuals — follow-up audit\n- \*\*Status:\*\* planned/.test(activeWaveSection),
+    `Case 28 FAIL: T-541 must remain under BACKLOG Active Wave, still planned (not fabricated to merged), got:\n${activeWaveSection}`
+  );
+
+  // (c) The validator (run inside --close-session) genuinely passes — not a
+  // false-healthy reading over corrupted state (that was the tell in the
+  // real incident: the fabrication passed validation because the mislabeled
+  // T-541 block had already been archived out of every checked section).
+  assert.ok(
+    /Validator passed/.test(result.stdout),
+    `Case 28 FAIL: expected validator to pass, got:\n${result.stdout}\nstderr: ${result.stderr}`
+  );
+
+  console.log('Case 28 passed: close-session over the incident layout keeps T-541 planned in both artifacts/sections and does not archive it; only T-540 moves');
+
+  cleanup(repoDir);
+}
+
+console.log('All T-542 assertions passed.');

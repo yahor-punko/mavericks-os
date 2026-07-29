@@ -227,8 +227,126 @@ function run(root) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 5 (T-485): four-section adopter layout — "## Active tasks" is
+// followed by "## Parked — Wave N" and "## Deferred tasks" before
+// "## Recently completed tasks". A skeleton entry created for a BACKLOG task
+// missing from TASK_STATUS.md must land inside "## Active tasks" (not the
+// intermediate sections), and a second sync-status pass over the resulting
+// file must create no duplicate.
+// ---------------------------------------------------------------------------
+{
+  const root = path.join(TMP_DIR, 'four-section-fixture');
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(
+    path.join(root, 'BACKLOG.md'),
+    `# Backlog
+
+## Active Wave
+### T-904 — Fixture task in a four-section adopter layout
+- **Status:** in_progress
+- **Owner role:** developer
+- **Verification type:** runtime
+`,
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(root, 'TASK_STATUS.md'),
+    `# Task Status
+
+## Active tasks
+
+### T-800 — Pre-existing active task
+- **Status:** in_progress
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** —
+- **Evidence:** —
+
+## Parked — Wave 3
+### T-700 — A parked task
+- **Status:** planned
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** —
+- **Evidence:** —
+
+## Deferred tasks
+### T-600 — A deferred task
+- **Status:** deferred
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** —
+- **Evidence:** —
+
+## Recently completed tasks
+### T-500 — A completed task
+- **Status:** merged
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** —
+- **Evidence:** commit: abc1234
+`,
+    'utf8'
+  );
+
+  const result = run(root);
+  assert.strictEqual(result.status, 0, `Test 5 FAIL: expected exit 0, got ${result.status}`);
+  assert.strictEqual(
+    result.stderr,
+    'sync-status: created T-904 entry\n',
+    `Test 5 FAIL: expected exactly the created line, got: ${JSON.stringify(result.stderr)}`
+  );
+
+  const updated = fs.readFileSync(path.join(root, 'TASK_STATUS.md'), 'utf8');
+
+  // Assertion (a): the new entry lands inside "## Active tasks", i.e. before
+  // "## Parked — Wave 3" (the next "## " heading after "## Active tasks"),
+  // and NOT inside the intermediate Parked/Deferred sections.
+  const activeSectionStart = updated.indexOf('## Active tasks');
+  const parkedSectionStart = updated.indexOf('## Parked — Wave 3');
+  const deferredSectionStart = updated.indexOf('## Deferred tasks');
+  const newEntryIdx = updated.indexOf('### T-904');
+  assert.ok(
+    activeSectionStart !== -1 && parkedSectionStart !== -1 && newEntryIdx !== -1,
+    `Test 5 FAIL: expected all anchor sections and the new entry to be present, got:\n${updated}`
+  );
+  assert.ok(
+    newEntryIdx > activeSectionStart && newEntryIdx < parkedSectionStart,
+    `Test 5 FAIL: expected T-904 entry to land inside "## Active tasks" (between index ${activeSectionStart} and ${parkedSectionStart}), got at index ${newEntryIdx}:\n${updated}`
+  );
+  assert.ok(
+    newEntryIdx < deferredSectionStart,
+    `Test 5 FAIL: expected T-904 entry to land before "## Deferred tasks", got at index ${newEntryIdx}:\n${updated}`
+  );
+  console.log('Test 5a passed: new skeleton entry lands inside "## Active tasks", not an intermediate section');
+
+  // Assertion (b): a second sync-status pass over the resulting file (which
+  // now already contains T-904 in BACKLOG's Active Wave AND in TASK_STATUS's
+  // Active tasks section) must be a silent no-op — no duplicate T-904 entry,
+  // no further output. This is the assertion that proves the
+  // self-multiplication bug (an entry misplaced outside "## Active tasks"
+  // being endlessly re-created) is dead.
+  const secondRun = run(root);
+  assert.strictEqual(secondRun.status, 0, `Test 5b FAIL: expected exit 0, got ${secondRun.status}`);
+  assert.strictEqual(
+    Buffer.byteLength(secondRun.stdout, 'utf8') + Buffer.byteLength(secondRun.stderr, 'utf8'),
+    0,
+    `Test 5b FAIL: expected a silent no-op on second run, got stdout=${JSON.stringify(secondRun.stdout)} stderr=${JSON.stringify(secondRun.stderr)}`
+  );
+
+  const afterSecondRun = fs.readFileSync(path.join(root, 'TASK_STATUS.md'), 'utf8');
+  const occurrences = (afterSecondRun.match(/### T-904\b/g) || []).length;
+  assert.strictEqual(
+    occurrences,
+    1,
+    `Test 5b FAIL: expected exactly one T-904 entry after a second sync-status pass, found ${occurrences}, got:\n${afterSecondRun}`
+  );
+  console.log('Test 5b passed: a second sync-status pass creates no duplicate T-904 entry (self-multiplication is dead)');
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
 
-console.log('\nAll T-419 assertions passed.');
+console.log('\nAll T-419/T-485 assertions passed.');

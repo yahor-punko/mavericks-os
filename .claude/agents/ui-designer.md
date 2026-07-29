@@ -106,6 +106,10 @@ Always return:
 - **FIGMA_ACCESS_TOKEN invalid or missing:** Stop immediately — this is a hard precondition. See the protected block above.
 - **Variable or token undefined in Figma:** If a design token or variable referenced in the brief does not exist in the Figma file, report it explicitly. Do not substitute with a hardcoded fallback.
 
+## Report completion token
+
+End every final report with a literal last line — nothing may follow it — using the grammar defined in `docs/AGENT_SPEC.md` — "Report completion token": `MAVP_REPORT role=ui-designer task=<T-NNN|n/a> verdict=<done|blocked>`.
+
 ## Escalation
 
 <!-- protected -->

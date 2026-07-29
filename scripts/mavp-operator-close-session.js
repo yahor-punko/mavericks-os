@@ -48,6 +48,22 @@ function resolveMavericksScriptsDir() {
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
 const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode, printRepoIdentityHeader, getCommitHashesReachable } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
+// T-530: checkVersionBump()'s release-awareness reads the public mirror's
+// tags EXCLUSIVELY through these check-changelog-frozen.js exports — never
+// a re-implemented `git -C <mirror> ...` call. See that file's GIT_DIR
+// HARDENING (T-517) comment: git sets GIT_DIR in the environment of
+// processes it invokes, and GIT_DIR TAKES PRECEDENCE OVER `-C`, so a naive
+// mirror-directed git call here would silently read the PRIVATE repo's tags
+// instead whenever an ambient GIT_DIR happens to be set — precisely the
+// scenario this feature exists to get right, in the dangerous direction
+// (the private repo can and does carry version tags ahead of a mirror
+// release). isGitRepo()/getMirrorTags() already strip GIT_DIR (and its
+// GIT_REPO_ENV_KEYS siblings) via mirrorGitEnv() before every mirror-
+// directed call, so reusing them here inherits that hardening for free —
+// this file never calls mirrorGitEnv() itself; it is exercised transitively
+// through isGitRepo()/getMirrorTags(), which is the intended reuse shape.
+const { resolveMirrorHome, getMirrorTags, isGitRepo } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'check-changelog-frozen.js'));
+
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
 const PROCESS_STATE_MD = path.join(ROOT, 'PROCESS_STATE.md');
@@ -65,6 +81,15 @@ const GREEN = '\x1b[32m';
 const YELLOW = '\x1b[33m';
 const RED = '\x1b[31m';
 const CYAN = '\x1b[36m';
+
+// T-530: the two version-bump advisory lines, hoisted into constants so
+// both print call sites and the test suite reference the SAME literal —
+// tests assert on these exported constants directly (whole-line assertion,
+// not a re-typed substring), which is what makes the assertion catch a
+// mutant that prints a different (or missing) line rather than passing for
+// the wrong reason.
+const VERSION_BUMP_LINE = `${YELLOW}⚠ scripts/ changed since last version bump — consider bumping scripts/mavp-version.js before git push${RESET}`;
+const VERSION_UNRELEASED_LINE = `${CYAN}ℹ scripts/ changed but the current version is unreleased (untagged on the mirror) and still accumulating — no bump advised yet${RESET}`;
 
 function readUtf8(p) { return fs.readFileSync(p, 'utf8'); }
 function writeUtf8(p, content) { fs.writeFileSync(p, content, 'utf8'); }
@@ -158,6 +183,9 @@ function findTasksWithNoEvidence(markdown) {
 
   function finalizeBlock(endIdx) {
     if (currentId === null) return;
+    // Deliberately NOT derived from IN_FLIGHT_STATUSES (T-525) — this set names the two
+    // statuses eligible for the close-session merge prompt, a narrower and semantically
+    // distinct purpose; a needs-fix task must never be prompted for merge.
     const targetStatuses = new Set(['dev_done', 'qa_passed']);
     if (!targetStatuses.has(currentStatus)) return;
 
@@ -486,13 +514,39 @@ function parseActiveTasks(markdown) {
   });
 }
 
+function escapeRegExpLiteral(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * T-542: returns true only when `line` is a `### ` heading whose LEADING
+ * task ID equals `taskId` exactly — never when `taskId` merely appears
+ * somewhere inside the heading text (e.g. a title that *mentions* another
+ * task's ID, such as "### T-541 — ... T-540 residuals ..." matching a
+ * lookup for "T-540"). Accepts both the usual "### T-NNN — Title" shape
+ * and a heading with no " — " separator at all (a heading whose leading ID
+ * has trailing characters glued on, e.g. "### T-540x", is NOT matched —
+ * the ID must be followed by either " —" or end-of-line/trailing whitespace).
+ */
+function isTaskHeadingFor(line, taskId) {
+  if (!/^###\s+/.test(line)) return false;
+  const re = new RegExp('^###\\s+' + escapeRegExpLiteral(taskId) + '(\\s+—|\\s*$)');
+  return re.test(line);
+}
+
+/** Extracts the leading "T-NNN" id from a "### ..." heading line, or null. */
+function headingLeadingTaskId(line) {
+  const m = line.match(/^###\s+(T-\d+)/);
+  return m ? m[1] : null;
+}
+
 function updateTaskStatusField(markdown, taskId, field, value) {
   const lines = markdown.split(/\r?\n/);
   let inTask = false;
 
   for (let i = 0; i < lines.length; i++) {
     if (/^###\s+/.test(lines[i])) {
-      inTask = lines[i].includes(taskId + ' ') || lines[i].includes(taskId + ' —');
+      inTask = isTaskHeadingFor(lines[i], taskId);
     }
     if (inTask && new RegExp(`^- \\*\\*${field}:\\*\\*`).test(lines[i])) {
       lines[i] = `- **${field}:** ${value}`;
@@ -508,7 +562,7 @@ function moveTaskToCompleted(markdown, taskId) {
   let taskStart = -1;
   let taskEnd = lines.length;
   for (let i = 0; i < lines.length; i++) {
-    if (/^###\s+/.test(lines[i]) && (lines[i].includes(taskId + ' ') || lines[i].includes(taskId + ' —'))) {
+    if (isTaskHeadingFor(lines[i], taskId)) {
       taskStart = i;
     } else if (taskStart !== -1 && (/^###\s+/.test(lines[i]) || /^##\s+/.test(lines[i]))) {
       taskEnd = i;
@@ -517,6 +571,11 @@ function moveTaskToCompleted(markdown, taskId) {
   }
 
   if (taskStart === -1) return markdown;
+
+  // Belt-and-braces identity invariant on top of the anchored matcher above:
+  // the block we are about to move must genuinely be headed by taskId, not
+  // some other block the matcher might (in a future regression) have found.
+  if (headingLeadingTaskId(lines[taskStart]) !== taskId) return markdown;
 
   const taskBlock = lines.slice(taskStart, taskEnd);
   const remaining = [...lines.slice(0, taskStart), ...lines.slice(taskEnd)];
@@ -665,8 +724,80 @@ function syncActiveSlicesPreValidator() {
 }
 
 /**
+ * T-530: read the current framework version out of <ROOT>/scripts/mavp-version.js's
+ * raw text. Deliberately NOT require()'d — require() would cache against
+ * the first-loaded path and can't re-read a different ROOT across repeated
+ * calls/tests, and ROOT may be a fixture project root carrying its own
+ * throwaway mavp-version.js rather than this checkout's real one. Anchored
+ * to the `module.exports = { MAVERICKS_VERSION: 'x.y.z' }` declaration
+ * shape (same regex mavp-publish-release.js's parseMavericksVersion() uses)
+ * so an earlier prose comment mentioning the constant can never shadow the
+ * real value. Returns null when the file is absent or unparsable.
+ */
+function readCurrentMavericksVersion() {
+  try {
+    const versionFilePath = path.join(ROOT, 'scripts', 'mavp-version.js');
+    const content = fs.readFileSync(versionFilePath, 'utf8');
+    const m = content.match(/module\.exports\s*=\s*\{[^}]*\bMAVERICKS_VERSION\s*:\s*['"]([^'"]+)['"][^}]*\}/);
+    return m ? m[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * T-530: resolve the public mirror's local tags, exclusively through
+ * check-changelog-frozen.js's own exports (resolveMirrorHome/isGitRepo/
+ * getMirrorTags — all of which route through mirrorGitEnv() internally).
+ * See the require() comment near the top of this file for why a
+ * re-implemented `git -C <mirror> ...` call here would be actively
+ * dangerous (T-517's GIT_DIR-precedence trap). No network fetch beyond
+ * whatever getMirrorTags() itself already does (best-effort, ~4s timeout,
+ * swallowed on failure) — this function adds none of its own.
+ *
+ * Returns a Set<string> of tag names, or null when the mirror can't be
+ * resolved/read at all (caller degrades to pre-T-530 "always advise"
+ * behavior in that case).
+ */
+function resolveMirrorTagsForVersionBump() {
+  try {
+    const mirrorHome = resolveMirrorHome();
+    if (!mirrorHome || !fs.existsSync(mirrorHome) || !isGitRepo(mirrorHome)) return null;
+    return getMirrorTags(mirrorHome);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * T-530: pure classification of the scripts/-drifted-since-bump signal
+ * against the mirror's tag state — no git/fs, directly unit-testable.
+ *
+ *   null                             — no drift at all; nothing to advise on.
+ *   { kind: 'bump', changes }        — advise a bump (pre-T-530 behavior):
+ *                                       either the current version IS
+ *                                       already tagged on the mirror, or
+ *                                       the mirror/tag state is unknown
+ *                                       (degrade unchanged when the mirror
+ *                                       is unresolvable — `tags` is null).
+ *   { kind: 'unreleased', changes }  — current version is NOT tagged on the
+ *                                       mirror — informational only, no
+ *                                       bump advice (bumping now would
+ *                                       orphan the still-unreleased,
+ *                                       still-accumulating version).
+ */
+function classifyVersionBumpAdvisory({ changes, currentVersion, tags }) {
+  if (!changes) return null;
+  if (!tags || !currentVersion) return { kind: 'bump', changes };
+  const tagName = currentVersion.startsWith('v') ? currentVersion : `v${currentVersion}`;
+  return tags.has(tagName) ? { kind: 'bump', changes } : { kind: 'unreleased', changes };
+}
+
+/**
  * Check whether scripts/ changed after the last version bump in mavp-version.js.
- * Returns a non-empty string (commit list) if a bump is needed, null otherwise.
+ * Returns null when there's no drift at all, otherwise a release-aware
+ * classification object from classifyVersionBumpAdvisory() (T-530) — see
+ * that function's doc comment for the three possible shapes.
  */
 function checkVersionBump() {
   try {
@@ -694,8 +825,14 @@ function checkVersionBump() {
       { encoding: 'utf8', cwd: ROOT }
     );
     if (changesResult.status !== 0) return null;
-    const changes = changesResult.stdout.trim();
-    return changes || null;
+    const changes = changesResult.stdout.trim() || null;
+    if (!changes) return null;
+
+    // T-530: release-awareness — classify against the mirror's tag state
+    // before deciding whether to advise a bump.
+    const currentVersion = readCurrentMavericksVersion();
+    const tags = resolveMirrorTagsForVersionBump();
+    return classifyVersionBumpAdvisory({ changes, currentVersion, tags });
   } catch {
     return null; // git unavailable or error — skip silently
   }
@@ -1164,10 +1301,12 @@ async function runNonInteractive(args) {
     }
   }
 
-  // Version bump warning
+  // Version bump warning — T-530: release-aware (see classifyVersionBumpAdvisory()).
   const versionDrift = checkVersionBump();
-  if (versionDrift) {
-    console.log(`\n${YELLOW}⚠ scripts/ changed since last version bump — consider bumping scripts/mavp-version.js before git push${RESET}`);
+  if (versionDrift && versionDrift.kind === 'bump') {
+    console.log(`\n${VERSION_BUMP_LINE}`);
+  } else if (versionDrift && versionDrift.kind === 'unreleased') {
+    console.log(`\n${VERSION_UNRELEASED_LINE}`);
   }
 
   // Deploy queue warning — informational only, does not block session close
@@ -1250,6 +1389,9 @@ async function runInteractive() {
   // [m]/[n]/[k]/[enter] question as any other active task, and Enter-skipping
   // one left its already-merged status untouched in the Active tasks section,
   // which then counted as "remaining" and silently blocked wave completion.
+  // Deliberately NOT derived from IN_FLIGHT_STATUSES (T-525) — this is the complementary
+  // terminal-completed set for wave-archival auto-move, a distinct purpose from "what
+  // counts as in-flight work"; a needs-fix task is neither in this set nor eligible here.
   const alreadyTerminalStatuses = new Set(['merged', 'deployed_dev', 'deployed_prod']);
   const alreadyTerminalTasks = activeTasks.filter(t => alreadyTerminalStatuses.has(t.status));
   for (const task of alreadyTerminalTasks) {
@@ -1419,10 +1561,12 @@ async function runInteractive() {
     }
   }
 
-  // Version bump warning
+  // Version bump warning — T-530: release-aware (see classifyVersionBumpAdvisory()).
   const versionDrift = checkVersionBump();
-  if (versionDrift) {
-    console.log(`\n${YELLOW}⚠ scripts/ changed since last version bump — consider bumping scripts/mavp-version.js before git push${RESET}`);
+  if (versionDrift && versionDrift.kind === 'bump') {
+    console.log(`\n${VERSION_BUMP_LINE}`);
+  } else if (versionDrift && versionDrift.kind === 'unreleased') {
+    console.log(`\n${VERSION_UNRELEASED_LINE}`);
   }
 
   // Deploy queue warning — informational only, does not block session close
@@ -1516,4 +1660,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable };
+module.exports = { moveTaskToCompleted, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE };

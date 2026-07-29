@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/yahor-punko/mavericks-os/actions/workflows/ci.yml/badge.svg)](https://github.com/yahor-punko/mavericks-os/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Node.js 18+](https://img.shields.io/badge/node-18%2B-brightgreen.svg)](https://nodejs.org/)
+[![Node.js 20+](https://img.shields.io/badge/node-20%2B-brightgreen.svg)](https://nodejs.org/)
 
 Reliable, auditable delivery for Claude Code agents.
 
@@ -26,11 +26,19 @@ across multiple repositories.
 
 *Close Claude Code, come back tomorrow — the wave goal and handoff are handed to you, not reconstructed from chat history.*
 
+Anyone juggling more than one project knows this trap: you close the
+laptop mid-thought, get pulled away, and by the next session you're
+rebuilding what you were doing from memory or a long scroll of chat
+history — both slow, and easy to get wrong. Mavericks writes that down
+instead: what was in progress and what to do next live in the project
+itself, so the next session opens with a clear starting point, not a
+guess. See [Pick up exactly where you left off](#pick-up-exactly-where-you-left-off).
+
 ## Three results
 
-- **Close it, come back tomorrow — no state archaeology.** State lives in versioned artifacts; every session resumes from written state, not a chat log.
-- **Auditable runs.** You can see — and diff — why the system did what it did, because state and decisions live in files, not model memory.
-- **Drift caught before commit.** A validator blocks out-of-sync BACKLOG/TASK_STATUS before it reaches a commit (exit 2).
+- **Close it, come back tomorrow — no state archaeology.** State lives in versioned artifacts; every session resumes from written state, not a chat log. See [Pick up exactly where you left off](#pick-up-exactly-where-you-left-off).
+- **Auditable runs.** You can see — and diff — why the system did what it did, because state and decisions live in files, not model memory. See [What actually carries over between sessions](#what-actually-carries-over-between-sessions).
+- **Drift caught before commit.** A validator blocks out-of-sync BACKLOG/TASK_STATUS before it reaches a commit. See [A status that isn't written down isn't real](#a-status-that-isnt-written-down-isnt-real).
 
 ## Case study: Synth
 
@@ -112,7 +120,7 @@ See **Manual install** below (or **[`docs/core/BOOTSTRAP_GUIDE.md`](docs/core/BO
 
 ### Requirements
 
-- Node.js 18+
+- Node.js 20+
 - Claude Code CLI (`claude`)
 - git
 
@@ -179,6 +187,7 @@ For the full step-by-step, including editing `PROCESS_STATE.json`, adding your f
 ./scripts/mavp-operator --watch          # dashboard with auto-refresh (r refresh, s snapshot, q quit)
 ./scripts/mavp-operator --snapshot       # text snapshot for agent context
 ./scripts/mavp-operator --close-session  # end-of-session ritual (results review + optional git push)
+./scripts/mavp-operator --handoff        # capture context for the next session
 ./scripts/mavp-operator --new-task       # interactive task creation
 ./scripts/mavp-operator --archive-merged # archive merged tasks mid-wave
 ./scripts/mavp-operator --version        # framework version
@@ -228,13 +237,80 @@ The recurring failure mode was not code generation; it was continuity:
 reconstructing project state at the start of a session and losing the
 rationale behind decisions when chat context rolled over.
 
-Mavericks addresses that with versioned, artifact-first state; a strict
-separation between the `main_agent` orchestrator and specialised execution
-and review roles; and validation that surfaces backlog/task-state drift
-before commit.
+Mavericks addresses that with versioned, artifact-first state (see [Pick up exactly where you left off](#pick-up-exactly-where-you-left-off) and
+[A status that isn't written down isn't real](#a-status-that-isnt-written-down-isnt-real) below); a strict separation between the `main_agent` orchestrator and
+specialised execution and review roles; and validation that surfaces
+backlog/task-state drift before commit.
 
 Every mechanism in this repository was retained because it solved a
 recurring problem in active delivery.
+
+### Pick up exactly where you left off
+
+Losing the thread of a project between sessions is the everyday
+failure this framework exists to prevent — not by asking for better
+notes, but by having the project keep its own notes and hand them back
+automatically.
+
+Every session opens with a short brief, worked out fresh each time,
+never from a hand-kept list:
+
+- **What's in flight** — read straight from the task files, so it
+  can't quietly go stale.
+- **One next action** — a single line telling you what to do next.
+- **What changed while you were away** — files touched since the last
+  time a session was formally closed, computed from the project's own
+  git history, not a guess.
+- **A handoff note, when one was left** — mid-thought context, written
+  to `HANDOFF.md`, handed back immediately.
+
+For example (illustrative, not a literal transcript) — just two of
+the four parts above, the changed-files list and the next action:
+
+```
+Must read:
+- lambda/handler.py
+Next action: T-231 → developer → fix the retry bug
+```
+
+`HANDOFF.md` is not written automatically when a session ends. Writing
+it is a separate, deliberate step (`--handoff`); closing a session
+(`--close-session`) does not do it, and it's single-use — delivered
+once at the next session's start, then deleted. The next-action line
+itself stays narrow on purpose — one instruction, never a running
+commentary; anything longer belongs in the handoff note instead.
+
+### A status that isn't written down isn't real
+
+Telling an agent something is done, and having it actually be done,
+are two different things — this section closes that gap. A task's
+status changes only when it's written into the project's own task
+files, never because someone said so in conversation.
+
+Two files carry that status side by side, and they're required to
+agree. A check runs automatically after every edit to either one; it
+doesn't stop the edit, it just flags the moment they drift apart, so
+the gap is caught immediately instead of days later. The strictest
+version of that check sits at the door to history: a task can't be
+recorded as fully merged without pointing to the real code change that
+shipped it — get that wrong and the record can't be committed. Full
+state machine and evidence rules:
+[`docs/core/TASK_LIFECYCLE.md`](docs/core/TASK_LIFECYCLE.md).
+
+### What actually carries over between sessions
+
+Closing a chat and starting a new one never loses anything that
+matters, because none of it — a task's status, its history, a
+decision made along the way — ever lived in an agent's memory to begin
+with; all of it lives in the files described above. Every specialised
+agent doing a piece of work is briefed fresh from those same files
+each time, with no memory of its own carried in from a previous run.
+
+What does travel forward isn't a fact about any one task — it's
+practice: lessons about what tends to go wrong, folded back into the
+written instructions those agents read next time, only after a person
+has reviewed and approved the change. There is no separate memory
+store behind any of this — the files are the only place state lives.
 
 ### Cross-repo coordination
 
@@ -304,6 +380,9 @@ sibling repo A      sibling repo B      sibling repo C      sibling repo N
 
 ## Project artifacts
 
+For why these files are treated as the truth rather than notes about
+it, see [A status that isn't written down isn't real](#a-status-that-isnt-written-down-isnt-real) above.
+
 | File | Purpose |
 |---|---|
 | `BACKLOG.md` | All tasks — status, owner, dependencies, acceptance criteria |
@@ -335,7 +414,7 @@ Deploy statuses (`deployed_dev`, `deployed_prod`) are optional — projects with
 
 ## Roles
 
-Every sub-agent role has a spec in [`.claude/agents/`](.claude/agents/) — pass the relevant file to the sub-agent as context when spawning it. The main orchestrator agent (plans, coordinates, accepts/rejects sub-agent work, drives momentum) does not have its own spec file — it *is* the session you're running, on Opus 4.8.
+Every sub-agent role has a spec in [`.claude/agents/`](.claude/agents/) — pass the relevant file to the sub-agent as context when spawning it. The main orchestrator agent (plans, coordinates, accepts/rejects sub-agent work, drives momentum) does not have its own spec file — it *is* the session you're running, on the `opus` alias (resolves to the latest Opus generation).
 
 | Role | Responsibility | Model | Prompt |
 |---|---|---|---|
@@ -345,7 +424,7 @@ Every sub-agent role has a spec in [`.claude/agents/`](.claude/agents/) — pass
 | **Security reviewer** | Security review for new inputs/outputs, auth flows, integrations — `security_passed` or `security_needs_fix` (optional per task) | Sonnet (→ Opus for a full, non-checklist review) | [`.claude/agents/security-reviewer.md`](.claude/agents/security-reviewer.md) |
 | **Product/docs** | Backlog clarity, process docs, artifact sync | Sonnet (→ Opus for complex slices) | [`.claude/agents/product-docs.md`](.claude/agents/product-docs.md) |
 | **Technical writer** | User-facing docs — README, getting-started guides, API reference, changelog | Sonnet (→ Opus for complex slices) | [`.claude/agents/technical-writer.md`](.claude/agents/technical-writer.md) |
-| **Architect** | Pre-task design brief and task decomposition (mandatory gate for every task, sole exception the XS fast lane — see [`docs/core/ORCHESTRATION_RULES.md`](docs/core/ORCHESTRATION_RULES.md)) | Fable 5 (primary) → Opus 4.8 (fallback) | [`.claude/agents/architect.md`](.claude/agents/architect.md) |
+| **Architect** | Pre-task design brief and task decomposition (mandatory gate for every task, sole exception the XS fast lane — see [`docs/core/ORCHESTRATION_RULES.md`](docs/core/ORCHESTRATION_RULES.md)) | Fable 5 (primary) → Opus (fallback) | [`.claude/agents/architect.md`](.claude/agents/architect.md) |
 | **Analyst** | External technology and landscape research, ahead of architect review | Sonnet (→ Opus for complex slices) | [`.claude/agents/analyst.md`](.claude/agents/analyst.md) |
 | **Frontend design** | Visual/interaction design for frontend surfaces | Sonnet (→ Opus for complex slices) | [`.claude/agents/frontend-design.md`](.claude/agents/frontend-design.md) |
 | **UI designer** | UI component and layout design | Sonnet (→ Opus for complex slices) | [`.claude/agents/ui-designer.md`](.claude/agents/ui-designer.md) |

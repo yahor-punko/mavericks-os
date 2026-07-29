@@ -41,7 +41,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { buildDeployQueue, classifyNextAction, computeDueRechecks, computeMustRead, generateProcessStateMd, getDeployPendingForRepo, parseBlockedBy, parseTasksWithRepo, readPermissionMode, resolveContextBundlePath } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { buildDeployQueue, classifyNextAction, computeDueRechecks, computeMustRead, generateProcessStateMd, getDeployPendingForRepo, IN_FLIGHT_STATUSES, parseBlockedBy, parseHold, parseTasksWithRepo, readPermissionMode, resolveContextBundlePath } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
@@ -194,6 +194,7 @@ function parseBacklogTaskMeta(backlogMarkdown) {
     const repoMatch = block.match(/^- \*\*Repos?:\*\*\s+(.+)$/m);
     const prodPrereqMatch = block.match(/^- \*\*Prod prerequisites:\*\*\s+(.+)$/m);
     const blockedByMatch = block.match(/^- \*\*Blocked by:\*\*\s+(.+)$/m);
+    const holdMatch = block.match(/^- \*\*Hold:\*\*\s+(.+)$/m);
     const prodPrerequisites = prodPrereqMatch
       ? prodPrereqMatch[1].split(',').map(s => s.trim()).filter(Boolean)
       : [];
@@ -202,6 +203,7 @@ function parseBacklogTaskMeta(backlogMarkdown) {
       repo: repoMatch ? normalizeWhitespace(repoMatch[1]) : null,
       prodPrerequisites,
       blockedByRaw: blockedByMatch ? normalizeWhitespace(blockedByMatch[1]) : null,
+      holdRaw: holdMatch ? normalizeWhitespace(holdMatch[1]) : null,
     };
   }
   return meta;
@@ -270,13 +272,49 @@ function parseModuleRegistry() {
   }
 }
 
+// Status priority: lower number = higher priority. Module-scope (not
+// function-local) and exported (T-528) so scripts/test-status-priority-
+// agreement.js can assert it stays in agreement with IN_FLIGHT_STATUSES
+// (mavp-operator-lib.js) without spawning a subprocess. Every member of
+// IN_FLIGHT_STATUSES plus 'planned' MUST have an explicit entry here —
+// see the exported test for the enforced invariant.
+const STATUS_PRIORITY = {
+  ready_for_qa: 1,
+  qa_in_progress: 1,
+  dev_done: 2,
+  security_review: 2,
+  security_passed: 2,
+  ux_review: 2,
+  ux_passed: 2,
+  in_progress: 3,
+  needs_fix: 3,
+  security_needs_fix: 3,
+  ux_needs_fix: 3,
+  planned: 4,
+};
+
+// T-528: fail-safe default for the in-flight candidate call site's
+// STATUS_PRIORITY lookup. A candidate reaching that lookup has, by
+// construction, already passed the IN_FLIGHT_STATUSES filter (see
+// inFlightCandidates below) — so an unrecognised status there is still
+// active work, not absent work. The correct fail-safe rank is therefore
+// the active-development tier (3), not the historical 99 (which ranked
+// BELOW planned at 4 and silently misrouted next_action to fresh work
+// while an in-flight task sat unaddressed). The other two STATUS_PRIORITY
+// lookups (plannedCandidates / plannedFromActive below) are pre-filtered
+// to PLANNED_STATUSES = {'planned'}, which always has an explicit entry
+// (4) — their `?? 99` fallback is unreachable in practice and is left
+// unchanged.
+const IN_FLIGHT_FALLBACK_PRIORITY = 3;
+
 /**
  * Compute next_action dynamically from active tasks + dependency graph in BACKLOG.
  *
  * Priority order (high to low):
  *   1. ready_for_qa, qa_in_progress — needs QA immediately
  *   2. dev_done, security_review, security_passed, ux_review, ux_passed — awaiting next review stage
- *   3. in_progress, needs_fix — active development
+ *   3. in_progress, needs_fix, security_needs_fix, ux_needs_fix — active development
+ *      (including tasks actively being re-worked after a failed review)
  *   4. planned — not started
  *
  * In-flight tasks (priority 1–3) always take precedence over planned tasks,
@@ -288,20 +326,6 @@ function parseModuleRegistry() {
  * @returns {string|null}
  */
 function computeNextAction(activeTasks, plannedTasks, staticFallback) {
-  // Status priority: lower number = higher priority
-  const STATUS_PRIORITY = {
-    ready_for_qa: 1,
-    qa_in_progress: 1,
-    dev_done: 2,
-    security_review: 2,
-    security_passed: 2,
-    ux_review: 2,
-    ux_passed: 2,
-    in_progress: 3,
-    needs_fix: 3,
-    planned: 4,
-  };
-
   const mergedIds = new Set(
     activeTasks.filter(t => t.status === 'merged').map(t => t.id)
   );
@@ -323,17 +347,18 @@ function computeNextAction(activeTasks, plannedTasks, staticFallback) {
 
   // Build a combined candidate list: in-flight tasks from TASK_STATUS + planned from BACKLOG.
   // In-flight tasks don't need dependency checks (they are already started or awaiting action).
-  const IN_FLIGHT_STATUSES = new Set([
-    'ready_for_qa', 'qa_in_progress',
-    'dev_done', 'security_review', 'security_passed', 'ux_review', 'ux_passed',
-    'in_progress', 'needs_fix',
-  ]);
+  // IN_FLIGHT_STATUSES is imported from mavp-operator-lib.js — the single shared source of
+  // truth for "what counts as active work" (see parseActiveTask() in that file, used by
+  // --snapshot's Active task panel).
   const PLANNED_STATUSES = new Set(['planned']);
 
-  // Collect in-flight candidates (no dependency gate — they are already in motion)
+  // Collect in-flight candidates (no dependency gate — they are already in motion).
+  // Fallback is IN_FLIGHT_FALLBACK_PRIORITY (3, active-development tier), not 99 —
+  // a candidate here has already passed the IN_FLIGHT_STATUSES filter, so an
+  // unrecognised status is still active work and must not rank below planned (T-528).
   const inFlightCandidates = activeTasks
     .filter(t => IN_FLIGHT_STATUSES.has(t.status))
-    .map(t => ({ task: t, priority: STATUS_PRIORITY[t.status] ?? 99 }));
+    .map(t => ({ task: t, priority: STATUS_PRIORITY[t.status] ?? IN_FLIGHT_FALLBACK_PRIORITY }));
 
   // Collect planned candidates with dependency gate
   const plannedCandidates = (plannedTasks || [])
@@ -541,7 +566,12 @@ function main() {
   const json = readProcessStateJson();
   const md = parseProcessStateMd(readUtf8(PROCESS_STATE_MD));
   const activeTasks = parseActiveTaskStatus(readUtf8(TASK_STATUS_MD));
-  const inFlightStatuses = new Set(['in_progress', 'dev_done', 'ux_review', 'ux_passed', 'security_review', 'security_passed', 'ready_for_qa', 'qa_in_progress']);
+  // IN_FLIGHT_STATUSES is imported from mavp-operator-lib.js — the single shared source
+  // of truth for "what counts as active work" (see the note on that Set's definition
+  // for the deliberate exclusion of qa_passed). Do not redefine a local copy here — a
+  // stale local copy missing needs_fix/security_needs_fix/ux_needs_fix is exactly the
+  // bug this alias replaces (T-525): it silently dropped review-failed in-flight tasks
+  // from active_slices.
   const deployedStatuses = new Set(['deployed_dev', 'deployed_prod']);
 
   // Load module registry and backlog metadata for enriching active_slices output.
@@ -560,23 +590,24 @@ function main() {
   const stage = json?.stage || md.stage || 'unknown';
   const initiative = json?.initiative || md.initiative || 'unknown';
 
+  // Run the validator once, up-front, so its live result (not a stale string
+  // baked into PROCESS_STATE.json) can drive blocker resolution below.
+  const { warning: validatorWarning, warningDetail: validatorWarningDetail } = runValidatorCheck();
+
   // Resolve blocker from PROCESS_STATE.json (preferred) or PROCESS_STATE.md blockers list.
-  // Rule: if any string field in the JSON contains "REPAIR REQUIRED", surface it as
-  // PROCESS_STATE_WARNING so session-start skill halts before creating new tasks.
+  // Rule: surface PROCESS_STATE_WARNING iff the validator we just ran above returned the
+  // exit-2 REPAIR REQUIRED condition — the live validator result is the authoritative
+  // source, not a substring match over PROCESS_STATE.json's narrative fields (wave_goal,
+  // wave_summary, strategy notes can legitimately quote the phrase "REPAIR REQUIRED"
+  // while describing the problem, which previously false-positived this latch — T-512).
   // This check takes priority — even if json.blocker itself contains "REPAIR REQUIRED",
   // normalise to the canonical sentinel value.
   let blocker;
-  if (json) {
-    const hasRepairRequired = Object.values(json).some(
-      (v) => typeof v === 'string' && v.includes('REPAIR REQUIRED')
-    );
-    if (hasRepairRequired) {
-      blocker = 'PROCESS_STATE_WARNING';
-    } else {
-      blocker = json.blocker || null;
-    }
+  const isValidatorRepairRequired = typeof validatorWarning === 'string' && validatorWarning.includes('REPAIR REQUIRED');
+  if (isValidatorRepairRequired) {
+    blocker = 'PROCESS_STATE_WARNING';
   } else {
-    blocker = null;
+    blocker = (json && json.blocker) || null;
   }
   // Fall back to PROCESS_STATE.md blockers list when JSON has no blocker.
   if (!blocker && md.blockers.length > 0) blocker = md.blockers[0];
@@ -613,7 +644,6 @@ function main() {
   const next_action_unverified = Boolean(staticNextAction) && !staticTaskIdMatch;
   const next_action_volatile_facts = nextActionClassification.volatile_facts;
 
-  const { warning: validatorWarning, warningDetail: validatorWarningDetail } = runValidatorCheck();
   const updateNotice = checkFrameworkVersion(json);
   const wave = json?.wave || null;
   const wave_session = json?.wave_session != null ? json.wave_session : null;
@@ -663,7 +693,7 @@ function main() {
 
   // Enrich active_slices with module, context_docs, repo from backlog + module registry
   const activeSlices = activeTasks
-    .filter(t => inFlightStatuses.has(t.status))
+    .filter(t => IN_FLIGHT_STATUSES.has(t.status))
     .map(t => {
       // Prefer module/repo from TASK_STATUS, fall back to BACKLOG
       const bm = backlogMeta[t.id] || {};
@@ -679,6 +709,10 @@ function main() {
       // Additive-only: surface the parsed cross-repo Blocked by: refs (T-393)
       // when the task declares them. Absent field is silently omitted.
       const blockedBy = bm.blockedByRaw ? parseBlockedBy(bm.blockedByRaw) : [];
+      // Additive-only: surface the parsed Hold: field (T-496, DR-005) when the
+      // task declares one, so a deliberately-held task is distinguishable from
+      // a stalled one at session start. Absent field is silently omitted.
+      const hold = bm.holdRaw ? parseHold(bm.holdRaw) : null;
       return {
         ...t,
         ...(moduleId ? { module: moduleId } : {}),
@@ -686,6 +720,7 @@ function main() {
         ...(repo ? { repo } : {}),
         ...(contextBundleExists ? { context_bundle: path.relative(ROOT, contextBundlePath) } : {}),
         ...(blockedBy.length > 0 ? { blocked_by: blockedBy } : {}),
+        ...(hold ? { hold } : {}),
       };
     });
 
@@ -729,9 +764,23 @@ function main() {
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write(`agent summary failed: ${error.message}\n`);
-  process.exitCode = 1;
+// T-528: guard the CLI entry point so this file can also be `require()`d as a
+// module (e.g. by scripts/test-status-priority-agreement.js, to unit-test
+// STATUS_PRIORITY/computeNextAction directly without spawning a subprocess).
+// `node scripts/mavp-operator-agent.js` (the existing CLI path, and how every
+// other test in scripts/test-*.js exercises this file via execFileSync) still
+// runs main() exactly as before — require.main === module only when this file
+// is the process entry point, never when it is require()d.
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`agent summary failed: ${error.message}\n`);
+    process.exitCode = 1;
+  }
 }
+
+// Additive export (T-528) — the CLI JSON output schema (stdout of `node
+// mavp-operator-agent.js`) is unchanged; this only adds a module-require
+// surface for unit tests.
+module.exports = { STATUS_PRIORITY, computeNextAction };

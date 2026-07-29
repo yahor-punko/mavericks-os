@@ -7,6 +7,7 @@
       "Agent(*)",
       "Bash(./scripts/mavp-operator*)",
       "Bash(node scripts/mavp-validator.js*)",
+      "Bash(./scripts/mavp-operator --validate)",
       "Bash(node:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",

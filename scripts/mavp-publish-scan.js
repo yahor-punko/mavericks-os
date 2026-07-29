@@ -164,13 +164,37 @@ function escapeRegex(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// A private name is only useful to the detector if it can ever match the
+// word-boundary-anchored (`\b...\b`) regex buildPrivateNameRegexes builds
+// for it. A name made up entirely of non-word characters (three asterisks, a
+// lone dot, a bare hyphen — anything with no [A-Za-z0-9_]) can never satisfy
+// a `\b` boundary against any real text, so accepting it as a "name" would
+// silently disable detection for that entry while it still counts as a
+// non-empty, well-formed-looking item to any caller that only checks
+// list length (T-510). This is deliberately "must contain at least one word
+// character", NOT "must contain no punctuation" — the latter would also
+// reject this project's real trailing-hyphen prefix form (a name ending in
+// `-`, used to match a family of repo names, e.g. `acme-`), which has
+// exactly one non-word character but plenty of word characters before it
+// and must keep working unmodified. Single source of truth for the rule —
+// used by both parsePrivateNamesList (parse-time refusal, the primary
+// enforcement point) and buildPrivateNameRegexes (defense in depth, in case
+// a caller ever builds regexes from a list that bypassed the parser).
+function isUsablePrivateName(name) {
+  return /\w/.test(name);
+}
+
 // Builds one regex factory per supplied name. Names ending in `-` are
 // treated as a prefix (e.g. `acme-` matches `acme-web`, `acme-locker`,
-// ...); all other names are matched as a whole word.
+// ...); all other names are matched as a whole word. Punctuation-only names
+// (see isUsablePrivateName above) are filtered out here too, even though
+// parsePrivateNamesList already refuses them upstream — this keeps the two
+// call sites unable to disagree by construction rather than by convention.
 function buildPrivateNameRegexes(names) {
   return names
     .map((raw) => raw.trim())
     .filter(Boolean)
+    .filter(isUsablePrivateName)
     .map((name) => {
       if (name.endsWith('-')) {
         const escapedPrefix = escapeRegex(name);
@@ -181,15 +205,89 @@ function buildPrivateNameRegexes(names) {
     });
 }
 
+// Splits/trims/filters a raw comma-separated private-names string into an
+// array of non-empty, trimmed names. This is the SINGLE SOURCE OF TRUTH for
+// that parsing (T-511) — scripts/mavp-publish-build.js imports this exact
+// function for its own mandatory-flag gate instead of carrying a duplicate
+// copy, so the gate and the scanner's actual detection can never disagree on
+// what counts as a valid name. Exported below alongside resolvePrivateNames.
+// This function does NOT know about the MAVP_PRIVATE_NAMES env-var fallback
+// (that policy lives only in resolvePrivateNames, which this repo's build
+// script deliberately does not use — see the file header of
+// mavp-publish-build.js on why the mandatory-flag gate stays argv-only).
+//
+// THROWS (T-510) when any entry, after trim, is non-empty but punctuation-only
+// (see isUsablePrivateName above) — e.g. "good-name,***" throws rather than
+// silently returning ["good-name"]. This is a deliberate fail-closed choice,
+// not a silent-drop: a mixed list is exactly the case where an operator is
+// least likely to notice a silently narrowed detection set (a purely
+// degenerate value like "***" alone would already be caught downstream by
+// the mandatory-flag empty-list gate in mavp-publish-build.js, so the only
+// behavior this predicate needs to add is catching the MIXED case, and
+// refusing loudly there is consistent with how that empty-list gate already
+// treats degenerate input — fail closed, not quietly narrowed). Both call
+// sites (the build script's mandatory-flag gate and the scanner's own
+// main()) must catch this and exit non-zero with the message rather than
+// let it propagate as an uncaught exception.
+function parsePrivateNamesList(raw) {
+  if (!raw) return [];
+  const names = raw
+    .split(',')
+    .map((n) => n.trim())
+    .filter(Boolean);
+  const unusable = names.filter((name) => !isUsablePrivateName(name));
+  if (unusable.length > 0) {
+    throw new Error(
+      'parsePrivateNamesList: refusing punctuation-only private name(s) — ' +
+        `${JSON.stringify(unusable)} — these have no word characters and can ` +
+        'never match the word-boundary-anchored detection regex, so accepting ' +
+        'them would silently disable detection for that entry. Remove or fix ' +
+        'the invalid name(s) in the --private-names value.'
+    );
+  }
+  return names;
+}
+
 // Resolves the private-name list: --private-names flag takes precedence
 // over MAVP_PRIVATE_NAMES env var. Returns [] if neither is supplied.
 function resolvePrivateNames(cliValue) {
   const raw = cliValue !== null && cliValue !== undefined ? cliValue : process.env.MAVP_PRIVATE_NAMES;
-  if (!raw) return [];
-  return raw
-    .split(',')
-    .map((n) => n.trim())
-    .filter(Boolean);
+  return parsePrivateNamesList(raw);
+}
+
+// ---------------------------------------------------------------------------
+// Category-set assembly — the SINGLE source of truth (T-523)
+// ---------------------------------------------------------------------------
+
+const PRIVATE_NAME_CATEGORY = 'Private repo name';
+
+// Returns the complete detection category set for a run: every always-on
+// BASE_CATEGORIES entry, plus the runtime-supplied private-repo-name category
+// when at least one usable name was supplied (see isUsablePrivateName /
+// buildPrivateNameRegexes above for what "usable" means — a name that can
+// never match is not silently counted as active detection).
+//
+// This is the ONE definition of the category set, and it exists so two
+// callers cannot disagree about what a finding is: main() below uses it for
+// the assembled-tree scan, and scripts/mavp-publish-build.js imports it to
+// scan the composed mirror commit message (T-523) — a second publication
+// channel that must be gated by the IDENTICAL set, not by a lookalike copy.
+// A duplicated security-relevant definition in this pipeline has already had
+// to be de-duplicated once (T-511, parsePrivateNamesList) precisely because
+// the copies could drift apart unnoticed.
+//
+// Pure by design: no logging, no process.exit, no filesystem access, so any
+// caller (CLI, another script, a test) can build the set without side
+// effects. The CLI-only "detection disabled" NOTE stays in main() — that is a
+// reporting concern, not part of the category set.
+function buildCategories(privateNames) {
+  const categories = BASE_CATEGORIES.slice();
+  const names = Array.isArray(privateNames) ? privateNames : [];
+  const regexes = buildPrivateNameRegexes(names);
+  if (regexes.length > 0) {
+    categories.push({ name: PRIVATE_NAME_CATEGORY, regexes });
+  }
+  return categories;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,15 +317,28 @@ function parseArgs(argv) {
 // File walking
 // ---------------------------------------------------------------------------
 
+// Both the assembler (mavp-publish-assemble.js) and the overlay deliberately
+// preserve tracked symlinks as symlinks rather than copying their target's
+// content, so a symlink entry in the assembled tree is itself something that
+// can carry a private reference — its TARGET STRING (e.g. a relative `../`
+// escape into a private sibling directory, or an absolute home-directory
+// filesystem path) ships to the public tree exactly as written. Record symlink entries
+// separately from regular files (`type: 'symlink'` vs `type: 'file'`) so the
+// caller can scan the target string via readlinkSync (see scanSymlinkTarget
+// below) instead of dereferencing the link to read what it points at.
+// Dereferencing would let the scan wander outside the assembled tree
+// entirely — its own hazard — which is why this walk never follows a
+// symlink to recurse into or read through it, only records its presence.
 function walk(dir, out) {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
-    if (entry.isSymbolicLink()) continue; // never follow symlinks
-    if (entry.isDirectory()) {
+    if (entry.isSymbolicLink()) {
+      out.push({ path: full, type: 'symlink' });
+    } else if (entry.isDirectory()) {
       walk(full, out);
     } else if (entry.isFile()) {
-      out.push(full);
+      out.push({ path: full, type: 'file' });
     }
   }
   return out;
@@ -257,6 +368,31 @@ function isBinary(filePath) {
 // Scanning
 // ---------------------------------------------------------------------------
 
+// Runs every detection category's regexes against a single string of text
+// (a file line, or — for symlinks — the link's target string) and pushes
+// any non-allow-listed match to `findings`. `lineNo` is `null` for a
+// symlink-target scan (there is no line concept for a single target string);
+// callers pass a real 1-based line number for actual file content.
+function scanTextAgainstCategories(filePath, lineNo, text, findings, categories) {
+  for (const category of categories) {
+    for (const makeRegex of category.regexes) {
+      const re = makeRegex();
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        const matchText = m[0];
+        if (isAllowed(category.name, matchText)) continue;
+        findings.push({
+          file: filePath,
+          line: lineNo,
+          category: category.name,
+          match: redact(matchText),
+        });
+        if (m[0].length === 0) re.lastIndex++; // guard against zero-width match loops
+      }
+    }
+  }
+}
+
 function scanFile(filePath, findings, categories) {
   if (isBinary(filePath)) return;
 
@@ -270,27 +406,25 @@ function scanFile(filePath, findings, categories) {
   const lines = content.split(/\r\n|\r|\n/);
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const lineNo = i + 1;
-
-    for (const category of categories) {
-      for (const makeRegex of category.regexes) {
-        const re = makeRegex();
-        let m;
-        while ((m = re.exec(line)) !== null) {
-          const matchText = m[0];
-          if (isAllowed(category.name, matchText)) continue;
-          findings.push({
-            file: filePath,
-            line: lineNo,
-            category: category.name,
-            match: redact(matchText),
-          });
-          if (m[0].length === 0) re.lastIndex++; // guard against zero-width match loops
-        }
-      }
-    }
+    scanTextAgainstCategories(filePath, i + 1, lines[i], findings, categories);
   }
+}
+
+// Scans a symlink's TARGET STRING (via readlinkSync — never dereferenced,
+// never followed) through the same detection categories used for file
+// content. A symlink target is just a string the publish tree ships
+// verbatim, so it is subject to exactly the same private-reference/secret
+// categories as any other shipped text, rather than a bespoke category of
+// its own — see the file-walking comment above `walk()` for why dereferencing
+// is deliberately never attempted here.
+function scanSymlinkTarget(filePath, findings, categories) {
+  let target;
+  try {
+    target = fs.readlinkSync(filePath);
+  } catch {
+    return; // unreadable link — skip
+  }
+  scanTextAgainstCategories(filePath, null, target, findings, categories);
 }
 
 // Redact long matches in reported output so the gate's own console output
@@ -335,37 +469,77 @@ function main() {
     process.exit(1);
   }
 
-  const privateNames = resolvePrivateNames(privateNamesArg);
-  const categories = BASE_CATEGORIES.slice();
-  if (privateNames.length > 0) {
-    categories.push({
-      name: 'Private repo name',
-      regexes: buildPrivateNameRegexes(privateNames),
-    });
-  } else {
+  let privateNames;
+  try {
+    privateNames = resolvePrivateNames(privateNamesArg);
+  } catch (err) {
+    console.error(`ERROR: ${err.message}`);
+    process.exit(1);
+  }
+  // T-523: assembled by the shared buildCategories() above rather than
+  // inline here, so this CLI and mavp-publish-build.js's commit-message gate
+  // can never scan against different category sets.
+  const categories = buildCategories(privateNames);
+  if (!categories.some((c) => c.name === PRIVATE_NAME_CATEGORY)) {
     console.error('NOTE: private-repo-name detection disabled — no --private-names supplied.');
   }
 
   const resolvedDir = path.resolve(targetDir);
-  const files = walk(resolvedDir, []);
+  const entries = walk(resolvedDir, []);
+  const symlinkCount = entries.filter((e) => e.type === 'symlink').length;
 
   const findings = [];
-  for (const file of files) {
-    scanFile(file, findings, categories);
+  for (const entry of entries) {
+    if (entry.type === 'symlink') {
+      scanSymlinkTarget(entry.path, findings, categories);
+    } else {
+      scanFile(entry.path, findings, categories);
+    }
   }
 
   if (findings.length === 0) {
-    console.log(`OK: scanned ${files.length} file(s) in ${resolvedDir} — zero findings.`);
+    console.log(
+      `OK: scanned ${entries.length} entrie(s) (${entries.length - symlinkCount} file(s), ` +
+        `${symlinkCount} symlink target(s)) in ${resolvedDir} — zero findings.`
+    );
     process.exit(0);
   }
 
   console.error(`FOUND ${findings.length} finding(s) in ${resolvedDir}:\n`);
   for (const f of findings) {
     const rel = path.relative(resolvedDir, f.file);
-    console.error(`  [${f.category}] ${rel}:${f.line}  ${f.match}`);
+    const loc = f.line === null ? `${rel} (symlink target)` : `${rel}:${f.line}`;
+    console.error(`  [${f.category}] ${loc}  ${f.match}`);
   }
   console.error(`\nFAILED: ${findings.length} finding(s) — see above.`);
   process.exit(1);
 }
 
-main();
+// Exported for the T-505 regression test (test-publish-scan-symlink.js) to
+// exercise walk()/scanSymlinkTarget()/scanTextAgainstCategories() directly
+// against fixture symlinks — mirrors the module.exports pattern already used
+// by check-publish-manifest.js. CLI behavior is unchanged: main() still runs
+// unconditionally when this file is executed directly.
+//
+// T-523 adds buildCategories/PRIVATE_NAME_CATEGORY: scripts/mavp-publish-
+// build.js imports them (together with the already-exported
+// scanTextAgainstCategories) to scan the composed mirror commit message
+// through this scanner's exact category set, with no duplicated assembly and
+// no temp file.
+module.exports = {
+  walk,
+  scanFile,
+  scanSymlinkTarget,
+  scanTextAgainstCategories,
+  isAllowed,
+  parsePrivateNamesList,
+  resolvePrivateNames,
+  buildCategories,
+  buildPrivateNameRegexes,
+  isUsablePrivateName,
+  PRIVATE_NAME_CATEGORY,
+};
+
+if (require.main === module) {
+  main();
+}

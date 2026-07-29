@@ -39,6 +39,35 @@
 //      scripts/, never a stale MAVERICKS_HOME.
 //   8. (T-435) buildTranscriptArchiveHookCommand() self-preference: same
 //      proof as (7), but for the opt-in transcript-archive SessionStart hook.
+//   9-11. (T-488) migration of the pre-T-304 seeded `--validate` PostToolUse
+//      hook (commit ca43986: a bare `cd <dir> && ./scripts/mavp-operator
+//      --validate 2>&1`, no file filter, no debounce, exit code propagated,
+//      stderr folded into stdout):
+//      9.  legacy fingerprint present ALONE → replaced by the composed
+//          managed command; exactly one PostToolUse Edit|Write entry remains.
+//      10. legacy fingerprint AND the current sentinel-managed entry BOTH
+//          present (two separate PostToolUse array entries) → collapses to
+//          exactly one managed entry, not two.
+//      11. an operator-authored hook that merely *mentions* --validate (e.g.
+//          extra piping after the redirect) but does not match the exact
+//          historical fingerprint → survives byte-identical; a fresh managed
+//          entry is appended alongside it (unrecognised-hook + append-new
+//          behavior unchanged from pre-T-488).
+//      9-unit-security. (T-488, security review round 2) the wildcarded
+//          `<path>` segment of the fingerprint must be path-shaped, not a bare
+//          `.+` — a bare `.+` lets regex backtracking absorb an operator's own
+//          chained command placed between `cd <path>` and the fixed tail.
+//          Covers: a custom command chained with `&&`, a `;`-separated
+//          pre-step, and `$()`/backtick command substitution embedded
+//          directly in the path with no secondary `&&` at all.
+//      9-unit-security2. (T-495) the excluded-character class also rejects a
+//          CR, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR, or U+00A0
+//          NBSP embedded in the path segment — closing the informational
+//          (not exploitable) gap T-488's security review deliberately left
+//          open, one assertion per added character.
+//      9-unit-ordinary-paths. (T-495) the tightened class still matches
+//          ordinary real-world paths: spaces, a tilde, brackets, and an `=`
+//          inside a path segment.
 //
 // Plain node, no npm deps.
 
@@ -47,7 +76,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
-const { composePostToolUseHookCommand } = require('./mavp-install.js');
+const { composePostToolUseHookCommand, isManagedPostToolUseCommand, isLegacySeededValidateHookCommand } = require('./mavp-install.js');
 
 const INSTALL_SCRIPT = path.join(__dirname, 'mavp-install.js');
 // This checkout's own repo root — used as MAVERICKS_HOME when *executing* the
@@ -515,7 +544,236 @@ try {
   );
   console.log('Assertion 8 passed: transcript-archive hook resolves MAVERICKS to its own scripts/, ignoring a deliberately stale MAVERICKS_HOME');
 
-  console.log('\nAll T-404/T-430/T-435 hook-merge assertions passed.');
+  // ============================================================
+  // Assertions 9-11 (T-488): pre-T-304 seeded `--validate` hook migration.
+  // ============================================================
+
+  // Unit-level sanity check on the fingerprint predicate itself, before the
+  // integration-level --update runs below.
+  const unitFixtureDir = '/private/tmp/example-scratch-project';
+  const exactLegacyCmd = `cd ${unitFixtureDir} && ./scripts/mavp-operator --validate 2>&1`;
+  assert.strictEqual(
+    isLegacySeededValidateHookCommand(exactLegacyCmd),
+    true,
+    'FAIL: isLegacySeededValidateHookCommand did not recognise the exact historical fingerprint'
+  );
+  assert.strictEqual(
+    isManagedPostToolUseCommand(exactLegacyCmd),
+    true,
+    'FAIL: isManagedPostToolUseCommand did not recognise the exact historical fingerprint as managed'
+  );
+  const nearMissCmds = [
+    `cd ${unitFixtureDir} && ./scripts/mavp-operator --validate 2>&1 | tee /tmp/hook.log`,
+    `cd ${unitFixtureDir} && ./scripts/mavp-operator --validate --verbose 2>&1`,
+    `cd ${unitFixtureDir} && ./scripts/mavp-operator --validate`,
+    `echo pre && cd ${unitFixtureDir} && ./scripts/mavp-operator --validate 2>&1`,
+    `cd ${unitFixtureDir} && ./scripts/mavp-operator --validate 2>&1; echo done`,
+  ];
+  for (const cmd of nearMissCmds) {
+    assert.strictEqual(
+      isLegacySeededValidateHookCommand(cmd),
+      false,
+      `FAIL: fingerprint falsely matched a near-miss custom hook: ${cmd}`
+    );
+  }
+  console.log('Assertion 9-unit passed: fingerprint matches the exact historical shape only, rejects near-miss variants');
+
+  // Security-review regression (T-488, round 2): the wildcarded `<path>`
+  // segment must be path-shaped, NOT a bare `.+`. A bare `.+` is greedy but
+  // not possessive, so JS regex backtracking can let that segment "absorb" an
+  // operator's own chained pre-step placed between `cd <path>` and the fixed
+  // `&& ./scripts/mavp-operator --validate 2>&1` tail — the engine just
+  // retries with a shorter `.+` match until the fixed suffix literal lines up
+  // later in the string. Confirmed live by the security reviewer with three
+  // shapes; a fourth (command substitution with no secondary `&&` at all) is
+  // added here to prove the fix holds for a different member of the same
+  // "compound shell syntax hiding inside a supposedly-bare path" class, not
+  // just the `&&`-chained one the reviewer happened to hand us.
+  const compoundCommandCmds = [
+    // (a) the reviewer's confirmed shape: a custom command chained between cd and the tail.
+    `cd ${unitFixtureDir} && ./scripts/my-custom-lint.sh && ./scripts/mavp-operator --validate 2>&1`,
+    // (b) a `;`-separated pre-step (no `&&` at all before the tail's own `&&`).
+    `cd ${unitFixtureDir}; ./scripts/mavp-operator --validate 2>&1`,
+    // (c) command substitution embedded directly in the path segment, with
+    // only the ONE required `&&` present — proves the character class itself
+    // (not just the `&`/`;` chained-command exclusion) is doing the work,
+    // since there is no secondary `&&`/`;` here for a naive fix to catch.
+    `cd ${unitFixtureDir}/$(touch /tmp/pwned) && ./scripts/mavp-operator --validate 2>&1`,
+    // (d) a subshell via backticks, same reasoning as (c).
+    `cd ${unitFixtureDir}/\`touch /tmp/pwned\` && ./scripts/mavp-operator --validate 2>&1`,
+  ];
+  for (const cmd of compoundCommandCmds) {
+    assert.strictEqual(
+      isLegacySeededValidateHookCommand(cmd),
+      false,
+      `FAIL: fingerprint falsely matched a compound-command shape (security regression): ${cmd}`
+    );
+  }
+  console.log('Assertion 9-unit-security passed: fingerprint rejects compound-command shapes (chained command, ;-separated pre-step, $() and backtick subshells)');
+
+  // T-495: the excluded-character class additionally excludes CR, U+2028 LINE
+  // SEPARATOR, U+2029 PARAGRAPH SEPARATOR, and U+00A0 NBSP — closing the
+  // informational (not exploitable) gap T-488's security review deliberately
+  // left open: none of these five bytes is a bash metacharacter or default-IFS
+  // whitespace, so none could ever hide a second executed command, but the
+  // surrounding comment claimed the class excluded any control/separator byte
+  // and it did not. One assertion per added character, each differing from the
+  // genuine seed only by that character appearing inside the path segment.
+  const CR = String.fromCharCode(0x0d);
+  const LINE_SEPARATOR = String.fromCharCode(0x2028);
+  const PARAGRAPH_SEPARATOR = String.fromCharCode(0x2029);
+  const NBSP = String.fromCharCode(0xa0);
+  const addedExclusionCmds = {
+    CR: `cd ${unitFixtureDir}/sub${CR}dir && ./scripts/mavp-operator --validate 2>&1`,
+    LINE_SEPARATOR: `cd ${unitFixtureDir}/sub${LINE_SEPARATOR}dir && ./scripts/mavp-operator --validate 2>&1`,
+    PARAGRAPH_SEPARATOR: `cd ${unitFixtureDir}/sub${PARAGRAPH_SEPARATOR}dir && ./scripts/mavp-operator --validate 2>&1`,
+    NBSP: `cd ${unitFixtureDir}/sub${NBSP}dir && ./scripts/mavp-operator --validate 2>&1`,
+  };
+  for (const [label, cmd] of Object.entries(addedExclusionCmds)) {
+    assert.strictEqual(
+      isLegacySeededValidateHookCommand(cmd),
+      false,
+      `FAIL: fingerprint falsely matched a path containing ${label} (T-495 regression): ${JSON.stringify(cmd)}`
+    );
+  }
+  console.log('Assertion 9-unit-security2 passed: fingerprint rejects CR, U+2028, U+2029, and NBSP embedded in the path segment');
+
+  // T-495: confirm the tightened class still matches ordinary real-world paths
+  // (spaces, tilde, brackets, an `=` inside a segment) — a class so tight it
+  // rejects real paths would silently stop migrating real legacy hooks.
+  const ordinaryPaths = [
+    `${unitFixtureDir}/my project with spaces`,
+    `${unitFixtureDir}/~backup-project`,
+    `${unitFixtureDir}/[archived]-project`,
+    `${unitFixtureDir}/key=value-project`,
+  ];
+  for (const p of ordinaryPaths) {
+    const cmd = `cd ${p} && ./scripts/mavp-operator --validate 2>&1`;
+    assert.strictEqual(
+      isLegacySeededValidateHookCommand(cmd),
+      true,
+      `FAIL: fingerprint rejected an ordinary real-world path (T-495 regression): ${JSON.stringify(p)}`
+    );
+  }
+  console.log('Assertion 9-unit-ordinary-paths passed: fingerprint still matches ordinary paths with spaces, tilde, brackets, and an = segment');
+
+  // --- Assertion 9: legacy fingerprint present ALONE -> replaced ---
+  const legacyOnlyScratch = makeScratchDir('mavp-hook-legacy-only-');
+  cleanupDirs.push(legacyOnlyScratch);
+  fs.mkdirSync(path.join(legacyOnlyScratch, 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(legacyOnlyScratch, '.claude'), { recursive: true });
+  const legacyOnlyCmd = `cd ${legacyOnlyScratch} && ./scripts/mavp-operator --validate 2>&1`;
+  const legacyOnlySettingsBefore = {
+    hooks: {
+      PostToolUse: [
+        { matcher: 'Edit|Write', hooks: [{ type: 'command', command: legacyOnlyCmd }] },
+      ],
+    },
+  };
+  fs.writeFileSync(
+    path.join(legacyOnlyScratch, '.claude', 'settings.local.json'),
+    JSON.stringify(legacyOnlySettingsBefore, null, 2) + '\n',
+    'utf8'
+  );
+  console.log('Assertion 9 — before:', JSON.stringify(legacyOnlySettingsBefore.hooks.PostToolUse));
+  runUpdate(legacyOnlyScratch);
+  const legacyOnlyAfter = readSettings(legacyOnlyScratch);
+  console.log('Assertion 9 — after:', JSON.stringify(legacyOnlyAfter.hooks.PostToolUse));
+  assert.strictEqual(
+    legacyOnlyAfter.hooks.PostToolUse.length,
+    1,
+    'FAIL: legacy-only fixture did not collapse to exactly one PostToolUse entry'
+  );
+  assert.strictEqual(
+    legacyOnlyAfter.hooks.PostToolUse[0].matcher,
+    'Edit|Write',
+    'FAIL: surviving PostToolUse entry lost its Edit|Write matcher'
+  );
+  assert.notStrictEqual(
+    legacyOnlyAfter.hooks.PostToolUse[0].hooks[0].command,
+    legacyOnlyCmd,
+    'FAIL: legacy-only fixture command was left untouched, not replaced'
+  );
+  assert.strictEqual(
+    isManagedPostToolUseCommand(legacyOnlyAfter.hooks.PostToolUse[0].hooks[0].command),
+    true,
+    'FAIL: surviving command after legacy-only migration is not recognised as managed'
+  );
+  console.log('Assertion 9 passed: legacy-only fixture replaced, exactly one PostToolUse entry remains');
+
+  // --- Assertion 10: legacy fingerprint AND current managed entry BOTH present -> collapse to one ---
+  const bothScratch = makeScratchDir('mavp-hook-legacy-and-managed-');
+  cleanupDirs.push(bothScratch);
+  fs.mkdirSync(path.join(bothScratch, 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(bothScratch, '.claude'), { recursive: true });
+  const bothLegacyCmd = `cd ${bothScratch} && ./scripts/mavp-operator --validate 2>&1`;
+  const bothManagedCmd = composePostToolUseHookCommand(bothScratch);
+  const bothSettingsBefore = {
+    hooks: {
+      PostToolUse: [
+        { matcher: 'Edit|Write', hooks: [{ type: 'command', command: bothLegacyCmd }] },
+        { matcher: 'Edit|Write', hooks: [{ type: 'command', command: bothManagedCmd }] },
+      ],
+    },
+  };
+  fs.writeFileSync(
+    path.join(bothScratch, '.claude', 'settings.local.json'),
+    JSON.stringify(bothSettingsBefore, null, 2) + '\n',
+    'utf8'
+  );
+  console.log('Assertion 10 — before:', JSON.stringify(bothSettingsBefore.hooks.PostToolUse.map(e => ({ matcher: e.matcher, cmdLen: e.hooks[0].command.length }))));
+  runUpdate(bothScratch);
+  const bothAfter = readSettings(bothScratch);
+  console.log('Assertion 10 — after:', JSON.stringify(bothAfter.hooks.PostToolUse.map(e => ({ matcher: e.matcher, cmdLen: e.hooks[0].command.length }))));
+  assert.strictEqual(
+    bothAfter.hooks.PostToolUse.length,
+    1,
+    'FAIL: legacy+managed fixture did not collapse to exactly one PostToolUse entry'
+  );
+  assert.strictEqual(
+    bothAfter.hooks.PostToolUse[0].hooks[0].command,
+    bothManagedCmd,
+    'FAIL: surviving command after collapse does not equal the composed managed command'
+  );
+  console.log('Assertion 10 passed: legacy+managed fixture collapses to exactly one managed PostToolUse entry');
+
+  // --- Assertion 11: operator-authored hook mentioning --validate in a different shape -> survives byte-identical ---
+  const customScratch = makeScratchDir('mavp-hook-custom-validate-');
+  cleanupDirs.push(customScratch);
+  fs.mkdirSync(path.join(customScratch, 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(customScratch, '.claude'), { recursive: true });
+  // Deliberately similar-looking to the historical fingerprint but NOT an
+  // exact match: extra piping after the redirect. An operator could plausibly
+  // have written this themselves — it must never be silently replaced.
+  const customValidateCmd = `cd ${customScratch} && ./scripts/mavp-operator --validate 2>&1 | tee /tmp/custom-hook.log`;
+  const customValidateEntry = { matcher: 'Edit|Write', hooks: [{ type: 'command', command: customValidateCmd }] };
+  const customSettingsBefore = {
+    hooks: { PostToolUse: [JSON.parse(JSON.stringify(customValidateEntry))] },
+  };
+  fs.writeFileSync(
+    path.join(customScratch, '.claude', 'settings.local.json'),
+    JSON.stringify(customSettingsBefore, null, 2) + '\n',
+    'utf8'
+  );
+  console.log('Assertion 11 — before:', JSON.stringify(customSettingsBefore.hooks.PostToolUse));
+  runUpdate(customScratch);
+  const customAfter = readSettings(customScratch);
+  console.log('Assertion 11 — after:', JSON.stringify(customAfter.hooks.PostToolUse));
+  const survivingCustomEntry = customAfter.hooks.PostToolUse.find(
+    e => e && e.hooks && e.hooks[0] && e.hooks[0].command === customValidateCmd
+  );
+  assert.ok(
+    survivingCustomEntry,
+    'FAIL: operator-authored near-miss --validate hook was not found untouched after --update'
+  );
+  assert.deepStrictEqual(
+    survivingCustomEntry,
+    customValidateEntry,
+    'FAIL: operator-authored near-miss --validate hook was modified'
+  );
+  console.log('Assertion 11 passed: operator-authored hook mentioning --validate in a different shape survives byte-identical');
+
+  console.log('\nAll T-404/T-430/T-435/T-488 hook-merge assertions passed.');
 } finally {
   for (const dir of cleanupDirs) {
     fs.rmSync(dir, { recursive: true, force: true });

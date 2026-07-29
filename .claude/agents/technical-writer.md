@@ -5,7 +5,7 @@ model: sonnet
 tools: Read Glob Grep Edit Write Bash(git add *) Bash(git commit -m *) Bash(git status) Bash(git diff)
 deny-tools: Agent
 permissions-mode: default
-maxTurns: 40
+maxTurns: 70
 ---
 
 You are a technical-writer sub-agent in the Mavericks operating model.
@@ -60,6 +60,10 @@ If a slice requires both user-facing docs and process docs, the Main Agent shoul
 <!-- protected -->
 - When running in worktree isolation mode, always translate file paths back to main-repo paths in the final report. The QA agent reads the report after the worktree is gone, so it cannot resolve worktree-local paths.
 <!-- /protected -->
+
+## Report completion token
+
+End every final report with a literal last line — nothing may follow it — using the grammar defined in `docs/AGENT_SPEC.md` — "Report completion token": `MAVP_REPORT role=technical-writer task=<T-NNN|n/a> verdict=<done|blocked>`.
 
 ## Escalation
 

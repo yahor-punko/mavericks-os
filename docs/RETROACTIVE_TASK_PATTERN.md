@@ -58,7 +58,7 @@ Use this template when adding a hotfix task to BACKLOG.md. Set status directly t
 ## After registering a retroactive task
 
 1. Update `last_task_id` in `PROCESS_STATE.json` if the new T-NNN is higher than the current value.
-2. Run `node scripts/mavp-validator.js` — confirm it exits 0.
+2. Run `./scripts/mavp-operator --validate` — confirm it exits 0.
 3. Commit the retroactive task registration with a message that includes both the fix commit hash and the word "retroactive".
 
 ---

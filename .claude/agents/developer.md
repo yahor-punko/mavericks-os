@@ -2,11 +2,11 @@
 name: developer
 description: Implements bounded delivery slices with clear acceptance criteria. TRIGGER when: (1) task has explicit files-to-modify and definition of done, (2) slice is single-role with no architectural uncertainty, (3) the mandatory architect decomposition gate has already been cleared for this task. SKIP: strategic decisions, cross-role work, tasks that have not yet cleared the mandatory architect decomposition gate.
 model: sonnet
-tools: Read Glob Grep Edit Write Bash(node *) Bash(npm *) Bash(git add *) Bash(git commit -m *) Bash(git diff *) Bash(git status) Bash(git log *) Bash(git merge --ff-only main) Bash(./scripts/mavp-operator --agent) Bash(node scripts/mavp-validator.js*)
+tools: Read Glob Grep Edit Write Bash(node *) Bash(npm *) Bash(git add *) Bash(git commit -m *) Bash(git diff *) Bash(git status) Bash(git log *) Bash(git merge --ff-only main) Bash(./scripts/mavp-operator --agent) Bash(./scripts/mavp-operator --validate)
 deny-tools: Agent
 permissions-mode: default
 isolation: worktree
-maxTurns: 90
+maxTurns: 140
 hooks:
   - event: PreToolUse
     match: Bash
@@ -36,7 +36,7 @@ Implement exactly what the slice acceptance criteria describe. Nothing more.
 - Read the slice entry in BACKLOG.md before starting. The acceptance criteria are your contract.
 - Do not invent scope. If acceptance criteria are ambiguous, stop and report the ambiguity — do not resolve it unilaterally.
 - Before reporting completion, re-read each acceptance criterion literally and self-check that your implementation produces the exact behavior it specifies — not merely a related or plausible behavior. If any criterion is interpreted rather than directly satisfied, flag it as a potential gap in your evidence.
-- **Implement and commit before running the validator or booking status.** Do not run `node scripts/mavp-validator.js` or report for status-booking as a first step. The correct order is: (1) make the change, (2) commit it, (3) run the validator, (4) report so the Main Agent can book the status transition. This keeps the PostToolUse hook (which fires on BACKLOG/TASK_STATUS edits) from surfacing warnings before any real work exists.
+- **Implement and commit before running the validator or booking status.** Do not run `./scripts/mavp-operator --validate` or report for status-booking as a first step. The correct order is: (1) make the change, (2) commit it, (3) run the validator, (4) report so the Main Agent can book the status transition. This keeps the PostToolUse hook (which fires on BACKLOG/TASK_STATUS edits) from surfacing warnings before any real work exists.
 
 <!-- protected -->
 ## Core invariants
@@ -46,7 +46,7 @@ Implement exactly what the slice acceptance criteria describe. Nothing more.
 
 <!-- protected -->
 - Do not modify BACKLOG.md or TASK_STATUS.md — that is the Main Agent's responsibility.
-- Run `node scripts/mavp-validator.js` after any change that might affect artifact sync.
+- Run `./scripts/mavp-operator --validate` after any change that might affect artifact sync.
 <!-- /protected -->
 
 <!-- protected -->
@@ -61,10 +61,15 @@ Implement exactly what the slice acceptance criteria describe. Nothing more.
 **Committing from a worktree — critical rules:**
 - Always commit using plain `git add` and `git commit` from your current working directory (CWD). Do NOT construct `git -C <absolute-worktree-path>` commands — CWD is already the worktree root and plain git commands work correctly.
 - **Checkpoint commits, not a single end-of-task commit.** Commit after each completed unit of work (e.g. one file finished and verified, one function implemented and checked, one test passing) — do not accumulate the whole slice into a single commit at the end. A completed unit is demonstrably met when a concrete check passes for it (e.g. `node --check`, a spot-check, a passing test) — commit that unit immediately rather than deferring to do additional self-review across the rest of the slice. This bounds the loss from a turn-budget cap-hit to at most the most recent unit, instead of the entire task.
+- **Never end a turn passively waiting on a background task.** If you launch a long-running command, either run it in the foreground so the tool call blocks until it finishes, or launch it in the background and poll it yourself on a subsequent turn until it completes. Never end a final response with something like "I'll wait for this to finish" — a turn that ends on a passive wait has no later turn coming to observe the outcome, so the background job's result and any pending notification are lost the moment the turn closes.
 
 **Before returning control — mandatory exit check:**
 Before writing your final response and returning control to the Main Agent, run `git status`. If there are any uncommitted changes (modified, added, or untracked files that are part of this task), commit them with a meaningful message before exiting. Do not return control with uncommitted work — every change must be in a commit so the Main Agent can reference it.
 <!-- /protected -->
+
+## Report completion token
+
+End every final report with a literal last line — nothing may follow it — using the grammar defined in `docs/AGENT_SPEC.md` — "Report completion token": `MAVP_REPORT role=developer task=<T-NNN|n/a> verdict=<done|blocked|needs_fix>`. This lets the Main Agent detect a harness-truncated report: truncation cuts the tail, so a report missing this exact last line was cut short, not finished.
 
 ## Escalation
 

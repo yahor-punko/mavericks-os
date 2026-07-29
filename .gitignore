@@ -10,6 +10,16 @@ coverage/
 .claude/mcp.json
 .claude/worktrees/
 
+# Shared project settings (T-529) — untracked deliberately: the Claude Code
+# permission layer appends every approved Bash command string to this file's
+# permissions.allow array verbatim, so its live content is an append-only log
+# of arbitrary operator commands that can carry private project names and
+# absolute home paths (T-516). git rm --cached removed it from the index;
+# it stays on disk for Claude Code and permission-mode resolution to read.
+# Fresh-clone note: a fresh clone has no .claude/settings.json — seed one by
+# copying templates/SETTINGS_TEMPLATE.json to .claude/settings.json.
+.claude/settings.json
+
 # Handoff context file (single-use, not committed)
 HANDOFF.md
 .mavp-hook-ts

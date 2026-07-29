@@ -135,10 +135,10 @@ function readSettings(dir) {
     assert.strictEqual(fs.existsSync(localSettingsPath), true, 'Test 4 FAIL: settings.local.json was not created');
     const localSettings = JSON.parse(fs.readFileSync(localSettingsPath, 'utf8'));
     assert.strictEqual(typeof localSettings.hooks, 'object', 'Test 4 FAIL: settings.local.json missing hooks block');
-    assert.strictEqual(
-      Array.isArray(localSettings.fallbackModel),
-      true,
-      'Test 4 FAIL: settings.local.json missing fallbackModel'
+    assert.deepStrictEqual(
+      localSettings.fallbackModel,
+      ['opus'],
+      'Test 4 FAIL: settings.local.json fallbackModel is not the opus alias'
     );
     // settings.local.json must NOT carry permissions.defaultMode from this change —
     // that policy now lives exclusively in the shared, committed settings.json.

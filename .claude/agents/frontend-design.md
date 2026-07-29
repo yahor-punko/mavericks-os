@@ -103,6 +103,10 @@ Before writing your final response and returning control to the Main Agent, run 
 - **Design asset or dependency missing:** If a required design token file, component library, or Figma spec is referenced but inaccessible, report which asset is missing before writing any code. Do not substitute with generic values.
 - **Design brief absent:** If no design brief or visual direction is provided and none can be inferred from context, request one. Do not invent a visual direction without instruction.
 
+## Report completion token
+
+End every final report with a literal last line — nothing may follow it — using the grammar defined in `docs/AGENT_SPEC.md` — "Report completion token": `MAVP_REPORT role=frontend-design task=<T-NNN|n/a> verdict=<done|blocked|needs_fix>`.
+
 ## Escalation
 
 <!-- protected -->

@@ -19,7 +19,8 @@
 // heuristic naturally resolves to non-canonical there and the guard is inert.
 //
 // Silent (exit 0, no output) in every one of these cases:
-//   - no scripts/publish-manifest.json present (adopter repo without one)
+//   - no scripts/publish-manifest.json present (adopter repo without one —
+//     ENOENT specifically; see the behaviour split below)
 //   - not the canonical repo (public mirror / adopter fork)
 //   - not a git repository at all
 //   - no path argument given
@@ -27,6 +28,19 @@
 //   - the target path resolves outside the repo root
 //   - the target path is gitignored (untracked-by-intent, e.g. node_modules/)
 //   - the target path is already classified (ship / reset / exclude)
+//
+// T-556 — WARN AND STAND DOWN, not silent, when a manifest is PRESENT but
+// broken: unparseable JSON, or parses but fails the shared shape contract
+// (validateManifestBucketsShape(), imported from check-publish-manifest.js
+// rather than re-implemented — see the import below). The pre-T-556 code
+// conflated "no manifest" with "corrupt manifest" in one catch block, and
+// separately defaulted a malformed `exclude` bucket to `{}`, which made
+// isCanonicalRepo() vacuously true AND silently dropped those entries from
+// the classified set, producing FALSE per-file advisories computed off
+// garbage. Refusal (a non-zero exit) is not an option here: the composed
+// PostToolUse hook fragment forces exit 0 regardless, so "fail closed" has
+// no mechanism on this surface — exactly one stderr advisory, then standing
+// down, is the only behaviour this hook contract can express honestly.
 //
 // Node built-ins only — no npm dependencies (see .claude/rules/scripts.md).
 
@@ -38,6 +52,14 @@ const path = require('node:path');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const MANIFEST_PATH = path.join(REPO_ROOT, 'scripts', 'publish-manifest.json');
+const CHECK_MANIFEST_SCRIPT = path.join(REPO_ROOT, 'scripts', 'check-publish-manifest.js');
+
+// T-556 — reuse (never re-implement) the checker's composed shape predicate,
+// so the set of manifests this advisory surface stands down on is IDENTICAL
+// to the set the blocking pre-commit backstop (check-publish-manifest.js)
+// refuses. A guard-local predicate would be a fourth definition of manifest
+// validity — the exact drift class T-550 existed to kill.
+const { validateManifestBucketsShape } = require(CHECK_MANIFEST_SCRIPT);
 
 function loadManifest() {
   const raw = fs.readFileSync(MANIFEST_PATH, 'utf8');
@@ -71,8 +93,37 @@ function main() {
   let manifest;
   try {
     manifest = loadManifest();
-  } catch {
-    // No manifest at all — nothing to enforce (adopter repo, public mirror).
+  } catch (err) {
+    if (err && err.code === 'ENOENT') {
+      // No manifest at all — nothing to enforce (adopter repo, public
+      // mirror). Stays fully silent, exactly as before.
+      process.exit(0);
+    }
+    // T-556 — present but unparseable JSON. WARN AND STAND DOWN rather than
+    // silently swallowing the corruption: refusal is inexpressible here (the
+    // hook fragment forces exit 0 regardless), and silent degradation is the
+    // exact incident class this advisory surface exists to close. Exactly
+    // ONE advisory, then stand down without the per-file advisory below.
+    console.error(
+      `MANIFEST GUARD: ${MANIFEST_PATH} could not be parsed as JSON (${err.message}). ` +
+        'Creation-time advisories are standing down until this is fixed — run: node scripts/check-publish-manifest.js'
+    );
+    process.exit(0);
+  }
+
+  // T-556 — shape refusal BEFORE isCanonicalRepo or the classified-set
+  // computation, using the checker's own composed predicate (never a
+  // guard-local one — see module comment above). A present-but-malformed
+  // bucket (e.g. `exclude` as an array) must never silently default to {},
+  // which would otherwise make isCanonicalRepo() vacuously true AND drop
+  // those entries from the classified set, producing false per-file
+  // advisories computed off garbage.
+  const shapeCheck = validateManifestBucketsShape(manifest);
+  if (!shapeCheck.ok) {
+    console.error(
+      `MANIFEST GUARD: ${MANIFEST_PATH} failed shape validation (${shapeCheck.reason}). ` +
+        'Creation-time advisories are standing down until this is fixed — run: node scripts/check-publish-manifest.js'
+    );
     process.exit(0);
   }
 

@@ -26,6 +26,8 @@ const {
   getDeployPendingForRepo,
   writeContextBundle,
   printRepoIdentityHeader,
+  resolveTaskOrigin,
+  ARCHITECT_GATE_ADVISORY,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -46,7 +48,7 @@ const YELLOW = '\x1b[33m';
 const RED = '\x1b[31m';
 const CYAN = '\x1b[36m';
 
-function buildBacklogEntry(id, title, problem, date, repo) {
+function buildBacklogEntry(id, title, problem, date, repo, origin) {
   return `\n### ${id} — ${title}
 - **Status:** planned
 - **Priority:** medium
@@ -57,6 +59,7 @@ function buildBacklogEntry(id, title, problem, date, repo) {
 - **Proposed solution:** TBD
 - **Acceptance criteria:** TBD
 - **Verification type:** TBD
+- **Origin:** ${origin}
 - **Evidence expected:** TBD
 - **Next if passed:** —
 `;
@@ -89,7 +92,56 @@ async function prompt(rl, question) {
   });
 }
 
+/**
+ * Parse CLI flags: --title, --problem, --repo (space-separated value —
+ * matches the `--flag value` convention used by set-status.js / apply-decomposition.js),
+ * plus an optional --origin. Absent flags resolve to null (distinct from an
+ * intentionally blank value).
+ *
+ * `--origin architect` attests that this task went through architect
+ * decomposition despite being registered via --quick-task; any other value
+ * (or the flag being absent) resolves to Origin: manual (T-531) — see
+ * resolveTaskOrigin() in mavp-operator-lib.js. --origin is always optional —
+ * it never counts toward the required title/problem/repo trio on non-TTY stdin.
+ *
+ * @param {string[]} argv - process.argv.slice(2)
+ * @returns {{title: string|null, problem: string|null, repo: string|null, origin: string|null}}
+ */
+function parseCliArgs(argv) {
+  const flags = { title: null, problem: null, repo: null, origin: null };
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--title' && i + 1 < argv.length) {
+      flags.title = argv[++i];
+    } else if (argv[i] === '--problem' && i + 1 < argv.length) {
+      flags.problem = argv[++i];
+    } else if (argv[i] === '--repo' && i + 1 < argv.length) {
+      flags.repo = argv[++i];
+    } else if (argv[i] === '--origin' && i + 1 < argv.length) {
+      flags.origin = argv[++i];
+    }
+  }
+  return flags;
+}
+
 async function main() {
+  const flags = parseCliArgs(process.argv.slice(2));
+  const isTTY = !!process.stdin.isTTY;
+
+  // Hard non-TTY guard — runs before any read/write. Piped/non-interactive stdin
+  // must supply all three fields explicitly; otherwise refuse and write nothing.
+  if (!isTTY) {
+    const missing = [];
+    if (flags.title == null) missing.push('--title');
+    if (flags.problem == null) missing.push('--problem');
+    if (flags.repo == null) missing.push('--repo');
+    if (missing.length > 0) {
+      console.error(`${RED}quick-task: stdin is not a TTY and required flag(s) are missing: ${missing.join(', ')}${RESET}`);
+      console.error(`${DIM}Non-interactive usage: --quick-task --title "<title>" --problem "<problem>" --repo "<repo>"${RESET}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   printRepoIdentityHeader(ROOT);
 
   const today = new Date().toISOString().slice(0, 10);
@@ -107,20 +159,44 @@ async function main() {
 
   console.log(`${CYAN}Next task ID: ${BOLD}${id}${RESET}\n`);
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let title, problem, repo;
 
-  const title = await prompt(rl, 'Task title');
-  if (!title) {
-    console.log(`${DIM}Cancelled — title is required.${RESET}\n`);
+  if (flags.title != null && flags.problem != null && flags.repo != null) {
+    // Full non-interactive mode — works whether stdin is a TTY or not.
+    title = flags.title.trim();
+    if (!title) {
+      console.error(`${RED}--title must not be empty.${RESET}`);
+      process.exitCode = 1;
+      return;
+    }
+    problem = flags.problem.trim();
+    repo = flags.repo.trim() || 'TBD';
+    console.log(`${DIM}Non-interactive mode — using --title/--problem/--repo.${RESET}`);
+  } else {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+    title = flags.title != null ? flags.title.trim() : await prompt(rl, 'Task title');
+    if (!title) {
+      console.log(`${DIM}Cancelled — title is required.${RESET}\n`);
+      rl.close();
+      return;
+    }
+
+    problem = flags.problem != null ? flags.problem.trim() : await prompt(rl, 'Problem (one line)');
+    const repoRaw = flags.repo != null ? flags.repo.trim() : await prompt(rl, 'Repo (e.g. mavericks, example-service, or leave blank)');
+    repo = repoRaw || 'TBD';
+
     rl.close();
-    return;
   }
 
-  const problem = await prompt(rl, 'Problem (one line)');
-  const repoRaw = await prompt(rl, 'Repo (e.g. mavericks, example-service, or leave blank)');
-  const repo = repoRaw || 'TBD';
-
-  rl.close();
+  // Resolve Origin: manual by default; --origin architect attests this task
+  // went through architect decomposition despite bypassing --apply-decomposition.
+  // Print the advisory ONLY when origin resolves to manual (T-531) — this is
+  // an advisory signal, not enforcement, so it never blocks task creation.
+  const origin = resolveTaskOrigin(flags.origin);
+  if (origin === 'manual') {
+    console.error(ARCHITECT_GATE_ADVISORY);
+  }
 
   // Warn if the target repo has deploy_pending tasks
   try {
@@ -138,7 +214,7 @@ async function main() {
     // Non-fatal — continue regardless
   }
 
-  const backlogEntry = buildBacklogEntry(id, title, problem || '—', today, repo);
+  const backlogEntry = buildBacklogEntry(id, title, problem || '—', today, repo, origin);
   const taskStatusEntry = buildTaskStatusEntry(id, title, problem || '—', today);
 
   const updatedBacklog = insertIntoActiveWave(backlog, backlogEntry);

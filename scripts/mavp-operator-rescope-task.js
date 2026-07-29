@@ -183,6 +183,35 @@ function insertIntoDeferredSection(markdown, entry) {
   return markdown.trimEnd() + '\n' + entry;
 }
 
+/**
+ * Compute the character-offset bounds of TASK_STATUS.md's "## Active tasks"
+ * section (T-544). Mirrors insertIntoActiveTasks()'s own section-boundary
+ * logic in mavp-operator-lib.js (terminated by the next "## " heading, or
+ * end of file) so presence-inside-the-section can be checked against the
+ * exact same boundary insertIntoActiveTasks() itself would insert into —
+ * keeping "is this entry already where it belongs" and "where would a new
+ * entry go" in agreement. If either drifts, update the other.
+ *
+ * Returns null when the document has no "## Active tasks" heading at all.
+ *
+ * @param {string} markdown - Content of TASK_STATUS.md
+ * @returns {{headerEnd: number, end: number}|null}
+ */
+function activeTasksSectionRange(markdown) {
+  const activeTasksMatch = markdown.match(/\n## Active tasks[^\n]*/);
+  if (!activeTasksMatch) return null;
+
+  const activeTasksStart = markdown.indexOf(activeTasksMatch[0]);
+  const headerEnd = activeTasksStart + activeTasksMatch[0].length;
+  const restOfFile = markdown.slice(headerEnd);
+  const nextSectionMatch = restOfFile.match(/\n(?=## )/);
+  const end = nextSectionMatch && nextSectionMatch.index !== undefined
+    ? headerEnd + nextSectionMatch.index
+    : markdown.length;
+
+  return { headerEnd, end };
+}
+
 function runValidatorOnce() {
   console.log('');
   let validatorExitCode = 0;
@@ -335,10 +364,35 @@ function main() {
     if (newOwner) updatedStatusBlock = setBlockField(updatedStatusBlock, 'Owner role', newOwner);
     if (newTitle) updatedStatusBlock = setBlockTitle(updatedStatusBlock, newTitle);
 
-    taskStatus =
-      taskStatus.slice(0, taskStatusLoc.startIndex) +
-      updatedStatusBlock +
-      taskStatus.slice(taskStatusLoc.endIndex);
+    // T-544: when activating (targetSection === 'active'), an existing
+    // TASK_STATUS.md entry found OUTSIDE "## Active tasks" (e.g. stranded
+    // under "## Recently completed tasks" by a close-session mis-archive —
+    // see 274cd91) must be RELOCATED into "## Active tasks", not merely
+    // edited in place. Presence is checked against the exact same section
+    // boundary insertIntoActiveTasks() itself inserts into, so the two
+    // never disagree. The block moves byte-for-byte (only Status/Owner
+    // role/title fields touched above) — no skeleton regeneration, so any
+    // hand-edited Evidence/Notes survive verbatim. When the entry is
+    // already inside Active tasks, or the task isn't being activated, the
+    // existing in-place edit behavior is unchanged.
+    const activeRange = activeTasksSectionRange(taskStatus);
+    const isInActiveTasks =
+      !!activeRange &&
+      taskStatusLoc.startIndex >= activeRange.headerEnd &&
+      taskStatusLoc.startIndex < activeRange.end;
+
+    if (targetSection === 'active' && !isInActiveTasks) {
+      const withoutStatusBlock =
+        taskStatus.slice(0, taskStatusLoc.startIndex) + taskStatus.slice(taskStatusLoc.endIndex);
+      const trimmedStatusBlock = updatedStatusBlock.trim();
+      const relocatedEntry = `\n${trimmedStatusBlock}\n`;
+      taskStatus = insertIntoActiveTasks(withoutStatusBlock, relocatedEntry);
+    } else {
+      taskStatus =
+        taskStatus.slice(0, taskStatusLoc.startIndex) +
+        updatedStatusBlock +
+        taskStatus.slice(taskStatusLoc.endIndex);
+    }
     taskStatusChanged = true;
   } else if (targetSection === 'active') {
     // Un-deferring (or otherwise activating) a task with no existing

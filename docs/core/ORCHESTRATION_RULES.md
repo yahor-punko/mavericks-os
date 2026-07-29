@@ -29,7 +29,7 @@ Run before registering any task in BACKLOG.md. **Architect spawn is mandatory fo
 
 Neither role produces BACKLOG tasks. Their briefs inform the Main Agent before task registration.
 
-**Architect model spawn rule** — the Main Agent spawns architect with a per-invocation `model: fable` override (Fable 5, primary). If Fable is unavailable, it re-spawns with `model: opus` (Opus 4.8). Architect is never spawned below Opus (in particular, never `sonnet`). The Agent-tool `model` parameter accepts aliases only (`sonnet`/`opus`/`haiku`/`fable`), not full-ids — spawn overrides must use one of these aliases. See `docs/AGENT_SPEC.md` — "Model selection" (worker model-escalation table) and "Effort selection" (effort-selection table), the single source of truth for both policies.
+**Architect model spawn rule** — the Main Agent spawns architect with a per-invocation `model: fable` override (Fable 5, primary). If Fable is unavailable, it re-spawns with `model: opus` (latest Opus). Architect is never spawned below Opus (in particular, never `sonnet`). The Agent-tool `model` parameter accepts aliases only (`sonnet`/`opus`/`haiku`/`fable`), not full-ids — spawn overrides must use one of these aliases. See `docs/AGENT_SPEC.md` — "Model selection" (worker model-escalation table) and "Effort selection" (effort-selection table), the single source of truth for both policies.
 
 ## XS fast lane (quick-merge)
 
@@ -77,6 +77,41 @@ When a task's `work_dir` points to a different repo, the following three-step se
 3. **Synthesize the cross-boundary verdict.** The Main Agent — not any sub-agent — combines the per-repo findings and reasons about the boundary itself (e.g. does repo A's output satisfy repo B's trust assumptions), then issues the overall `security_passed` / `security_needs_fix` verdict for the cross-repo change.
 
 This mirrors the "Cross-repo task pre-flight" sequence above but is specific to security review: never let a single sub-agent spawn attempt to chain analysis across repos on its own, even if the harness would technically allow it — the turn/token budget for a single review is sized for one repo (see `docs/AGENT_SPEC.md` — "Per-role maxTurns table"), and a chained multi-repo review is the failure mode that produces a truncated, zero-output non-report instead of a usable verdict.
+
+## Sub-agent report completion check
+
+Every sub-agent's final report must end with the completion token defined in `docs/AGENT_SPEC.md` — "Report completion token" (`MAVP_REPORT role=<role> task=<T-NNN|n/a> verdict=<done|blocked|needs_fix|pass|fail>`). This section defines the Main-Agent-side check that consumes it.
+
+**The check costs one glance, not a new tool.** The Main Agent already reads every sub-agent report to decide the next status transition — the rule is simply "look at the literal last line before booking anything". No hook fires on this: sub-agent reports are in-band chat content, not a file a `PostToolUse` hook could observe, so mechanical enforcement is not possible here and this is not an oversight to be patched later — it is the stated limit of the contract (see `docs/AGENT_SPEC.md`).
+
+**Procedure, before booking any status transition or accepting any review verdict:**
+1. Check whether the report's literal last line is the token.
+2. If present, book the transition/verdict it names as normal.
+3. If absent, send exactly one follow-up message asking the sub-agent to restate its final report ending in the token — this recovers the same in-progress turn rather than re-spawning.
+4. If the token is still absent after that single resume message, treat the task as **blocked** and do not book any transition. Do not retry a second time and do not accept the report as-is.
+
+**Verdict-bearing roles never book a pass without the token.** For `qa`, `security-reviewer`, and `ux`, a `qa_passed` / `security_passed` / `ux_passed` transition may only be booked when the token's last line is present with `verdict=pass`. A report that reads like a pass in its narrative but is missing the token line must be treated as unresolved under step 3/4 above — never inferred from the report body. This directly closes the incident this contract exists for: a security review truncated down to one narration line must never be misread as a pass.
+
+## Cap-hit triage
+
+A spawn can return without the completion token for two unrelated reasons, and the remedy differs by which one occurred — do not retry an identically-scoped brief until this is diagnosed.
+
+1. Compare the spawn's reported `tool_uses` (from its task-notification `<usage>` field) to the role's `maxTurns`, from `docs/AGENT_SPEC.md`'s per-role table.
+2. **`tool_uses >= cap`** — this is a cap-hit, not misfortune, regardless of the overshoot amount: observed signatures include exactly-at-cap, cap+1, and cap+2 (T-521 — see `docs/TURN_BUDGET.md` "Session 3 evidence"), and the rule must catch all of them, not just the common cap+1 case. Never retry the identical brief; it will hit the same wall. Remediate first: narrow the slice's scope, pre-load reconnaissance into the retry brief (see "Recon-preloading" below), or both. Cumulative multi-leg counts from a resumed spawn stay governed by the accumulation rule in `docs/TURN_BUDGET.md` — compare each leg's own allotment to the cap, never a raw cumulative total across resumes (e.g. a reported 180 against a 90-turn cap is two cap-hits, not one 180-turn observation).
+3. **`tool_uses < cap`** — treat it as an infra failure (connection drop, policy error, process exit, watchdog stall), unrelated to this repo's turn-budget configuration; retrying the same brief as-is is the correct response here. When the count sits only a handful of calls below the cap, check the transcript tail before retrying identically — a spawn can burn several turns on tool-less text turns, so a near-cap-but-below count deserves a second look rather than an automatic identical retry.
+4. Either branch: inspect the branch/worktree for already-committed work before integrating anything (GAP B below still applies).
+
+Do not read a task-notification's `status: completed` field as evidence the sub-agent reached a verdict — it reflects only that the async wrapper process terminated, and is identical between a clean completion and a cap-hit. Only the completion token's presence, together with `tool_uses` versus the role's cap, distinguishes the two.
+
+## Recon-preloading (brief-composition duty — retries and first spawns)
+
+When re-spawning after a cap-hit, spend the Main Agent's own (cheap) calls before the spawn rather than the sub-agent's (expensive) ones: locate the relevant code or config and paste the excerpts directly into the retry brief, so the sub-agent's turn budget goes to reproduction and verification instead of first-pass discovery. This is a brief-composition duty, not optional color — a retry that only narrows scope still burns calls re-finding what the Main Agent already found while diagnosing the cap-hit.
+
+This duty is not retry-only (T-557): whenever the Main Agent already holds the recon at first-spawn time — because composing the brief already required reading the relevant files, or because a prior sub-agent's report already surfaced them — pre-load it into the FIRST brief too, not only into a retry. Four recon-preloaded spawns confirm the pattern holds for both cases: two retries (security-reviewer, 9 and 13 tool_uses, per `docs/TURN_BUDGET.md`'s session-2 table) and two first spawns (16 and 22 tool_uses, recorded in `docs/TURN_BUDGET.md` "Session 3 evidence") all completed cleanly — versus the self-recon security-reviewer rows in the same document that repeatedly cap-hit without pre-loaded recon.
+
+**Carve-out:** independent-discovery roles may deliberately self-recon instead of working from a Main-Agent-preloaded brief, on both first spawns and retries, when independence of discovery is itself the point of the pass — most notably **security-reviewer** full reviews and **qa**, where re-deriving findings from the artifact under review rather than from the Main Agent's own summary of it is part of what makes the resulting verdict trustworthy. Pre-loading recon for these two roles is permitted, never forbidden, but it is not mandatory the way it is for production-oriented roles (developer, product-docs, technical-writer, and the rest) whose job is to build or document, not to independently verify.
+
+Pair this with the optional `Turn budget:` field in the sub-agent brief template (`CLAUDE.md` — "Sub-agent brief template"): fill it from `docs/AGENT_SPEC.md`'s per-role `maxTurns` table so the sub-agent can self-count against a known ceiling instead of an invisible one.
 
 ## Worktree integration — Main Agent
 

@@ -1,7 +1,9 @@
 'use strict';
 // Regression test: T-448 — Validator advisory: merged evidence commit hashes
 // unreachable from HEAD. Extended by T-455 with two-tier reachability
-// (held-on-a-local-branch vs reachable-from-no-local-ref).
+// (held-on-a-local-branch vs reachable-from-no-local-ref). Extended by
+// T-489 with hub-aware per-hash cross-repo annotation skipping and
+// archived-section noise aggregation.
 //
 // Covers:
 //   1. extractCommitHashesFromEvidence() extracts one or more commit: hashes
@@ -31,6 +33,19 @@
 //      (healthy) with the finding still surfaced as INFO (never flips the
 //      exit code); Active-tasks hash held on a local branch (not HEAD) ->
 //      exit 0 (healthy) with the finding surfaced as INFO.
+//   8. extractCommitEntriesFromEvidence() (T-489) pairs each extracted hash
+//      with its parenthesized cross-repo annotation, or null when absent.
+//   9. checkCommitReachable() hub-aware annotation skip (T-489): a hash
+//      annotated with a KNOWN other repo-map id is skipped entirely (even
+//      with no record-level Repo: field at all); a hash annotated with the
+//      SELF repo id is still checked locally; a hash annotated with an
+//      unknown/unregistered repo id is NOT silently skipped — it still gets
+//      the normal local check; unannotated-hash behavior is unchanged.
+//  10. checkCommitReachable() archived-section aggregation threshold
+//      (T-489): at/below ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD, Recently-
+//      completed unreachable findings stay individual; above it, they
+//      collapse into one aggregate info finding naming the count. The
+//      Active tasks section is never aggregated, regardless of count.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -42,6 +57,8 @@ const cp = require('node:child_process');
 const {
   checkCommitReachable,
   extractCommitHashesFromEvidence,
+  extractCommitEntriesFromEvidence,
+  ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD,
   buildReachableHashIndex,
   isHashReachable,
   resolveSelfRepoId,
@@ -472,8 +489,188 @@ function writeFullStackFixture(root, { evidenceStatus, sectionHeading }) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 8 (T-489): extractCommitEntriesFromEvidence() — hash + annotation pairs.
+// ---------------------------------------------------------------------------
+{
+  assert.deepStrictEqual(
+    extractCommitEntriesFromEvidence('commit: abc1234'),
+    [{ hash: 'abc1234', repoAnnotation: null }],
+    'Test 8a FAIL: unannotated hash should have repoAnnotation: null'
+  );
+
+  assert.deepStrictEqual(
+    extractCommitEntriesFromEvidence('commit: abc1234def (repo-a)\ncommit: 1234567abc (repo-b)'),
+    [
+      { hash: 'abc1234def', repoAnnotation: 'repo-a' },
+      { hash: '1234567abc', repoAnnotation: 'repo-b' },
+    ],
+    'Test 8b FAIL: expected both hashes with their annotations, in order'
+  );
+
+  assert.deepStrictEqual(
+    extractCommitEntriesFromEvidence('commit: ab12'),
+    [],
+    'Test 8c FAIL: a hash shorter than 7 hex chars must still be rejected'
+  );
+
+  assert.deepStrictEqual(extractCommitEntriesFromEvidence(null), [], 'Test 8d FAIL: null evidence -> []');
+  assert.deepStrictEqual(extractCommitEntriesFromEvidence(''), [], 'Test 8e FAIL: empty evidence -> []');
+
+  console.log('Test 8 passed: extractCommitEntriesFromEvidence() pairs each hash with its parenthesized cross-repo annotation (or null)');
+}
+
+// ---------------------------------------------------------------------------
+// Test 9 (T-489): hub-aware annotation skip in checkCommitReachable().
+// ---------------------------------------------------------------------------
+{
+  const { root, orphanHash } = makeGitFixture('t489-annotation-fixture');
+  const repoMap = { 'this-repo': { path: root }, 'other-repo': { path: '/tmp/does-not-matter' } };
+
+  // 9a: annotation names a KNOWN OTHER repo-map id -> no finding, even though
+  // the record itself has no Repo: field at all (the archived-entry case
+  // T-489 was filed against).
+  {
+    const activeRecords = [
+      {
+        taskId: 'T-920',
+        status: 'merged',
+        repo: null,
+        rawBlock: taskBlock({ taskId: 'T-920', status: 'merged', repo: null, evidenceLine: `commit: ${orphanHash} (other-repo)` }),
+      },
+    ];
+    const findings = checkCommitReachable({ activeRecords, recentlyCompletedRecords: [], root, repoMap });
+    assert.strictEqual(findings.length, 0, `Test 9a FAIL: expected no findings for a known-other-repo annotation, got: ${JSON.stringify(findings)}`);
+  }
+  console.log('Test 9a passed: a hash annotated with a known OTHER repo-map id produces no local unreachable finding');
+
+  // 9b: annotation names the SELF repo -> still checked locally (fires,
+  // since orphanHash is genuinely unreachable in this fixture).
+  {
+    const activeRecords = [
+      {
+        taskId: 'T-921',
+        status: 'merged',
+        repo: null,
+        rawBlock: taskBlock({ taskId: 'T-921', status: 'merged', repo: null, evidenceLine: `commit: ${orphanHash} (this-repo)` }),
+      },
+    ];
+    const findings = checkCommitReachable({ activeRecords, recentlyCompletedRecords: [], root, repoMap });
+    assert.strictEqual(findings.length, 1, `Test 9b FAIL: expected the self-repo annotation to still be checked locally, got: ${JSON.stringify(findings)}`);
+    assert.strictEqual(findings[0].severity, 'warning', 'Test 9b FAIL: expected WARNING severity (Active tasks, no-local-ref tier)');
+    assert.strictEqual(findings[0].taskId, 'T-921', 'Test 9b FAIL: taskId mismatch');
+  }
+  console.log('Test 9b passed: a hash annotated with the SELF repo id is still checked against local history');
+
+  // 9c: annotation names an id NOT present in the repo map at all -> NOT
+  // silently skipped. Decision (T-489): treat identically to an unannotated
+  // hash — fall through to the normal local check, which still fires
+  // commit_unreachable when the hash is genuinely unreachable. Rationale:
+  // trusting an unrecognized annotation as "definitely elsewhere" would hide
+  // real footguns behind a typo'd or unregistered repo name; verifying
+  // locally by default is the safe failure mode, and the resulting finding
+  // is the "not silently skipped" signal itself.
+  {
+    const activeRecords = [
+      {
+        taskId: 'T-922',
+        status: 'merged',
+        repo: null,
+        rawBlock: taskBlock({ taskId: 'T-922', status: 'merged', repo: null, evidenceLine: `commit: ${orphanHash} (unregistered-repo)` }),
+      },
+    ];
+    const findings = checkCommitReachable({ activeRecords, recentlyCompletedRecords: [], root, repoMap });
+    assert.strictEqual(findings.length, 1, `Test 9c FAIL: expected an unregistered-repo annotation to still be checked locally (not silently skipped), got: ${JSON.stringify(findings)}`);
+    assert.strictEqual(findings[0].taskId, 'T-922', 'Test 9c FAIL: taskId mismatch');
+  }
+  console.log('Test 9c passed: a hash annotated with an unknown/unregistered repo id is NOT silently skipped — it is still checked locally, so a genuine footgun still fires');
+
+  // 9d: unannotated hash behavior is unchanged (regression guard against 4b).
+  {
+    const activeRecords = [
+      {
+        taskId: 'T-923',
+        status: 'merged',
+        repo: null,
+        rawBlock: taskBlock({ taskId: 'T-923', status: 'merged', repo: null, evidenceLine: `commit: ${orphanHash}` }),
+      },
+    ];
+    const findings = checkCommitReachable({ activeRecords, recentlyCompletedRecords: [], root, repoMap });
+    assert.strictEqual(findings.length, 1, `Test 9d FAIL: expected unannotated-hash behavior unchanged, got: ${JSON.stringify(findings)}`);
+  }
+  console.log('Test 9d passed: an unannotated hash is checked locally exactly as before (no behavior change)');
+}
+
+// ---------------------------------------------------------------------------
+// Test 10 (T-489): archived-section (Recently completed) aggregation
+// threshold — below collapses to nothing extra (individual findings),
+// above collapses to one aggregate info finding naming the count.
+// ---------------------------------------------------------------------------
+{
+  const { root, orphanHash } = makeGitFixture('t489-aggregate-fixture');
+  const repoMap = { 'this-repo': { path: root } };
+
+  const makeRecentlyCompletedRecords = (count) =>
+    Array.from({ length: count }, (_, i) => {
+      const taskId = `T-${950 + i}`;
+      return {
+        taskId,
+        status: 'merged',
+        repo: 'this-repo',
+        rawBlock: taskBlock({ taskId, status: 'merged', repo: 'this-repo', evidenceLine: `commit: ${orphanHash}` }),
+      };
+    });
+
+  // 10a: at or below the threshold -> individual info findings, one per task.
+  {
+    const recentlyCompletedRecords = makeRecentlyCompletedRecords(ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD);
+    const findings = checkCommitReachable({ activeRecords: [], recentlyCompletedRecords, root, repoMap });
+    assert.strictEqual(
+      findings.length,
+      ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD,
+      `Test 10a FAIL: expected ${ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD} individual findings at the threshold, got ${findings.length}`
+    );
+    assert.ok(findings.every((f) => f.severity === 'info'), 'Test 10a FAIL: all archived findings should be info severity');
+    assert.ok(findings.every((f) => f.taskId !== 'AGGREGATE'), 'Test 10a FAIL: at the threshold, findings should still be individual (not aggregated)');
+  }
+  console.log(`Test 10a passed: exactly ${ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD} archived-section unreachable findings stay individual (threshold not exceeded)`);
+
+  // 10b: above the threshold -> collapsed into ONE aggregate info finding
+  // naming the count.
+  {
+    const count = ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD + 3;
+    const recentlyCompletedRecords = makeRecentlyCompletedRecords(count);
+    const findings = checkCommitReachable({ activeRecords: [], recentlyCompletedRecords, root, repoMap });
+    assert.strictEqual(findings.length, 1, `Test 10b FAIL: expected exactly 1 aggregate finding above threshold, got ${findings.length}: ${JSON.stringify(findings)}`);
+    assert.strictEqual(findings[0].severity, 'info', 'Test 10b FAIL: aggregate finding must be info severity');
+    assert.ok(findings[0].message.includes(String(count)), `Test 10b FAIL: expected the aggregate message to name the count (${count}): ${findings[0].message}`);
+    assert.strictEqual(findings[0].checkName, 'commit_unreachable', 'Test 10b FAIL: aggregate should keep checkName commit_unreachable');
+  }
+  console.log('Test 10b passed: archived-section unreachable findings above the threshold collapse into a single aggregate info finding naming the count');
+
+  // 10c: aggregation never applies to the Active tasks section — even a
+  // large number of Active-tasks unreachable findings stay individual
+  // (warning severity), since only the archived section should be capped.
+  {
+    const count = ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD + 3;
+    const activeRecords = Array.from({ length: count }, (_, i) => {
+      const taskId = `T-${970 + i}`;
+      return {
+        taskId,
+        status: 'merged',
+        repo: 'this-repo',
+        rawBlock: taskBlock({ taskId, status: 'merged', repo: 'this-repo', evidenceLine: `commit: ${orphanHash}` }),
+      };
+    });
+    const findings = checkCommitReachable({ activeRecords, recentlyCompletedRecords: [], root, repoMap });
+    assert.strictEqual(findings.length, count, `Test 10c FAIL: expected Active tasks findings to stay individual regardless of count, got ${findings.length}`);
+    assert.ok(findings.every((f) => f.severity === 'warning'), 'Test 10c FAIL: Active tasks findings should stay warning severity');
+  }
+  console.log('Test 10c passed: aggregation never applies to the Active tasks section, regardless of how many findings accumulate');
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
 
-console.log('\nAll T-448 assertions passed.');
+console.log('\nAll T-448/T-489 assertions passed.');

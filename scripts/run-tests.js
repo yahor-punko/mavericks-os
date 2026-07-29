@@ -45,11 +45,58 @@ function discoverTestFiles(filter) {
     .map((name) => path.join(SCRIPTS_DIR, name));
 }
 
+// Hermetic identity env — makes every child test process refuse to derive a
+// git commit identity from ambient machine/OS state (global/system config,
+// gecos full name, etc). Without this, suite green depends on whichever
+// identity happens to be configured on the machine running it (masked on
+// macOS, where git synthesizes an identity from the OS user when config is
+// silent; absent on bare ubuntu CI runners, which is what turned this
+// class into a real outage). GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM point git
+// at empty files instead of the real global/system config, and the
+// GIT_CONFIG_COUNT/KEY_0/VALUE_0 triple injects `user.useConfigOnly=true`
+// as if it were passed via `-c` on every git invocation — command-line `-c`
+// counts as configuration for this key, so it forces git to refuse any
+// derived identity rather than silently inventing one. A no-op config-only
+// scrub (nulling global/system config alone) does NOT work: it is
+// insufficient on any platform where git can derive an identity outside of
+// config (verified — macOS synthesizes one from the OS user, so a
+// config-only scrub is a no-op there and locally). Enforcement lives here,
+// in the runner, rather than in ci.yml, so it covers local runs, CI, and
+// adopter machines uniformly, and CI inherits it for free because CI runs
+// `npm test`.
+//
+// Residual channels — verified, not hypothetical, so a future edit here
+// does not accidentally "re-discover" them as bugs:
+//   - GIT_AUTHOR_* / GIT_COMMITTER_* env vars OUTRANK user.useConfigOnly and
+//     bypass this guard entirely; EMAIL does NOT bypass it (also verified —
+//     stronger than expected, worth recording since it's the opposite of
+//     GIT_AUTHOR_*/GIT_COMMITTER_*'s behavior).
+//   - Running a single test file directly (`node scripts/test-X.js`, i.e.
+//     not through this runner) bypasses this env entirely — the guard only
+//     applies inside `npm test` / `node scripts/run-tests.js`.
+//   - A per-test env object that overrides GIT_CONFIG_COUNT (even to the
+//     same value, e.g. to add its own single `-c` entry for an unrelated
+//     probe) silently exits this guard for that git invocation, because it
+//     replaces rather than extends the GIT_CONFIG_COUNT/KEY_N/VALUE_N set.
+//     scripts/test-publish-build.js Test 16a does exactly this for a
+//     core.hooksPath probe, and is harmless today ONLY because that
+//     probe's clone sets a local identity via config beforehand — any such
+//     site MUST supply identity by other config means, since this failure
+//     mode is silent (the guard just doesn't fire) rather than loud.
+const HERMETIC_GIT_ENV = {
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: 'user.useConfigOnly',
+  GIT_CONFIG_VALUE_0: 'true',
+};
+
 function runOne(filePath) {
   const result = spawnSync(process.execPath, [filePath], {
     cwd: SCRIPTS_DIR,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
+    env: { ...process.env, ...HERMETIC_GIT_ENV },
   });
   const passed = result.status === 0 && !result.error;
   return {

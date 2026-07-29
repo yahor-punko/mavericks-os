@@ -24,6 +24,23 @@
 //
 // Usage: node scripts/mavp-publish-assemble.js <out-dir>
 //
+// T-550: this script used to default `ship` to [] and `reset` to {} when
+// either bucket was absent or mistyped (`Array.isArray(manifest.ship) ?
+// manifest.ship : []` / the object-typeof equivalent for `reset`) — the
+// same vacuous-GREEN class T-534 round 2 closed for the provenance
+// verifier, just reached from a different entry point: instead of
+// certifying zero paths, this script would ASSEMBLE zero (or a silently
+// narrowed) ship set and report success. loadManifest() below now refuses
+// via validateManifestShape() (reused, never re-implemented, from
+// mavp-publish-verify-provenance.js — the established shared home for this
+// contract) before main() ever reads `manifest.ship`/`manifest.reset`.
+// TRUTH ANCHOR for this consumer specifically: the disk manifest compared
+// against the HEAD tree extraction below (extractHeadTreeToTemp) — never
+// the git index (that is check-publish-manifest.js's job) and never the
+// verifier's own HEAD-anchored manifest read (this script's whole point is
+// assembling from whatever is CURRENTLY on disk, uncommitted edits
+// included, so it must read the disk manifest, not HEAD's).
+//
 // No external dependencies — uses only Node's `child_process`, `fs`, `path`, `os`.
 
 'use strict';
@@ -36,6 +53,12 @@ const path = require('node:path');
 const REPO_ROOT = path.resolve(__dirname, '..');
 const MANIFEST_PATH = path.join(REPO_ROOT, 'scripts', 'publish-manifest.json');
 const CHECK_SCRIPT_PATH = path.join(REPO_ROOT, 'scripts', 'check-publish-manifest.js');
+const VERIFY_PROVENANCE_SCRIPT_PATH = path.join(REPO_ROOT, 'scripts', 'mavp-publish-verify-provenance.js');
+
+// T-550 — reused (never re-implemented) from the established shared home;
+// see this file's header for why this is the right truth anchor for THIS
+// consumer even though the rule itself is shared.
+const { validateManifestShape } = require(VERIFY_PROVENANCE_SCRIPT_PATH);
 
 function fail(message) {
   console.error(`ERROR: ${message}`);
@@ -49,11 +72,17 @@ function loadManifest() {
   } catch (err) {
     fail(`could not read manifest at ${MANIFEST_PATH}: ${err.message}`);
   }
+  let manifest;
   try {
-    return JSON.parse(raw);
+    manifest = JSON.parse(raw);
   } catch (err) {
     fail(`could not parse manifest at ${MANIFEST_PATH}: ${err.message}`);
   }
+  const shapeCheck = validateManifestShape(manifest);
+  if (!shapeCheck.ok) {
+    fail(`manifest at ${MANIFEST_PATH} failed shape validation: ${shapeCheck.reason}`);
+  }
+  return manifest;
 }
 
 // Runs the T-331 completeness check as a child process. Fails closed (exits
@@ -116,6 +145,30 @@ function pathExists(p) {
   }
 }
 
+// Resolves `relPath` under `parentDir` and asserts the result stays inside
+// `parentDir`, via path.relative: the resolved path only escapes when
+// relPath contains ".." segments that walk past parentDir's root, in which
+// case the relative result either starts with ".." or is itself absolute
+// (path.relative can return an absolute path on some platforms when the two
+// paths share no common root). Fails closed (non-zero, no write attempted)
+// rather than silently clamping or stripping the offending segments, because
+// a manifest entry that tries to escape its parent is a hostile/corrupt
+// input, not something to "fix and continue". Applied to BOTH the
+// extraction-side source resolution (tempExtractDir) and the output-side
+// destination resolution (outDir) for every ship/reset entry — the same
+// manifest string is untrusted in both directions.
+function resolveContained(parentDir, relPath, label) {
+  const resolved = path.join(parentDir, relPath);
+  const rel = path.relative(parentDir, resolved);
+  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    fail(
+      `${label} "${relPath}" resolves outside of "${parentDir}" (path escape refused). ` +
+        'Manifest entries must never contain ".." segments.'
+    );
+  }
+  return resolved;
+}
+
 function copyFile(srcPath, destPath) {
   fs.mkdirSync(path.dirname(destPath), { recursive: true });
   const stat = fs.lstatSync(srcPath);
@@ -166,9 +219,12 @@ function main() {
     fail(`refusing to assemble into a path inside the source repo: ${outDir}`);
   }
 
+  // T-550 — loadManifest() already refused above (via validateManifestShape)
+  // on any malformed shape, so `manifest.ship`/`manifest.reset` are read
+  // directly here rather than through the old defaulting idiom.
   const manifest = loadManifest();
-  const ship = Array.isArray(manifest.ship) ? manifest.ship : [];
-  const reset = manifest.reset && typeof manifest.reset === 'object' ? manifest.reset : {};
+  const ship = manifest.ship;
+  const reset = manifest.reset;
   // exclude is read for completeness but intentionally never copied.
 
   console.log('Running preflight manifest completeness check...');
@@ -186,24 +242,26 @@ function main() {
 
     console.log(`Assembling ${ship.length} ship path(s)...`);
     for (const shipPath of ship) {
-      const srcPath = path.join(tempExtractDir, shipPath);
+      const srcPath = resolveContained(tempExtractDir, shipPath, 'ship source path');
       if (!pathExists(srcPath)) {
         fail(`ship path "${shipPath}" not found in HEAD tree extraction — manifest/index mismatch.`);
       }
-      copyFile(srcPath, path.join(outDir, shipPath));
+      const destPath = resolveContained(outDir, shipPath, 'ship destination path');
+      copyFile(srcPath, destPath);
     }
 
     const resetDestPaths = Object.keys(reset);
     console.log(`Assembling ${resetDestPaths.length} reset destination(s) from their templates/ starters...`);
     for (const destPath of resetDestPaths) {
       const starterPath = reset[destPath];
-      const srcPath = path.join(tempExtractDir, starterPath);
+      const srcPath = resolveContained(tempExtractDir, starterPath, 'reset starter path');
       if (!pathExists(srcPath)) {
         fail(
           `reset starter "${starterPath}" (for destination "${destPath}") not found in HEAD tree extraction.`
         );
       }
-      copyFile(srcPath, path.join(outDir, destPath));
+      const resolvedDestPath = resolveContained(outDir, destPath, 'reset destination path');
+      copyFile(srcPath, resolvedDestPath);
     }
 
     // exclude paths are omitted entirely — no action needed.
@@ -243,4 +301,14 @@ function main() {
   }
 }
 
-main();
+// Exported for the T-505 regression test (test-publish-assemble-containment.js)
+// to exercise resolveContained()/pathExists()/copyFile() directly against
+// fixture data — mirrors the module.exports pattern already used by
+// check-publish-manifest.js. CLI behavior (`node scripts/mavp-publish-assemble.js
+// <out-dir>`) is unchanged: main() still runs unconditionally when this file
+// is executed directly.
+module.exports = { resolveContained, pathExists, copyFile, listFilesRecursive };
+
+if (require.main === module) {
+  main();
+}

@@ -134,6 +134,10 @@ If a vertical returned no useful results, note it briefly and move on — do not
 - Keep cost low: `numResults` ≤ 10 per call unless the brief explicitly requires more.
 - When done, summarize which categories were searched, how many results were returned per category, and any categories that returned empty.
 
+## Report completion token
+
+End every final report with a literal last line — nothing may follow it — using the grammar defined in `docs/AGENT_SPEC.md` — "Report completion token": `MAVP_REPORT role=exa-researcher task=<T-NNN|n/a> verdict=<done|blocked>`. Use `task=n/a` when the research request is not tied to a registered T-NNN.
+
 ## Escalation
 
 <!-- protected -->

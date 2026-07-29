@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const readline = require('node:readline');
-const { collectOperatorData, clip, formatIsoTime, normalizeWhitespace, relativeTime, renderThinSnapshot, shortenSessionKey } = require('./mavp-operator-lib');
+const { collectOperatorData, clip, formatIsoTime, IN_FLIGHT_STATUSES, normalizeWhitespace, relativeTime, renderThinSnapshot, shortenSessionKey } = require('./mavp-operator-lib');
 
 const MAX_WAVE_TASKS = 10;
 
@@ -139,8 +139,9 @@ function renderCurrentState(workflow, waits) {
     const stratText = workflow.wave_strategy_note.length > 60 ? `${workflow.wave_strategy_note.slice(0, 59)}…` : workflow.wave_strategy_note;
     lines.push(`Strategy: ${stratText}`);
   }
-  const inFlightStatuses = new Set(['in_progress', 'dev_done', 'ux_review', 'ux_passed', 'security_review', 'security_passed', 'ready_for_qa', 'qa_in_progress']);
-  const inFlightCount = waveTasks.filter((t) => inFlightStatuses.has(t.status)).length;
+  // IN_FLIGHT_STATUSES is imported from mavp-operator-lib.js — the single shared source
+  // of truth for "what counts as active work" across operator surfaces (see T-525).
+  const inFlightCount = waveTasks.filter((t) => IN_FLIGHT_STATUSES.has(t.status)).length;
   if (inFlightCount > 0) {
     lines.push(`In-flight: ${inFlightCount} task${inFlightCount === 1 ? '' : 's'}`);
   }

@@ -89,7 +89,7 @@ try {
   const seededSettings = {
     effortLevel: 'high',
     alwaysThinkingEnabled: true,
-    fallbackModel: ['claude-opus-4-8'],
+    fallbackModel: ['claude-haiku-4-5'],
     permissions: {
       allow: [
         'Bash(node:*)',
@@ -147,7 +147,7 @@ try {
   assert.strictEqual(updatedSettings.alwaysThinkingEnabled, true, 'FAIL: alwaysThinkingEnabled changed');
   assert.deepStrictEqual(
     updatedSettings.fallbackModel,
-    ['claude-opus-4-8'],
+    ['claude-haiku-4-5'],
     'FAIL: fallbackModel changed'
   );
   assert.deepStrictEqual(
@@ -188,3 +188,51 @@ try {
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
+
+// --- T-484: fallbackModel migration assertions ---
+// Fingerprint-matched migration: --update rewrites fallbackModel to ['opus']
+// ONLY when the existing value deep-equals the exact old installer-seeded
+// default ['claude-opus-4-8']. Any other value (including a chain that merely
+// contains that id alongside others) is preserved byte-identical.
+function runFallbackModelMigrationCase(seededChain, expectedChain, expectMigrationLog) {
+  const caseScratch = makeScratchDir('mavp-install-fallback-migration-');
+  try {
+    const scriptsDir = path.join(caseScratch, 'scripts');
+    const claudeDir = path.join(caseScratch, '.claude');
+    fs.mkdirSync(scriptsDir, { recursive: true });
+    fs.mkdirSync(claudeDir, { recursive: true });
+
+    const settingsPath = path.join(claudeDir, 'settings.local.json');
+    const seededSettings = { fallbackModel: seededChain };
+    fs.writeFileSync(settingsPath, JSON.stringify(seededSettings, null, 2) + '\n', 'utf8');
+
+    const output = execFileSync('node', [INSTALL_SCRIPT, '--update', caseScratch], { encoding: 'utf8' });
+
+    const updatedSettings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    assert.deepStrictEqual(
+      updatedSettings.fallbackModel,
+      expectedChain,
+      `FAIL: fallbackModel for seeded chain ${JSON.stringify(seededChain)} expected ${JSON.stringify(expectedChain)}, got ${JSON.stringify(updatedSettings.fallbackModel)}`
+    );
+
+    const migrationLogged = output.includes('fallbackModel migrated: old seeded default claude-opus-4-8 → opus');
+    assert.strictEqual(
+      migrationLogged,
+      expectMigrationLog,
+      `FAIL: migration log presence mismatch for seeded chain ${JSON.stringify(seededChain)} (expected logged=${expectMigrationLog}, got=${migrationLogged})`
+    );
+
+    return { updatedSettings, output };
+  } finally {
+    fs.rmSync(caseScratch, { recursive: true, force: true });
+  }
+}
+
+// Case A: exact old-default fingerprint → migrated to ['opus'], migration logged.
+runFallbackModelMigrationCase(['claude-opus-4-8'], ['opus'], true);
+console.log('T-484 assertion passed: exact old-default fallbackModel migrated to [\'opus\'] with log line');
+
+// Case B: multi-element chain that merely CONTAINS claude-opus-4-8 → NOT migrated
+// (fingerprint is the whole array, not a substring match), preserved byte-identical.
+runFallbackModelMigrationCase(['claude-opus-4-8', 'sonnet'], ['claude-opus-4-8', 'sonnet'], false);
+console.log('T-484 assertion passed: multi-element chain containing claude-opus-4-8 preserved byte-identical, not migrated');

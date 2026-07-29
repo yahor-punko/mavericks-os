@@ -48,6 +48,10 @@ Review surfaces and artifacts for usability, scan order, and clarity. You observ
 - **Design artifact missing or inaccessible:** If the interface, component, or flow to review cannot be found, report the missing artifact by name and expected location. Do not produce a review based on assumptions.
 - **Surface undefined:** If the brief does not specify what to review, request clarification. Do not pick a surface to review arbitrarily.
 
+## Report completion token
+
+End every final report with a literal last line — nothing may follow it — using the grammar defined in `docs/AGENT_SPEC.md` — "Report completion token": `MAVP_REPORT role=ux task=<T-NNN|n/a> verdict=<pass|fail>`. Use `verdict=pass` only for `ux_passed`; use `verdict=fail` for `ux_needs_fix` or any other unresolved outcome. The Main Agent never books `ux_passed` from a report missing this token line, even if the report body otherwise reads like a pass.
+
 ## Escalation
 
 <!-- protected -->

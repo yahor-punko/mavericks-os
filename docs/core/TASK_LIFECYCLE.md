@@ -95,6 +95,8 @@ QA is actively reviewing the slice.
 ### qa_passed
 QA accepted the slice.
 
+**Held/waiting state (DR-005)** — a task can sit at `qa_passed` for a long time when it declares `- **Blocked by:** <repo>/T-NNN` and that blocker is not yet `merged`. This is not stalled work and not a validator violation: the task owner finished their side and is correctly waiting on someone else's. The validator's `blocked_by_open` check reflects this directly in its severity tier: `qa_passed` (and `ready_for_qa`) with an unmerged blocker is WARNING (exit 1 at worst, never blocks a commit); only `merged` with an unmerged blocker is FAILURE (exit 2) — that is the actual violation, shipping ahead of an unmet dependency. Do not read a `qa_passed` task with an open `Blocked by:` relation as broken; read it as deliberately held. An optional `Hold:` field (naming what is held, why, and since when) is accepted by DR-005 for surfacing this more explicitly, but is not yet implemented as of T-487 — see `docs/core/DECISIONS.md` DR-005.
+
 ### needs_fix
 QA or orchestrator found issues that require rework.
 

@@ -125,13 +125,37 @@ function insertIntoActiveWave(markdown, entry) {
 
 /**
  * Insert entry into TASK_STATUS.md Active tasks section.
- * Inserts before ## Recently completed tasks if present, else appends.
+ * Bounds the insertion to the END of the "## Active tasks" section itself
+ * (terminated by the next "## " heading), mirroring insertIntoActiveWave's
+ * approach — so intermediate sections (e.g. "## Parked — Wave N",
+ * "## Deferred tasks") that sit between "## Active tasks" and
+ * "## Recently completed tasks" never capture new entries (T-485).
+ * Falls back to inserting before "## Recently completed tasks" when the
+ * "## Active tasks" section itself is absent, then to end-of-file when
+ * neither anchor exists.
  *
  * @param {string} markdown - Content of TASK_STATUS.md
  * @param {string} entry - Task block to insert
  * @returns {string} Updated markdown
  */
 function insertIntoActiveTasks(markdown, entry) {
+  const activeTasksMatch = markdown.match(/\n## Active tasks[^\n]*/);
+  if (activeTasksMatch) {
+    const activeTasksStart = markdown.indexOf(activeTasksMatch[0]);
+    const afterHeaderStart = activeTasksStart + activeTasksMatch[0].length;
+    const restOfFile = markdown.slice(afterHeaderStart);
+
+    // Find the next h2 heading (## ) that terminates the Active tasks section
+    const nextSectionMatch = restOfFile.match(/\n(?=## )/);
+    if (nextSectionMatch && nextSectionMatch.index !== undefined) {
+      const insertAt = afterHeaderStart + nextSectionMatch.index;
+      return markdown.slice(0, insertAt) + '\n' + entry + markdown.slice(insertAt);
+    }
+
+    // No next section — append at end of file
+    return markdown.trimEnd() + '\n' + entry;
+  }
+
   const completedMatch = markdown.match(/\n## Recently completed tasks/);
   if (completedMatch) {
     const idx = markdown.indexOf(completedMatch[0]);
@@ -161,6 +185,32 @@ function buildTaskStatusEntry(id, title, owner, verificationType, status = 'plan
 - **Last verified by:** —
 - **Evidence:** —
 `;
+}
+
+/**
+ * The whole-line advisory printed by --new-task / --quick-task whenever a
+ * task's Origin resolves to "manual" — i.e. it bypassed the mandatory
+ * architect decomposition gate (see CLAUDE.md, "Before creating tasks —
+ * mandatory architect gate"). Advisory only: never blocks, never adds a
+ * validator finding. Shared verbatim so both commands print the identical
+ * line (T-531).
+ */
+const ARCHITECT_GATE_ADVISORY = 'ADVISORY: Origin: manual — task registered without architect decomposition; see CLAUDE.md, "Before creating tasks — mandatory architect gate" (advisory only, not enforced).';
+
+/**
+ * Resolve a task's BACKLOG.md `- **Origin:**` field from an `--origin` CLI
+ * flag value. Only the exact (case-insensitive, whitespace-trimmed) value
+ * "architect" stamps `architect`; every other value — including a missing
+ * or empty flag — resolves to `manual` (the default, per T-531).
+ *
+ * @param {string|null|undefined} originFlag - Raw --origin flag value, or null/undefined when not passed
+ * @returns {'architect'|'manual'}
+ */
+function resolveTaskOrigin(originFlag) {
+  if (typeof originFlag === 'string' && originFlag.trim().toLowerCase() === 'architect') {
+    return 'architect';
+  }
+  return 'manual';
 }
 
 /**
@@ -240,22 +290,36 @@ function parseProcessState(markdown) {
   };
 }
 
-function parseActiveTask(markdown) {
-  const activeTasksSection = getSection(markdown, '## Active tasks');
-  const blocks = activeTasksSection
-    .split(/\n(?=###\s+T-\d+)/)
-    .map((block) => block.trim())
-    .filter(Boolean);
+// In-flight task statuses — a task in one of these states is actively being
+// worked (as opposed to terminal statuses like merged/deferred/deprecated or
+// the not-yet-started `planned`). This is the single shared source of truth
+// for "what counts as active work" across operator surfaces — mavp-operator-agent.js
+// (active_slices, computeNextAction's STATUS_PRIORITY key set),
+// mavp-operator-dashboard.js (in-flight count), and parseTouchesConflicts()
+// (below, unioned with `planned`) all import this Set rather than redefining
+// their own local copy (T-525 found four divergent copies; three are now
+// derived from this one — parseTouchesConflicts adds `planned` on top since
+// it also needs to catch not-yet-started work).
+//
+// `qa_passed` is DELIBERATELY excluded: a qa_passed task is done from the
+// sub-agent's perspective and is awaiting the Main-Agent merge ritual, not
+// further sub-agent work — do not "complete" this set by adding it back.
+//
+// NOTE: any consumer that keys a priority/weight map off task status (e.g.
+// computeNextAction's STATUS_PRIORITY in mavp-operator-agent.js) must give
+// every status in this Set an explicit entry — an omitted status silently
+// falls through to a default/lowest-priority bucket instead of erroring.
+const IN_FLIGHT_STATUSES = new Set([
+  'ready_for_qa', 'qa_in_progress',
+  'dev_done', 'security_review', 'security_passed', 'ux_review', 'ux_passed',
+  'in_progress', 'needs_fix', 'security_needs_fix', 'ux_needs_fix',
+]);
 
-  const first = blocks[0];
-  if (!first) {
-    return null;
-  }
-
-  const headingMatch = first.match(/^###\s+(T-\d+)\s+—\s+(.+)$/m);
-  const statusMatch = first.match(/^- \*\*Status:\*\*\s+(.+)$/m);
-  const ownerMatch = first.match(/^- \*\*Owner:\*\*\s+(.+)$/m);
-  const notesMatch = first.match(/^- \*\*Notes:\*\*\s+(.+)$/m);
+function parseTaskBlock(block) {
+  const headingMatch = block.match(/^###\s+(T-\d+)\s+—\s+(.+)$/m);
+  const statusMatch = block.match(/^- \*\*Status:\*\*\s+(.+)$/m);
+  const ownerMatch = block.match(/^- \*\*Owner:\*\*\s+(.+)$/m);
+  const notesMatch = block.match(/^- \*\*Notes:\*\*\s+(.+)$/m);
 
   return {
     id: headingMatch ? headingMatch[1] : 'unknown',
@@ -264,6 +328,30 @@ function parseActiveTask(markdown) {
     owner: ownerMatch ? normalizeWhitespace(ownerMatch[1]) : 'unknown',
     notes: notesMatch ? normalizeWhitespace(notesMatch[1]) : '',
   };
+}
+
+/**
+ * Selects the task to present as the session's current focus from
+ * TASK_STATUS.md's "## Active tasks" section. Only in-flight statuses
+ * (IN_FLIGHT_STATUSES, above) are eligible — a terminal entry (deferred,
+ * merged, deprecated) that happens to still sit inside the Active tasks
+ * section is skipped rather than reported as active. Returns null when no
+ * in-flight task is found, whether because the section is empty or because
+ * every entry present is terminal.
+ */
+function parseActiveTask(markdown) {
+  const activeTasksSection = getSection(markdown, '## Active tasks');
+  const blocks = activeTasksSection
+    .split(/\n(?=###\s+T-\d+)/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  if (blocks.length === 0) {
+    return null;
+  }
+
+  const parsedBlocks = blocks.map(parseTaskBlock);
+  return parsedBlocks.find((task) => IN_FLIGHT_STATUSES.has(task.status)) || null;
 }
 
 function inferClassification(stage, task, initiative = '') {
@@ -809,11 +897,13 @@ function parseTouchesConflicts(backlogMarkdown) {
   // Split on task headings (### T-NNN) to get per-task blocks
   const taskBlocks = backlogMarkdown.split(/\n(?=###\s+T-\d+\s+)/);
 
-  // Active-status values that mean the task is in-flight
-  const activeStatuses = new Set([
-    'in_progress', 'dev_done', 'ux_review', 'ux_passed',
-    'security_review', 'security_passed', 'ready_for_qa', 'qa_in_progress', 'planned',
-  ]);
+  // Active-status values that mean the task is in-flight — derived from the shared
+  // IN_FLIGHT_STATUSES plus `planned`, since Touches-conflict detection also needs to
+  // catch not-yet-started work planning to touch the same file (T-525: this used to be
+  // a fifth hand-maintained literal set that silently excluded the needs-fix statuses,
+  // so a task actively being re-worked after a failed review never participated in
+  // conflict detection for the files it was about to edit again).
+  const activeStatuses = new Set([...IN_FLIGHT_STATUSES, 'planned']);
 
   // Map: filePath → taskId[]
   const fileToTasks = new Map();
@@ -865,7 +955,12 @@ function collectOperatorData() {
   );
   const activeTask = parseActiveTask(taskStatusContent);
   const waveProgress = parseWaveProgress(taskStatusContent);
-  const waveTasks = parseWaveTasks(taskStatusContent, backlogContent);
+  // T-496: enrich each wave task with its parsed `Hold:` field (BACKLOG.md
+  // only field, any status) so a held task reads as deliberate rather than
+  // stalled in --snapshot. Additive-only — tasks with no Hold: are untouched.
+  const taskHolds = parseTaskHolds(backlogContent);
+  const waveTasks = parseWaveTasks(taskStatusContent, backlogContent)
+    .map((t) => (taskHolds.has(t.id) ? { ...t, hold: taskHolds.get(t.id) } : t));
   const classification = inferClassification(processState.stage, activeTask, processState.initiative);
 
   const deployContours = processState._deployContours || 0;
@@ -940,7 +1035,7 @@ function collectOperatorData() {
     workflow_state: {
       initiative_title: processState.initiative,
       stage: processState.stage,
-      active_task: activeTask ? `${activeTask.id} — ${activeTask.title}` : 'none',
+      active_task: activeTask ? `${activeTask.id} — ${activeTask.title}` : null,
       owner: activeTask?.owner || 'unknown',
       classification,
       next_action: processState._nextAction || '',
@@ -1046,7 +1141,7 @@ function renderThinSnapshot(data) {
       const compact = trajectorySummary.map((r) => `${r.role} ${r.count} (${r.successPct}%)`).join(', ');
       return [`Trajectories: ${compact}`];
     })()),
-    `Active task: ${workflow.active_task || 'none'}`,
+    `Active task: ${workflow.active_task || 'none — no in-flight task'}`,
     `Task status: ${workflow.task_status || 'unknown'}`,
     `Owner: ${workflow.owner || 'unknown'}`,
     `Classification: ${workflow.classification}`,
@@ -1068,6 +1163,20 @@ function renderThinSnapshot(data) {
   if (workflow.deploy_contours >= 2 && workflow.deploy_pending_tasks && workflow.deploy_pending_tasks.length > 0) {
     const deployLines = workflow.deploy_pending_tasks.map(t => `${t.id}${t.repo ? ` (${t.repo})` : ''} — ${t.title}`);
     parts.push('', renderList('Pending prod deployment', deployLines, 'none'));
+  }
+
+  // T-496 (DR-005): render each task carrying a Hold: field so it reads as
+  // deliberate rather than stalled, rather than folding it silently into
+  // "Waits / blockers" alongside genuinely stuck work.
+  const heldTasks = (waveTasks || []).filter((t) => t.hold);
+  if (heldTasks.length > 0) {
+    parts.push('', `Held tasks (${heldTasks.length}):`);
+    for (const t of heldTasks) {
+      const { what, why, since } = t.hold;
+      const whySuffix = why ? ` — ${why}` : '';
+      const sinceSuffix = since ? ` (since ${since})` : '';
+      parts.push(`  - ${t.id} — hold: ${what || t.hold.raw}${whySuffix}${sinceSuffix}`);
+    }
   }
 
   if (dueRechecks && dueRechecks.length > 0) {
@@ -1861,8 +1970,12 @@ function extractTrajectories(role, options = {}) {
       // explicit field overrides heuristic
       needsFixCount = parseInt(explicitFixRoundsMatch[1], 10);
     } else {
-      // Fall back to keyword heuristic
-      const needsFixMatches = evidenceLower.match(/needs[_\s]fix/g) || [];
+      // Fall back to keyword heuristic. Negative lookahead excludes matches that are
+      // part of the literal field-name token `needs_fix_rounds` (a documentation
+      // mention of the field, e.g. "record needs_fix_rounds: N" is not a fix-round
+      // occurrence) while still counting genuine prose keyword mentions such as
+      // "entered needs_fix twice".
+      const needsFixMatches = evidenceLower.match(/needs[_\s]fix(?!_rounds)/g) || [];
       needsFixCount = needsFixMatches.length;
     }
 
@@ -2672,6 +2785,23 @@ function parseRepoMap(root) {
 }
 
 /**
+ * True when a `Blocked by:` raw field value is the conventional "no blockers"
+ * case: absent, blank, or the standard em-dash/hyphen placeholder (T-492).
+ * This is the single source of truth for "no blockers" — both parseBlockedBy()
+ * (parsing) and checkBlockedBy() in mavp-validator.js (validation) call this
+ * instead of re-testing the placeholder strings themselves, so the two
+ * functions cannot drift out of agreement on what counts as empty.
+ *
+ * @param {string|null} raw - Raw field value.
+ * @returns {boolean}
+ */
+function isBlockedByEmpty(raw) {
+  if (!raw) return true;
+  const trimmed = raw.trim();
+  return !trimmed || trimmed === '—' || trimmed === '-';
+}
+
+/**
  * Parse a `- **Blocked by:** <repo>/T-NNN[, <repo>/T-MMM ...]` field value into
  * structured {repo, taskId} pairs (T-393 — cross-repo Blocked by relation).
  *
@@ -2685,9 +2815,8 @@ function parseRepoMap(root) {
  * @returns {Array<{repo: string, taskId: string}>}
  */
 function parseBlockedBy(raw) {
-  if (!raw) return [];
+  if (isBlockedByEmpty(raw)) return [];
   const trimmed = raw.trim();
-  if (!trimmed || trimmed === '—' || trimmed === '-') return [];
   return trimmed
     .split(',')
     .map((s) => s.trim())
@@ -2697,6 +2826,87 @@ function parseBlockedBy(raw) {
       return m ? { repo: m[1], taskId: m[2] } : null;
     })
     .filter(Boolean);
+}
+
+/**
+ * True when a `Hold:` raw field value is the conventional "no hold" case:
+ * absent, blank, or the standard em-dash/hyphen placeholder — the same
+ * emptiness convention isBlockedByEmpty() applies to `Blocked by:` (T-492).
+ * Single source of truth for "no hold": parseHold() (parsing) and the
+ * validator's applyHoldDowngrade() (scoped downgrade gate, T-496) both call
+ * this instead of re-testing the placeholder strings themselves.
+ *
+ * @param {string|null} raw - Raw field value.
+ * @returns {boolean}
+ */
+function isHoldEmpty(raw) {
+  if (!raw) return true;
+  const trimmed = raw.trim();
+  return !trimmed || trimmed === '—' || trimmed === '-';
+}
+
+/**
+ * Parse a `- **Hold:** <what> — <why> (<since>)` field value (DR-005) into a
+ * structured `{ what, why, since, raw }` shape, e.g.
+ * `- **Hold:** prod — waiting on a coordinated deploy window (2026-07-24)`.
+ *
+ * Deliberately tolerant, not a validation gate: DR-005 makes `Hold:` optional
+ * and forbids treating its absence as a finding; this parser extends the same
+ * spirit to a malformed-but-present value. A value missing the ` — ` why
+ * separator or the trailing `(since)` parenthetical still parses — `what`
+ * falls back to the whole trimmed string, `why`/`since` are `null` — rather
+ * than being rejected or surfaced as a finding. The field is meant to lower
+ * ceremony for recording a deliberate wait, not add a new way to fail.
+ *
+ * @param {string|null} raw - Raw field value.
+ * @returns {{what: string|null, why: string|null, since: string|null, raw: string}|null}
+ *   `null` when the field is empty per isHoldEmpty().
+ */
+function parseHold(raw) {
+  if (isHoldEmpty(raw)) return null;
+  const trimmed = raw.trim();
+
+  let rest = trimmed;
+  let since = null;
+  const withDate = trimmed.match(/^(.*?)\s*\(([^()]+)\)\s*$/);
+  if (withDate) {
+    rest = withDate[1].trim();
+    since = withDate[2].trim();
+  }
+
+  const emDashSplit = rest.split(/\s+—\s+/);
+  const what = (emDashSplit[0] || rest).trim() || null;
+  const why = emDashSplit.length > 1 ? emDashSplit.slice(1).join(' — ').trim() : null;
+
+  return { what, why, since, raw: trimmed };
+}
+
+/**
+ * Parse every task's `- **Hold:** ...` field out of BACKLOG.md, regardless of
+ * status or section (T-496). Used to enrich the `--snapshot` wave-tasks view
+ * so a held task reads as deliberate rather than stalled, at any lifecycle
+ * position (including a merged task deliberately held pending prod deploy).
+ *
+ * @param {string} backlogMarkdown - Raw content of BACKLOG.md
+ * @returns {Map<string, {what:string|null, why:string|null, since:string|null, raw:string}>}
+ */
+function parseTaskHolds(backlogMarkdown) {
+  const taskBlocks = (backlogMarkdown || '').split(/\n(?=###\s+T-\d+\s+)/);
+  const holds = new Map();
+
+  for (const block of taskBlocks) {
+    const idMatch = block.match(/^###\s+(T-\d+)\s+/);
+    if (!idMatch) continue;
+    const taskId = idMatch[1];
+
+    const holdMatch = block.match(/^- \*\*Hold:\*\*\s+(.+)$/m);
+    if (!holdMatch) continue;
+
+    const parsed = parseHold(holdMatch[1]);
+    if (parsed) holds.set(taskId, parsed);
+  }
+
+  return holds;
 }
 
 /**
@@ -3252,6 +3462,7 @@ module.exports = {
   addDays,
   archiveActiveWaveInBacklog,
   archiveMergedTasksFromActiveWave,
+  ARCHITECT_GATE_ADVISORY,
   armRecheck,
   buildContextBundle,
   buildDeployQueue,
@@ -3271,8 +3482,11 @@ module.exports = {
   getDeployPendingForRepo,
   getFilesChangedSincePreviousCloseSession,
   getNextTaskId,
+  IN_FLIGHT_STATUSES,
   insertIntoActiveTasks,
   insertIntoActiveWave,
+  isBlockedByEmpty,
+  isHoldEmpty,
   isInsideGitRepo,
   isValidHashFormat,
   lookupTaskTitle,
@@ -3286,10 +3500,12 @@ module.exports = {
   parseActiveWaveMergedTitles,
   parseAllTaskBlocks,
   parseBlockedBy,
+  parseHold,
   parseIntervalDays,
   parseMidWaveArchivedTasks,
   parseModuleRegistry,
   parseRepoMap,
+  parseTaskHolds,
   parseTasksWithRepo,
   parseTouchesConflicts,
   parseWaveTasks,
@@ -3305,6 +3521,7 @@ module.exports = {
   resolveContextBundlePath,
   resolveModuleRegistryPath,
   resolveRepoMapPath,
+  resolveTaskOrigin,
   scoreTrajectory,
   shortenSessionKey,
   summarizeTrajectories,

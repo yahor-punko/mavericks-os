@@ -179,6 +179,10 @@ function buildBacklogEntry(id, task, repoName) {
     lines.push(repoLine);
   }
   lines.push(`- **Verification type:** ${task.verification_type}`);
+  // Every task registered through --apply-decomposition passed the
+  // mandatory architect decomposition gate by construction — stamp it
+  // unconditionally (T-531). No --origin override: this path IS the gate.
+  lines.push(`- **Origin:** architect`);
 
   // Optional fields — only include when meaningful
   if (task.depends_on && task.depends_on !== '—' && task.depends_on !== '-') {

@@ -79,7 +79,7 @@ function parseSpecModelByRole(specText) {
     modelByRole[role] = workerModel;
   }
 
-  // "The architect's frontmatter default is `model: claude-opus-4-8` ..."
+  // "The architect's frontmatter default is `model: opus` ..."
   const architectMatch = specText.match(
     /architect'?s frontmatter default is `model:\s*([^`]+)`/i
   );

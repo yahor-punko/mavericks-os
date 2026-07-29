@@ -1,7 +1,10 @@
 {
   "name": "mavericks",
-  "version": "0.38.2",
+  "version": "0.39.0",
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "test": "node scripts/run-tests.js",
     "validate": "node scripts/mavp-validator.js .",

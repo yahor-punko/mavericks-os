@@ -40,7 +40,7 @@ node "$VALIDATOR" || EXIT_CODE=$?
 
 if [[ $EXIT_CODE -eq 2 ]]; then
   echo ""
-  echo "COMMIT BLOCKED: artifact repair required. Run: node scripts/mavp-validator.js"
+  echo "COMMIT BLOCKED: artifact repair required. Run: ./scripts/mavp-operator --validate"
   exit 1
 elif [[ $EXIT_CODE -eq 1 ]]; then
   echo ""
@@ -58,6 +58,23 @@ if [[ -f "scripts/check-publish-manifest.js" ]]; then
   if [[ $MANIFEST_EXIT -ne 0 ]]; then
     echo ""
     echo "COMMIT BLOCKED: unclassified file(s) in scripts/publish-manifest.json. Run: node scripts/check-publish-manifest.js"
+    exit 1
+  fi
+fi
+
+# Frozen-changelog-section guard (T-499, enforcing the rule codified in T-498
+# / docs/PUBLIC_RELEASE_STRATEGY.md §5). No-op when the project has no
+# scripts/check-changelog-frozen.js (adopter repos, public mirror — a
+# CHANGELOG.md is not framework-managed there). The script's own
+# --if-canonical flag further gates enforcement to the canonical private
+# repo, same mechanism as the publish-manifest backstop above, so this is
+# safe to run unconditionally wherever the file happens to exist.
+if [[ -f "scripts/check-changelog-frozen.js" ]]; then
+  CHANGELOG_EXIT=0
+  node scripts/check-changelog-frozen.js --if-canonical || CHANGELOG_EXIT=$?
+  if [[ $CHANGELOG_EXIT -ne 0 ]]; then
+    echo ""
+    echo "COMMIT BLOCKED: staged CHANGELOG.md edit touches an already-released section (see message above)."
     exit 1
   fi
 fi

@@ -275,7 +275,7 @@ Proposals are written to `SKILL_PROPOSALS/<role>-<date>.md`. Reproduce this temp
 3. Fill in "Reviewer notes" with any observations.
 4. Mark the "Decision" checkbox.
 5. Manually apply accepted edits to `.claude/agents/<role>.md`. Do not use automated apply in v1 — edit the file directly.
-6. Run the validator: `node scripts/mavp-validator.js`. Confirm exit code 0.
+6. Run the validator: `./scripts/mavp-operator --validate`. Confirm exit code 0.
 7. Commit both `.claude/agents/<role>.md` and the proposal file with a message referencing the wave and role.
 
 **How to reject edits:**

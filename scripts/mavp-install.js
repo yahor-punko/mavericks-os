@@ -441,6 +441,71 @@ const HOOK_DEBOUNCE_TOKEN = '.mavp-hook-ts';
 // runs recognise "this is the mavericks-managed hook" even if the composed body
 // changes shape entirely (new fragments, reordered steps, etc.).
 const MANAGED_HOOK_SENTINEL = ': mavp-managed-hook;';
+// Pre-T-304 seeded PostToolUse hook (commit ca43986, superseded by 53adbb5):
+// installers of that era wrote a bare
+//   cd <targetDir> && ./scripts/mavp-operator --validate 2>&1
+// as the entire PostToolUse command — no file-path filter (fires on every
+// Edit/Write of ANY file, not just BACKLOG.md/TASK_STATUS.md), no debounce, and
+// no exit-code normalization (the validator's own exit code becomes the hook's
+// exit code, and `2>&1` folds stderr into stdout). In a repo latched at
+// validator exit 2, that combination reports a failed hook with "No stderr
+// output" on literally every single edit — see T-488.
+//
+// Recognised by an EXACT, fully-anchored regex match of the WHOLE command
+// string, wildcarding only the `cd <path>` segment (the one part that varies
+// per-project). Every other byte — the ` && `, `./scripts/mavp-operator`,
+// ` --validate`, ` 2>&1`, and the absence of anything before or after — must
+// match exactly.
+//
+// SECURITY (T-488 review round 2): the wildcarded `<path>` segment MUST NOT
+// be a bare `.+`. `targetDir` is always installer-generated with `path.resolve()`
+// in this file, so a genuine seeded instance is a plain filesystem path —
+// letters, digits, `/ . _ - ~ + , : @ %` and (rarely) spaces — never a `&`,
+// `|`, `;`, backtick, `$`, `(`, `)`, `<`, `>`, quote, or any control or
+// separator byte that could plausibly end one shell statement/token and
+// start another (ASCII newline/CR, the Unicode line/paragraph separators
+// U+2028/U+2029, or NBSP U+00A0). A bare `.+`
+// is greedy but not possessive, so JS regex backtracking will happily let
+// that segment "absorb" an operator's own chained pre-step — e.g.
+// `cd X && npm test && ./scripts/mavp-operator --validate 2>&1` — because the
+// engine can retry with a shorter match for `.+` until the fixed suffix
+// literal lines up somewhere later in the string. That satisfies the ^...$
+// anchors and the exact-suffix requirement while silently swallowing a
+// human-added command in the middle, which is exactly the "someone hand-fixed
+// the old hook, don't destroy their change" case this fingerprint exists to
+// protect. The fix is to make the wildcard path-shaped (a character class
+// that EXCLUDES every shell metacharacter that could start a new
+// statement/substitution — `&`, `|`, `;`, backtick, `$`, `(`, `)`, `<`, `>`,
+// quotes — AND every control or separator byte, ASCII or Unicode, that could
+// plausibly terminate the path token or start a new one: `\n`, `\r`,
+// U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR, and U+00A0 NBSP
+// (T-495 — none of these five are exploitable in bash today, since none is
+// a metacharacter or default-IFS whitespace there, but excluding them keeps
+// the class matching what it claims to guarantee rather than relying on
+// today's shell semantics as an unstated assumption) — rather than
+// open-ended: once `&` etc. are excluded
+// from the class, the engine has no legal character to consume across a real
+// `&&`/`;`/`$(...)`/backtick-subshell chained in between `cd <path>` and the
+// fixed tail, so backtracking cannot find an alignment and the match
+// correctly fails. This is deliberately narrower than a substring/keyword
+// test: an operator-authored hook that also happens to invoke `--validate`
+// but adds a flag, a different redirect, extra piping, an extra chained
+// command, or a different prefix will fail this regex and is therefore NOT
+// touched — see isLegacySeededValidateHookCommand() and the
+// isManagedPostToolUseCommand() docstring below for the collision argument.
+const LEGACY_SEEDED_VALIDATE_HOOK_RE = /^cd [^&|;`$()<>\n\r\u2028\u2029\u00A0'"]+ && \.\/scripts\/mavp-operator --validate 2>&1$/;
+
+/**
+ * Identity check: "is this PostToolUse hook entry the exact pre-T-304 seeded
+ * `--validate` hook (ca43986)?" See LEGACY_SEEDED_VALIDATE_HOOK_RE above for
+ * the narrowness argument. Kept as its own named predicate (rather than
+ * inlining the regex test at every call site) so the fingerprint has exactly
+ * one definition to audit.
+ */
+function isLegacySeededValidateHookCommand(command) {
+  if (typeof command !== 'string') return false;
+  return LEGACY_SEEDED_VALIDATE_HOOK_RE.test(command);
+}
 // Identity substring for the SessionStart/PostCompact lifecycle hooks — present
 // in both commands the installer writes for those two hook events.
 const LIFECYCLE_HOOK_IDENTITY_TOKEN = 'mavp-operator --agent';
@@ -486,10 +551,12 @@ function composePostToolUseHookCommand(targetDir) {
 /**
  * Identity check: "is this PostToolUse hook entry the mavericks-managed
  * validator hook?" Matches on ANY of: the current validator filename, the
- * legacy pre-T-329 filename (upgrade path), the debounce token, or the
- * explicit sentinel emitted by composePostToolUseHookCommand. A single match
- * is sufficient — the command only needs to be recognisable as "the mavp
- * hook", not contain every token.
+ * legacy pre-T-329 filename (upgrade path), the debounce token, the explicit
+ * sentinel emitted by composePostToolUseHookCommand, or the exact pre-T-304
+ * seeded `--validate` fingerprint (T-488, isLegacySeededValidateHookCommand —
+ * see LEGACY_SEEDED_VALIDATE_HOOK_RE for why this last check cannot collide
+ * with an operator-authored hook). A single match is sufficient — the command
+ * only needs to be recognisable as "the mavp hook", not contain every token.
  */
 function isManagedPostToolUseCommand(command) {
   if (typeof command !== 'string') return false;
@@ -497,7 +564,8 @@ function isManagedPostToolUseCommand(command) {
     command.includes(NEW_VALIDATOR) ||
     command.includes(OLD_VALIDATOR) ||
     command.includes(HOOK_DEBOUNCE_TOKEN) ||
-    command.startsWith(MANAGED_HOOK_SENTINEL)
+    command.startsWith(MANAGED_HOOK_SENTINEL) ||
+    isLegacySeededValidateHookCommand(command)
   );
 }
 
@@ -507,6 +575,13 @@ function isManagedPostToolUseCommand(command) {
  *   (a) replaces the command of the managed PostToolUse Edit|Write entry
  *       (identity: isManagedPostToolUseCommand) with the freshly composed one;
  *   (b) appends a managed entry when none is found;
+ *   (b2) (T-488) when MORE THAN ONE PostToolUse hook matches the managed
+ *       identity check (e.g. the pre-T-304 seeded `--validate` hook coexisting
+ *       alongside the current sentinel-managed entry) — the first one
+ *       encountered is refreshed in place as in (a), and every subsequent
+ *       match (and its containing entry, if it becomes empty as a result) is
+ *       REMOVED, so exactly one managed PostToolUse entry always survives;
+ *       never leaves two managed entries side by side;
  *   (c) adds SessionStart/PostCompact lifecycle hooks only if absent
  *       (identity: command contains "mavp-operator --agent");
  *   (d) never touches any entry that doesn't match an identity check —
@@ -549,23 +624,50 @@ function mergeManagedHooks(targetDir, opts = {}) {
     settingsLocal.hooks = {};
   }
 
-  // --- PostToolUse: replace the managed entry's command, or append if absent ---
+  // --- PostToolUse: replace the managed entry's command, or append if absent.
+  // T-488: also COLLAPSE any additional managed-identity matches (e.g. the
+  // pre-T-304 seeded `--validate` hook coexisting alongside the current
+  // sentinel-managed entry) into the single surviving managed entry, rather
+  // than refreshing every match's command in place and leaving duplicates. ---
   if (!Array.isArray(settingsLocal.hooks.PostToolUse)) settingsLocal.hooks.PostToolUse = [];
   const newCommand = composePostToolUseHookCommand(targetDir);
   let foundManaged = false;
+  const nextPostToolUse = [];
   for (const entry of settingsLocal.hooks.PostToolUse) {
-    if (!entry || !Array.isArray(entry.hooks)) continue;
+    if (!entry || !Array.isArray(entry.hooks)) {
+      nextPostToolUse.push(entry);
+      continue;
+    }
+    const nextHooks = [];
     for (const h of entry.hooks) {
       if (h && isManagedPostToolUseCommand(h.command)) {
-        foundManaged = true;
-        if (h.command !== newCommand) {
-          h.command = newCommand;
+        if (!foundManaged) {
+          foundManaged = true;
+          if (h.command !== newCommand) {
+            h.command = newCommand;
+            changeCount++;
+            console.log(`  ${YELLOW}updated${RESET}  .claude/settings.local.json ${DIM}(hooks.PostToolUse managed validator hook command refreshed)${RESET}`);
+          }
+          nextHooks.push(h);
+        } else {
+          // A second (or later) managed-identity match — collapse it into the
+          // one already kept above instead of leaving a duplicate entry that
+          // would fire the validator twice per edit.
           changeCount++;
-          console.log(`  ${YELLOW}updated${RESET}  .claude/settings.local.json ${DIM}(hooks.PostToolUse managed validator hook command refreshed)${RESET}`);
+          console.log(`  ${YELLOW}removed${RESET}  .claude/settings.local.json ${DIM}(duplicate managed PostToolUse hook collapsed into the single managed entry)${RESET}`);
         }
+      } else {
+        nextHooks.push(h);
       }
     }
+    if (nextHooks.length > 0) {
+      entry.hooks = nextHooks;
+      nextPostToolUse.push(entry);
+    }
+    // else: every hook in this entry was a duplicate managed match that got
+    // collapsed away above — drop the now-empty entry entirely.
   }
+  settingsLocal.hooks.PostToolUse = nextPostToolUse;
   if (!foundManaged) {
     settingsLocal.hooks.PostToolUse.push({
       matcher: 'Edit|Write',
@@ -1251,15 +1353,31 @@ async function main() {
 
     // Backfill fallbackModel opus safety chain in .claude/settings.local.json
     // (idempotent — add only if absent, never overwrite an existing chain)
+    //
+    // Migration (T-484): if the chain is present but deep-equals the exact
+    // old framework-seeded default ['claude-opus-4-8'] — the installer's own
+    // historical fingerprint — rewrite it to the new alias form ['opus'].
+    // Any other value (different id, longer/reordered chain, already ['opus'])
+    // is operator-owned and preserved byte-identical.
+    const OLD_SEEDED_FALLBACK_MODEL = ['claude-opus-4-8'];
     try {
       let settingsLocal = {};
       if (fs.existsSync(settingsLocalPath)) {
         settingsLocal = JSON.parse(fs.readFileSync(settingsLocalPath, 'utf8'));
       }
       if (!('fallbackModel' in settingsLocal)) {
-        settingsLocal.fallbackModel = ['claude-opus-4-8'];
+        settingsLocal.fallbackModel = ['opus'];
         fs.writeFileSync(settingsLocalPath, JSON.stringify(settingsLocal, null, 2) + '\n', 'utf8');
         console.log(`  ${GREEN}updated${RESET}  .claude/settings.local.json ${DIM}(fallbackModel opus safety chain backfilled)${RESET}`);
+        updatedCount++;
+      } else if (
+        Array.isArray(settingsLocal.fallbackModel) &&
+        settingsLocal.fallbackModel.length === OLD_SEEDED_FALLBACK_MODEL.length &&
+        settingsLocal.fallbackModel.every((v, i) => v === OLD_SEEDED_FALLBACK_MODEL[i])
+      ) {
+        settingsLocal.fallbackModel = ['opus'];
+        fs.writeFileSync(settingsLocalPath, JSON.stringify(settingsLocal, null, 2) + '\n', 'utf8');
+        console.log(`  ${GREEN}updated${RESET}  .claude/settings.local.json ${DIM}(fallbackModel migrated: old seeded default claude-opus-4-8 → opus)${RESET}`);
         updatedCount++;
       }
     } catch {
@@ -1626,7 +1744,7 @@ async function main() {
     const settings = {
       effortLevel: 'high',
       alwaysThinkingEnabled: true,
-      fallbackModel: ['claude-opus-4-8'],
+      fallbackModel: ['opus'],
       hooks: {
         SessionStart: [{
           hooks: [{
@@ -1755,4 +1873,5 @@ if (require.main === module) {
 module.exports = {
   composePostToolUseHookCommand,
   isManagedPostToolUseCommand,
+  isLegacySeededValidateHookCommand,
 };

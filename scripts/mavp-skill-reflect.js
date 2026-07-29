@@ -224,15 +224,21 @@ async function main() {
   // -----------------------------------------------------------------------
   // Step 12: Call optimizer model
   // -----------------------------------------------------------------------
-  console.log(`[reflect] Calling optimizer model (claude-opus-4-8) for role: ${role}…`);
+  console.log(`[reflect] Calling optimizer model (claude-opus-5) for role: ${role}…`);
 
   let optimizerResult = null;
   let optimizerError = null;
 
   try {
     const client = new Anthropic();
+    // This is a direct Anthropic Messages API call, not a Claude Code
+    // Agent-tool spawn — the Messages API `model` param does not accept
+    // aliases (`opus`/`sonnet`/etc.), so a full model-id is required here,
+    // unlike the alias-only rule for `.claude/agents/*` frontmatter and
+    // Agent-tool spawn overrides (see docs/AGENT_SPEC.md — "Why aliases,
+    // not full-ids"). Keep this pinned to the current Opus generation.
     const response = await client.messages.create({
-      model: 'claude-opus-4-8',
+      model: 'claude-opus-5',
       max_tokens: 2000,
       messages: [{ role: 'user', content: optimizerPrompt }],
       system: systemPrompt,

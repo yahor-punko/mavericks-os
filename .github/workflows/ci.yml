@@ -1,30 +1,110 @@
 name: CI
 
+# Cost policy (T-563): per-push/PR matrix stays on ubuntu only (Node 20/22/24 —
+# Node 18 dropped, see `engines` in package.json). macOS exists only to catch
+# OS-divergence classes (Apple Git, case-insensitive filesystem, BSD userland)
+# and is node-version-independent to first order, so it runs as a single job
+# on a weekly schedule plus on-demand via workflow_dispatch instead of on
+# every push/PR — GitHub bills macOS runners at a 10x minute multiplier.
+#
+# REQUIRED-CHECK TRAP: branches/main/protection and rulesets both return 403
+# "Upgrade to GitHub Pro" on this private free-plan repo, so no check can be
+# marked required today and paths-ignore below cannot strand one. If this
+# repo ever gains required checks (Pro upgrade or going public), the
+# paths-ignore filters must be paired with GitHub's documented no-op
+# mirror-workflow pattern so a skipped run still satisfies a required check.
 on:
   push:
     branches:
       - main
+    paths-ignore:
+      - BACKLOG.md
+      - TASK_STATUS.md
+      - PROCESS_STATE.md
+      - PROCESS_STATE.json
+      - EXECUTION_LOG.md
+      - HANDOFF.md
+      - SKILL_PROPOSALS/**
   pull_request:
+    paths-ignore:
+      - BACKLOG.md
+      - TASK_STATUS.md
+      - PROCESS_STATE.md
+      - PROCESS_STATE.json
+      - EXECUTION_LOG.md
+      - HANDOFF.md
+      - SKILL_PROPOSALS/**
+  schedule:
+    # Weekly macOS-only coverage — Monday 06:00 UTC. See `test-macos` below.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+# Cancel a superseded run instead of billing both (observed: two pushes in
+# one evening triggered two full runs).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   test:
+    # Per-push/PR signal only — the scheduled/dispatch runs are reserved for
+    # the macOS-only job below, so a manual dispatch doesn't also re-bill the
+    # full ubuntu matrix.
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        node-version: [18, 20, 22]
-    runs-on: ${{ matrix.os }}
+        node-version: [20, 22, 24]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
+
+      - name: Run test suite
+        run: npm test
+
+      - name: Run validator (fail only on exit code 2)
+        run: |
+          set +e
+          node scripts/mavp-validator.js "$PWD"
+          code=$?
+          set -e
+          if [ "$code" -eq 2 ]; then
+            echo "Validator reported repair-required (exit 2) — failing job."
+            exit 1
+          elif [ "$code" -eq 1 ]; then
+            echo "::warning::validator drift (exit 1)"
+          fi
+
+      - name: Quick Start proxy
+        run: |
+          mkdir -p "$RUNNER_TEMP/qs-project"
+          node scripts/mavp-install.js "$RUNNER_TEMP/qs-project"
+          test -x "$RUNNER_TEMP/qs-project/scripts/mavp-operator"
+          MAVERICKS_HOME="$GITHUB_WORKSPACE" "$RUNNER_TEMP/qs-project/scripts/mavp-operator" --validate
+
+  test-macos:
+    # OS-divergence coverage only: weekly schedule + manual dispatch, never
+    # on push/pull_request. Single Node version — macOS cells exist to catch
+    # OS divergence, not Node-version breadth (that stays on ubuntu above).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
 
       - name: Run test suite
         run: npm test

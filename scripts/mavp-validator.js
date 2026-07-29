@@ -32,6 +32,8 @@ const {
   extractHeadingIds,
   MODULE_META_HEADINGS,
   REPO_META_HEADINGS,
+  isBlockedByEmpty,
+  isHoldEmpty,
   parseBlockedBy,
   parseRepoMap,
   getCommitHashesReachableFromHead,
@@ -88,6 +90,15 @@ const ACTIVE_BACKLOG_STATUSES = new Set([
 // Tasks with these statuses are excluded from active-task cross-checking
 // and do not require presence in ACTIVE_BACKLOG_STATUSES.
 const TERMINAL_TASK_STATUSES = new Set(['merged', 'deployed_dev', 'deployed_prod']);
+
+// T-489: number of individual commit_unreachable findings a "Recently
+// completed" (archived) section may accumulate before they are collapsed
+// into a single aggregate info finding. Chosen so a handful of genuine
+// historical gaps still surface individually (useful when auditing a
+// specific old task), while a hub-model repo carrying dozens of them
+// doesn't drown real warnings elsewhere in the report. Never affects the
+// Active tasks section, and never changes severity or exit code either way.
+const ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD = 5;
 
 // Statuses that should be skipped for missing_in_backlog checks but are NOT terminal —
 // the task can return from these states. `deferred` tasks move to the
@@ -199,6 +210,11 @@ function parseTaskBlock({ block, source, sourceSection }) {
     outputDoc: getField(block, 'Output doc'),
     supersededBy: getField(block, 'Superseded by'),
     blockedBy: getField(block, 'Blocked by'),
+    // T-496 (DR-005): optional per-task Hold field. Parsed here (raw string)
+    // so applyHoldDowngrade() can gate its scoped downgrade on presence —
+    // interpretation into {what, why, since} lives in parseHold()
+    // (mavp-operator-lib.js), consumed by --agent/--snapshot, not here.
+    hold: getField(block, 'Hold'),
     rawBlock: block,
   };
 }
@@ -256,6 +272,57 @@ function parseTaskStatusRecentlyCompletedTasks(markdown) {
     .map((block) => parseTaskBlock({ block, source: 'task_status', sourceSection }));
 }
 
+/**
+ * Whole-file, section-agnostic task-block parser (T-543). Unlike the
+ * section-scoped parsers above (which only look inside one named section),
+ * this walks every `##`-level heading in the document and returns a record
+ * for every `### T-NNN` block found anywhere, tagged with the literal
+ * section heading text it was found under (e.g. "Active Wave",
+ * "Wave 70 — Archived (mid-wave)", "Active tasks", "Recently completed
+ * tasks"). This is the only way to see a task that has been archived out of
+ * the active sections in one artifact while a stale/disagreeing record for
+ * the same ID still lives in the other artifact — exactly the shape the
+ * 2026-07-26 corruption took (BACKLOG archived a task as `merged`, the
+ * TASK_STATUS record for the same ID kept `planned` in a completed
+ * section), and which the active-section-only comparators in
+ * compareRecords() cannot see once both blocks have left their active
+ * sections.
+ */
+function parseAllTaskBlocksBySection(markdown, source) {
+  const lines = markdown.split(/\r?\n/);
+  const headingIndexes = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^##\s+/.test(lines[i])) {
+      headingIndexes.push({ index: i, heading: normalizeWhitespace(lines[i].replace(/^##\s+/, '')) });
+    }
+  }
+
+  const records = [];
+  for (let s = 0; s < headingIndexes.length; s += 1) {
+    const start = headingIndexes[s].index;
+    const end = s + 1 < headingIndexes.length ? headingIndexes[s + 1].index : lines.length;
+    const sectionMarkdown = lines.slice(start, end).join('\n');
+    const sectionLabel = headingIndexes[s].heading;
+
+    for (const block of getTaskBlocks(sectionMarkdown)) {
+      records.push(parseTaskBlock({ block, source, sourceSection: sectionLabel }));
+    }
+  }
+
+  return records;
+}
+
+/** Every `### T-NNN` block anywhere in BACKLOG.md, active or archived (T-543). */
+function parseBacklogAllTasksAnySection(markdown) {
+  return parseAllTaskBlocksBySection(markdown, 'backlog');
+}
+
+/** Every `### T-NNN` block anywhere in TASK_STATUS.md, active or archived (T-543). */
+function parseTaskStatusAllTasksAnySection(markdown) {
+  return parseAllTaskBlocksBySection(markdown, 'task_status');
+}
+
 function createTaskRecordIndex(records) {
   const byTaskId = new Map();
 
@@ -296,6 +363,8 @@ function getSeverityForCheck(checkName) {
     dev_done_missing_branch: 'warning',
     architecture_doc_stale: 'warning',
     merged_missing_needs_fix_rounds: 'info',
+    conflicting_needs_fix_rounds: 'warning',
+    conflicting_validator_blocked: 'warning',
     overdue_recheck: 'info',
     next_action_volatile_facts: 'info',
     artifact_size_budget: 'info',
@@ -303,6 +372,9 @@ function getSeverityForCheck(checkName) {
     blocked_by_open: 'failure',
     blocked_by_unresolvable: 'info',
     commit_unreachable: 'warning',
+    cross_section_terminal_status_disagreement: 'failure',
+    non_terminal_status_in_completed_section: 'warning',
+    missing_task_status_record_anywhere: 'warning',
   };
 
   return severityByCheckName[checkName] || 'warning';
@@ -1294,6 +1366,240 @@ function checkMergedNeedsFixRounds(taskStatusRecords) {
 }
 
 /**
+ * conflicting_needs_fix_rounds / conflicting_validator_blocked (T-558):
+ * warning-severity checks that fire when a single task's Evidence field
+ * carries 2+ digit-valued `needs_fix_rounds:` matches (respectively 2+
+ * true/false-valued `validator_blocked:` matches) whose parsed values are
+ * NOT all equal.
+ *
+ * Root cause: appendNeedsFixRoundsIfMissing (mavp-operator-set-status.js)
+ * only ever inserts `needs_fix_rounds: 0` when the field is absent and never
+ * updates it in place, so every fix-round increment is a hand edit that
+ * appends a second occurrence further down the Evidence block, while
+ * extractTrajectories (mavp-operator-lib.js) reads the FIRST match only. Two
+ * corruptions were realized on the live artifact: T-288's leading value
+ * disagreed with its own prose-recorded fix round, and T-186 had no
+ * canonical validator_blocked field but described the field as subject
+ * matter, so first-match read `true` for a task the validator never
+ * blocked.
+ *
+ * DISTINCT-VALUES predicate, not occurrence-count: an agreeing repetition
+ * (e.g. `needs_fix_rounds: 0` twice) is legitimate and produces no finding —
+ * 28 such records exist on the live artifact. A digitless field-name
+ * mention ("needs_fix_rounds: N" as documentation prose) never matches the
+ * digit-anchored regex below, so it contributes no occurrence and produces
+ * no finding either.
+ *
+ * Runs over EVERY section the evidence parser reads (active, recently
+ * completed, archived) — callers pass ctx.taskStatusAllTasksAnySection,
+ * matching extractTrajectories' whole-file read scope, since all of the
+ * realized corruptions lived in archived/recently-completed sections that
+ * the active-only record set never sees.
+ *
+ * commit: and branch: are explicitly EXCLUDED from this pattern: per-repo
+ * cross-repo evidence legitimately repeats `commit:`, and
+ * mergeCommitEvidence (mavp-operator-lib.js:3390) replaces the first
+ * commit/branch token in place rather than appending, so they do not share
+ * this risk.
+ */
+function checkConflictingEvidenceField({ records, regex, parseValue, checkName, fieldLabel }) {
+  const findings = [];
+
+  for (const record of records) {
+    const evidence = getFieldMultiline(record.rawBlock, 'Evidence');
+    if (!evidence) continue;
+
+    const matches = [...evidence.matchAll(regex)];
+    if (matches.length < 2) continue;
+
+    const values = matches.map((m) => parseValue(m[1]));
+    const distinct = [...new Set(values)];
+    if (distinct.length <= 1) continue;
+
+    findings.push(
+      createFinding({
+        checkName,
+        taskId: record.taskId,
+        message: `${record.taskId} has conflicting ${fieldLabel}: values in Evidence (document order: ${values.join(', ')}) — these must agree`,
+        repairTarget: 'TASK_STATUS.md',
+        suggestedAction: `Collapse the repeated ${fieldLabel}: field to a single authoritative value. The literal ${fieldLabel}: key with a value is machine-owned (read by extractTrajectories/skill-reflect); any scoped, per-stage, or historical count must be written in words in prose, never as a second ${fieldLabel}: line.`,
+      })
+    );
+  }
+
+  return findings;
+}
+
+function checkConflictingNeedsFixRounds(taskStatusAllTasksAnySection) {
+  return checkConflictingEvidenceField({
+    records: taskStatusAllTasksAnySection,
+    regex: /needs_fix_rounds:\s*(\d+)/gi,
+    parseValue: (raw) => parseInt(raw, 10),
+    checkName: 'conflicting_needs_fix_rounds',
+    fieldLabel: 'needs_fix_rounds',
+  });
+}
+
+function checkConflictingValidatorBlocked(taskStatusAllTasksAnySection) {
+  return checkConflictingEvidenceField({
+    records: taskStatusAllTasksAnySection,
+    regex: /validator_blocked:\s*(true|false)/gi,
+    parseValue: (raw) => raw.toLowerCase(),
+    checkName: 'conflicting_validator_blocked',
+    fieldLabel: 'validator_blocked',
+  });
+}
+
+/**
+ * A record is treated as terminal-by-other-means (T-543) — excluded from
+ * both new checks below — when it carries a real `Superseded by:` value or
+ * a `deprecated` status, mirroring the existing skip rules documented for
+ * `Superseded by:` and `deprecated` in CLAUDE.md ("Key conventions").
+ */
+function isSkippedByExistingRules(record) {
+  return Boolean(record.supersededBy) || record.status === 'deprecated';
+}
+
+/**
+ * Failure-severity (T-543): a BACKLOG task in ANY section (active or
+ * archived) whose status is terminal (merged/deployed_dev/deployed_prod)
+ * must not have a TASK_STATUS record — in ANY section — that still carries
+ * a non-terminal status. compareRecords()'s status_mismatch check only ever
+ * looks at the active sections of both artifacts, so once both blocks have
+ * been archived out of their active sections (the exact 2026-07-26
+ * corruption shape: BACKLOG archived a task as `merged`, TASK_STATUS kept
+ * `planned` in a completed section) that disagreement goes invisible. This
+ * check parses whole-file, section-agnostic record sets for both artifacts
+ * so the comparison survives archival on either side.
+ */
+function checkCrossSectionTerminalStatusDisagreement(allBacklogRecords, allTaskStatusRecords) {
+  const findings = [];
+  const taskStatusIndex = createTaskRecordIndex(allTaskStatusRecords);
+
+  for (const backlogRecord of allBacklogRecords) {
+    if (!TERMINAL_TASK_STATUSES.has(backlogRecord.status)) continue;
+    if (isSkippedByExistingRules(backlogRecord)) continue;
+
+    const matches = taskStatusIndex.get(backlogRecord.taskId) || [];
+    for (const taskStatusRecord of matches) {
+      if (isSkippedByExistingRules(taskStatusRecord)) continue;
+      if (TERMINAL_TASK_STATUSES.has(taskStatusRecord.status)) continue;
+
+      findings.push(
+        createFinding({
+          checkName: 'cross_section_terminal_status_disagreement',
+          taskId: backlogRecord.taskId,
+          message: `${backlogRecord.taskId} is ${backlogRecord.status} in BACKLOG.md (section: ${backlogRecord.sourceSection}) but TASK_STATUS.md (section: ${taskStatusRecord.sourceSection}) still records status ${taskStatusRecord.status} — the artifacts disagree on whether this task is real.`,
+          repairTarget: 'BACKLOG.md + TASK_STATUS.md',
+          suggestedAction: `Determine which record is correct: if the task was never actually done, revert BACKLOG.md's ${backlogRecord.taskId} status and un-archive it; if it was done, update TASK_STATUS.md's ${backlogRecord.taskId} status to match and add the required commit:/infra:/artifact: evidence.`,
+          details: {
+            backlogSection: backlogRecord.sourceSection,
+            backlogStatus: backlogRecord.status,
+            taskStatusSection: taskStatusRecord.sourceSection,
+            taskStatusStatus: taskStatusRecord.status,
+          },
+        })
+      );
+    }
+  }
+
+  return findings;
+}
+
+/**
+ * Warning-severity (T-543): a task block sitting inside one of
+ * TASK_STATUS.md's completed/archived sections (currently "Recently
+ * completed tasks"; any future non-"Active tasks" section is treated the
+ * same way) whose status is non-terminal is a placement-hygiene defect —
+ * the task was moved to a completed section without actually completing.
+ * This is the second half of the corruption's signature: the TASK_STATUS
+ * side of the 2026-07-26 incident (`planned` sitting under
+ * "## Recently completed tasks") would fire this on its own even before
+ * cross-referencing BACKLOG.md at all. Kept at warning (not failure) so the
+ * blast radius on adopter repos stays smaller — this flags placement
+ * hygiene, not a proven cross-artifact contradiction.
+ */
+function checkNonTerminalStatusInCompletedSection(allTaskStatusRecords) {
+  const findings = [];
+  // Scope to sections that are genuinely "this task is done" archives — NOT
+  // "## Parked tasks (Wave N)" (--park-wave's holding area for tasks that
+  // are deliberately still non-terminal and will resume; see
+  // mavp-operator-park-wave.js) and not "## Active tasks" itself. Matching
+  // only these two shapes keeps the check aligned with its stated signature
+  // (the corruption's "Recently completed tasks" shape) instead of firing
+  // on every legitimate non-active section a project might have.
+  const COMPLETED_SECTION_PATTERN = /recently completed|archived/i;
+  const PARKED_SECTION_PATTERN = /parked/i;
+
+  for (const record of allTaskStatusRecords) {
+    if (!COMPLETED_SECTION_PATTERN.test(record.sourceSection)) continue;
+    if (PARKED_SECTION_PATTERN.test(record.sourceSection)) continue;
+    if (TERMINAL_TASK_STATUSES.has(record.status)) continue;
+    if (isSkippedByExistingRules(record)) continue;
+
+    findings.push(
+      createFinding({
+        checkName: 'non_terminal_status_in_completed_section',
+        taskId: record.taskId,
+        message: `${record.taskId} sits in TASK_STATUS.md's "${record.sourceSection}" section with non-terminal status ${record.status} — a completed/archived section should only ever hold terminal-status tasks.`,
+        repairTarget: 'TASK_STATUS.md',
+        suggestedAction: `Move ${record.taskId} back to "## Active tasks" if it is still in flight, or correct its status field if it was archived in error.`,
+      })
+    );
+  }
+
+  return findings;
+}
+
+/**
+ * Warning-severity (T-547) — complement to
+ * checkCrossSectionTerminalStatusDisagreement(): that check requires a
+ * TASK_STATUS record to disagree with, so it cannot see a task that has NO
+ * TASK_STATUS record anywhere. A terminal-status (merged/deployed_dev/
+ * deployed_prod) BACKLOG task in ANY section with zero matching TASK_STATUS
+ * records in ANY section is exactly the shape a buggy archival move-helper
+ * leaves when it DROPS a block instead of moving it — the same T-542/T-544
+ * incident family, one step further along: there is nothing left to
+ * disagree with, only an absence. Kept at warning (not failure): post-repair
+ * this is a genuine anomaly worth surfacing, but absence alone is not proof
+ * of fabrication.
+ *
+ * NOTE: if TASK_STATUS.md's history is ever trimmed by moving completed
+ * records into a separate archive file, this check will need to read that
+ * file too — otherwise it will start firing on every legitimately-trimmed
+ * task rather than only on genuinely dropped ones. Revisit this check at
+ * that point.
+ */
+function checkMissingTaskStatusRecordAnywhere(allBacklogRecords, allTaskStatusRecords) {
+  const findings = [];
+  const taskStatusIndex = createTaskRecordIndex(allTaskStatusRecords);
+
+  for (const backlogRecord of allBacklogRecords) {
+    if (!TERMINAL_TASK_STATUSES.has(backlogRecord.status)) continue;
+    if (isSkippedByExistingRules(backlogRecord)) continue;
+
+    const matches = taskStatusIndex.get(backlogRecord.taskId) || [];
+    if (matches.length > 0) continue;
+
+    findings.push(
+      createFinding({
+        checkName: 'missing_task_status_record_anywhere',
+        taskId: backlogRecord.taskId,
+        message: `${backlogRecord.taskId} is ${backlogRecord.status} in BACKLOG.md (section: ${backlogRecord.sourceSection}) but has no TASK_STATUS.md record in any section — the archival move may have dropped the block instead of moving it.`,
+        repairTarget: 'TASK_STATUS.md',
+        suggestedAction: `Add a TASK_STATUS.md record for ${backlogRecord.taskId} (a minimal retroactive record is acceptable for pre-existing archived history) so both artifacts' task sets agree.`,
+        details: {
+          backlogSection: backlogRecord.sourceSection,
+          backlogStatus: backlogRecord.status,
+        },
+      })
+    );
+  }
+
+  return findings;
+}
+
+/**
  * Extract candidate `commit:` hashes from an evidence block (T-448). Cross-repo
  * evidence may carry multiple `commit:` lines (one per repo), so this returns
  * an array. Each match is re-validated against the anchored hex pattern before
@@ -1309,6 +1615,36 @@ function extractCommitHashesFromEvidence(evidence) {
   return matches
     .map((m) => m.replace(/^commit:\s*/i, '').trim())
     .filter((hash) => HASH_PATTERN.test(hash));
+}
+
+/**
+ * Extract `commit:` entries from an evidence block, each carrying its
+ * optional parenthesized cross-repo annotation (T-489) — the documented
+ * "Cross-repo evidence format" convention: `commit: <hash> (repo-a)`.
+ * extractCommitHashesFromEvidence() above intentionally keeps returning bare
+ * hash strings (unchanged, still used wherever only the hash matters); this
+ * sibling function is for callers that need to know WHICH repo the evidence
+ * claims the hash belongs to, so they can skip a local reachability check
+ * for hashes that legitimately live in another repo's history.
+ *
+ * Each returned entry is `{ hash, repoAnnotation }` where `repoAnnotation` is
+ * the trimmed text inside the parentheses, or `null` when the evidence line
+ * has no annotation. Hashes are validated against the same
+ * /^[0-9a-f]{7,40}$/ pattern as extractCommitHashesFromEvidence().
+ */
+function extractCommitEntriesFromEvidence(evidence) {
+  if (!evidence) return [];
+  const HASH_PATTERN = /^[0-9a-f]{7,40}$/;
+  const ENTRY_PATTERN = /commit:\s*([0-9a-f]{7,40})\b(?:\s*\(([^)]*)\))?/gi;
+  const entries = [];
+  let match;
+  while ((match = ENTRY_PATTERN.exec(evidence)) !== null) {
+    const hash = match[1];
+    if (!HASH_PATTERN.test(hash)) continue;
+    const repoAnnotation = match[2] ? match[2].trim() : null;
+    entries.push({ hash, repoAnnotation: repoAnnotation || null });
+  }
+  return entries;
 }
 
 /**
@@ -1376,6 +1712,31 @@ function resolveSelfRepoId(root, repoMap) {
  * - Tasks whose Repo:/Repos: field names a repo other than the current one
  *   (resolved via docs/REPO_MAP.md's path: matching `root`) are skipped —
  *   their evidence hashes live in a different repo's git history.
+ * - Hub-aware per-hash annotation skip (T-489): the documented "Cross-repo
+ *   evidence format" convention (CLAUDE.md) lets a single hub-tracked task
+ *   carry `commit: <hash> (repo-a)` — a per-hash annotation independent of
+ *   any record-level Repo:/Repos: field (which archived, pre-convention
+ *   entries frequently lack). When a hash's annotation resolves (case-
+ *   insensitively) to a KNOWN docs/REPO_MAP.md id other than the self repo,
+ *   that hash is skipped entirely — its history legitimately lives
+ *   elsewhere and can never be locally reachable. An annotation that names
+ *   the self repo, or that does not match any known repo-map id, is NOT
+ *   silently trusted as "elsewhere" — it falls through to the normal local
+ *   check below (conservative default: verify locally unless proven
+ *   otherwise). This only widens the existing record-level Repo: skip; it
+ *   never narrows it.
+ * - Archived-section noise aggregation (T-489): the "Recently completed"
+ *   section accumulates historical evidence over the life of a repo, and a
+ *   large number of individually-reported info findings there drowns real
+ *   warnings elsewhere in the report. When the number of unreachable
+ *   findings collected for that section exceeds
+ *   ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD, they are collapsed into a
+ *   single info finding naming the count (with the affected task IDs listed
+ *   in the message) instead of one finding per hash. Below the threshold,
+ *   findings are still reported individually — the aggregate exists purely
+ *   to cap noise, not to hide the check. Severity/exit-code behavior is
+ *   unchanged either way: archived-section findings are always info, never
+ *   affecting the exit code. The Active tasks section is never aggregated.
  * - Reachability is computed with exactly two batched `git rev-list` calls
  *   (via getCommitHashesReachableFromHead() for HEAD and
  *   getCommitHashesReachable(root, '--branches') for local branches) —
@@ -1404,10 +1765,44 @@ function checkCommitReachable({ activeRecords, recentlyCompletedRecords, root, r
 
   const resolvedRepoMap = repoMap || parseRepoMap(root);
   const selfRepoId = resolveSelfRepoId(root, resolvedRepoMap);
+  // Case-insensitive id lookup for annotation resolution (repo-map ids are
+  // written as-is in docs/REPO_MAP.md headings; evidence annotations may not
+  // match case exactly).
+  const repoMapIdByLowerId = new Map(Object.keys(resolvedRepoMap || {}).map((id) => [id.toLowerCase(), id]));
 
   const findings = [];
 
-  const scanSection = (records, noRefSeverity) => {
+  // Returns the finding for a single unreachable/branch-held hash, or null
+  // when the hash is reachable from HEAD (no finding).
+  const buildHashFinding = (record, noRefSeverity, hash) => {
+    if (isHashReachable(hash, reachableFromHeadIndex)) return null; // reachable from HEAD — no finding
+
+    if (reachableFromBranchesIndex !== null && isHashReachable(hash, reachableFromBranchesIndex)) {
+      // Held on a local branch, not on HEAD — the normal pre-push state.
+      return createFinding({
+        checkName: 'commit_unreachable',
+        severity: 'info',
+        taskId: record.taskId,
+        message: `${record.taskId} is ${record.status} with evidence commit: ${hash} — held on a local branch, not on HEAD (not yet merged/pushed to the checked-out branch)`,
+        repairTarget: 'TASK_STATUS.md',
+        suggestedAction: `Normal pre-push state — merge/push the branch holding commit ${hash} to HEAD when ready. No action required otherwise.`,
+      });
+    }
+
+    // Reachable from no local ref at all — the original T-448 footgun.
+    return createFinding({
+      checkName: 'commit_unreachable',
+      severity: noRefSeverity,
+      taskId: record.taskId,
+      message: `${record.taskId} is ${record.status} with evidence commit: ${hash} but that hash is not reachable from any local ref`,
+      repairTarget: 'TASK_STATUS.md',
+      suggestedAction: `Verify commit ${hash} actually landed on a local branch (e.g. cherry-pick/merge the sub-agent's worktree commit), then update the evidence hash if it changed.`,
+    });
+  };
+
+  const scanSection = (records, noRefSeverity, { aggregate = false } = {}) => {
+    const collected = [];
+
     for (const record of records || []) {
       if (!TERMINAL_TASK_STATUSES.has(record.status)) continue;
 
@@ -1417,42 +1812,41 @@ function checkCommitReachable({ activeRecords, recentlyCompletedRecords, root, r
       }
 
       const evidence = getFieldMultiline(record.rawBlock, 'Evidence');
-      const hashes = extractCommitHashesFromEvidence(evidence);
-      for (const hash of hashes) {
-        if (isHashReachable(hash, reachableFromHeadIndex)) continue; // reachable from HEAD — no finding
-
-        if (reachableFromBranchesIndex !== null && isHashReachable(hash, reachableFromBranchesIndex)) {
-          // Held on a local branch, not on HEAD — the normal pre-push state.
-          findings.push(
-            createFinding({
-              checkName: 'commit_unreachable',
-              severity: 'info',
-              taskId: record.taskId,
-              message: `${record.taskId} is ${record.status} with evidence commit: ${hash} — held on a local branch, not on HEAD (not yet merged/pushed to the checked-out branch)`,
-              repairTarget: 'TASK_STATUS.md',
-              suggestedAction: `Normal pre-push state — merge/push the branch holding commit ${hash} to HEAD when ready. No action required otherwise.`,
-            })
-          );
-          continue;
+      const entries = extractCommitEntriesFromEvidence(evidence);
+      for (const { hash, repoAnnotation } of entries) {
+        if (repoAnnotation) {
+          const resolvedId = repoMapIdByLowerId.get(repoAnnotation.toLowerCase());
+          if (resolvedId && (!selfRepoId || resolvedId.toLowerCase() !== selfRepoId.toLowerCase())) {
+            continue; // annotation names a KNOWN other repo — its history lives there, skip
+          }
+          // Annotation names the self repo, or matches no known repo-map id
+          // at all — fall through to the normal local check below.
         }
 
-        // Reachable from no local ref at all — the original T-448 footgun.
-        findings.push(
-          createFinding({
-            checkName: 'commit_unreachable',
-            severity: noRefSeverity,
-            taskId: record.taskId,
-            message: `${record.taskId} is ${record.status} with evidence commit: ${hash} but that hash is not reachable from any local ref`,
-            repairTarget: 'TASK_STATUS.md',
-            suggestedAction: `Verify commit ${hash} actually landed on a local branch (e.g. cherry-pick/merge the sub-agent's worktree commit), then update the evidence hash if it changed.`,
-          })
-        );
+        const finding = buildHashFinding(record, noRefSeverity, hash);
+        if (finding) collected.push(finding);
       }
+    }
+
+    if (aggregate && collected.length > ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD) {
+      const taskIds = collected.map((f) => f.taskId).join(', ');
+      findings.push(
+        createFinding({
+          checkName: 'commit_unreachable',
+          severity: 'info',
+          taskId: 'AGGREGATE',
+          message: `${collected.length} archived-section commit_unreachable findings collapsed into this single advisory (evidence hashes unreachable from HEAD, or held only on local branches) — info severity, never affects the exit code. Affected tasks: ${taskIds}`,
+          repairTarget: 'TASK_STATUS.md',
+          suggestedAction: 'Historical archived-section evidence gaps; inspect individual task evidence only if auditing old worktree integrations.',
+        })
+      );
+    } else {
+      findings.push(...collected);
     }
   };
 
   scanSection(activeRecords, 'warning');
-  scanSection(recentlyCompletedRecords, 'info');
+  scanSection(recentlyCompletedRecords, 'info', { aggregate: true });
 
   return findings;
 }
@@ -1784,12 +2178,22 @@ function findTaskStatusInFile(filePath, taskId) {
 }
 
 // Statuses gated by the cross-repo Blocked by check, mapped to the severity
-// used when their blocker is not merged: failure for merged/qa_passed
-// (already promoted, or about to be), warning for ready_for_qa (about to be
-// promoted). Any other status is not gated.
+// used when their blocker is not merged.
+//
+// Per DR-005 (docs/core/DECISIONS.md): `merged` stays FAILURE — shipping
+// ahead of an unmet dependency is the actual violation this gate exists to
+// prevent. `qa_passed` is WARNING, not FAILURE — a qa_passed task with an
+// unmerged blocker is precisely the state this gate exists to hold a task
+// in (the owner finished their side and is correctly waiting on someone
+// else's); failing that state at FAILURE severity punishes correct
+// behavior, and doing so is what burned the validator's exit-2 bit in the
+// field (a real adopter session latched permanently at "repair required"
+// over a deliberately-held, not broken, dependency chain). `ready_for_qa`
+// keeps its pre-existing WARNING tier, unchanged. Any other status is not
+// gated.
 const BLOCKED_BY_GATE_STATUSES = {
   merged: 'failure',
-  qa_passed: 'failure',
+  qa_passed: 'warning',
   ready_for_qa: 'warning',
 };
 
@@ -1840,9 +2244,12 @@ function resolveHubLocalBlocker(records, ref) {
  * then that repo's BACKLOG.md/TASK_STATUS.md is read to find the blocker
  * task's Status:
  *   - `blocked_by_open` at FAILURE severity when the blocked task is `merged`
- *     or `qa_passed` and the blocker is not `merged`;
+ *     and the blocker is not `merged` (DR-005: shipping ahead of an unmet
+ *     dependency is the violation this gate exists to prevent);
  *   - `blocked_by_open` at WARNING severity when the blocked task is
- *     `ready_for_qa` and the blocker is not `merged`;
+ *     `qa_passed` or `ready_for_qa` and the blocker is not `merged` (DR-005:
+ *     a qa_passed task correctly waiting on its blocker is not a violation —
+ *     it is the gate holding a task in the state it exists to hold it in);
  *   - `blocked_by_unresolvable` at INFO severity when the `Blocked by:` value
  *     can't be parsed, the repo id/path can't be resolved, or the blocker
  *     task can't be found in either of the resolved repo's artifact files.
@@ -1865,6 +2272,15 @@ function resolveHubLocalBlocker(records, ref) {
  * is untouched. Tasks with no `Blocked by:` field (the mavericks-repo default)
  * produce no findings — this check is a silent no-op for them.
  *
+ * No-blockers placeholder (T-492): a `Blocked by:` value of the standard
+ * em-dash (`—`) or plain hyphen (`-`) — the same "no blockers" convention
+ * parseBlockedBy() already accepts — is treated identically to an absent
+ * field: zero findings, never `blocked_by_unresolvable`. Both this function
+ * and parseBlockedBy() route through the shared isBlockedByEmpty() helper so
+ * they cannot disagree on what counts as empty. A genuinely non-empty value
+ * that still fails to parse as `<repo>/T-NNN` continues to produce
+ * `blocked_by_unresolvable` as before.
+ *
  * @param {Array} records - Backlog records (parseBacklogAllActiveWaveTasks()
  *   output, so merged tasks are included).
  * @param {object} [options]
@@ -1884,7 +2300,13 @@ function checkBlockedBy(records, options = {}) {
     if (!gateSeverity) continue;
 
     const blockedByRaw = record.blockedBy;
-    if (!blockedByRaw) continue;
+    // T-492: route the emptiness decision through the same isBlockedByEmpty()
+    // helper parseBlockedBy() uses internally, rather than re-testing raw
+    // truthiness here. An absent field AND the conventional "no blockers"
+    // em-dash/hyphen placeholder are both accepted as empty — only a
+    // genuinely non-empty, unparsable value below reaches
+    // blocked_by_unresolvable.
+    if (isBlockedByEmpty(blockedByRaw)) continue;
 
     const refs = parseBlockedBy(blockedByRaw);
     if (refs.length === 0) {
@@ -1959,6 +2381,112 @@ function checkBlockedBy(records, options = {}) {
   return findings;
 }
 
+/**
+ * DR-005 — load-bearing scope limit on what a `Hold:` field may downgrade.
+ *
+ * This is a WHITELIST, not a blacklist: only the check names listed here can
+ * ever be touched by applyHoldDowngrade(). A blacklist of "protected" checks
+ * rots — the next check someone adds is silently downgradable by default,
+ * which is exactly how a scoped exception turns into a general mute. With a
+ * whitelist, a brand-new check (merged_missing_commit_field's future sibling,
+ * a new mirror check, anything) is protected by construction: it simply isn't
+ * in this Set, so applyHoldDowngrade() never sees it as a candidate.
+ *
+ * Per DR-005 ("Scope limit on what a Hold: may downgrade — load-bearing
+ * constraint"), a Hold: may downgrade ONLY deploy- and blocker-adjacent
+ * advisories on the SAME task. Today that is exactly `blocked_by_open` — the
+ * `qa_passed`/`ready_for_qa` WARNING tier BLOCKED_BY_GATE_STATUSES already
+ * assigns it (T-487). It must NEVER reach merged_missing_commit_field, any
+ * evidence-completeness check, mirror/sync-status checks, duplicate-entry
+ * detection, config_check, or stale_verified — none of those checks are
+ * listed here, so none of them are reachable through this mechanism no
+ * matter how the rest of applyHoldDowngrade() is edited later.
+ *
+ * A comparable future deploy-pending check may be added to this Set, but
+ * only as an explicit, reviewed addition — never by loosening the gate logic
+ * in applyHoldDowngrade() itself.
+ */
+const HOLD_DOWNGRADABLE_CHECKS = new Set(['blocked_by_open']);
+
+/**
+ * Apply the DR-005 scoped `Hold:` downgrade to an already-computed findings
+ * array, mutating matching findings' severity in place.
+ *
+ * A finding is downgraded only when ALL of the following hold:
+ *   1. `finding.checkName` is in HOLD_DOWNGRADABLE_CHECKS (the whitelist
+ *      above) — never a blacklist test, so an unlisted check is unreachable
+ *      no matter what `finding.taskId`/severity it carries.
+ *   2. `finding.taskId` has a non-empty `Hold:` field in `holdRecords` (per
+ *      isHoldEmpty() — the same "no hold" convention isBlockedByEmpty() uses
+ *      for `Blocked by:`).
+ *   3. `finding.severity` is NOT already `'failure'`. This is the strict
+ *      reading of the `merged` × unmerged-blocker interaction: DR-005's gate
+ *      correction (T-487) already keeps that cell at FAILURE because shipping
+ *      ahead of an unmet dependency is the actual violation the gate exists
+ *      to prevent — a `Hold:` explains a wait, it is not permission to ship
+ *      ahead of a dependency, so this function refuses to touch a failure
+ *      no matter which check produced it. Only `warning` is ever stepped down
+ *      (to `info`); `info` findings have nowhere lower to go.
+ *
+ * Marks each downgraded finding with `holdDowngraded: true` so the change is
+ * traceable in `--json` output and tests, rather than silently invisible.
+ *
+ * @param {Array} findings - Findings array (mutated in place).
+ * @param {Array} holdRecords - Records with `.taskId` and `.hold` (raw string,
+ *   e.g. backlogAllWaveRecords) used to build the taskId -> hold map.
+ * @returns {number} Count of findings actually downgraded.
+ */
+function applyHoldDowngrade(findings, holdRecords) {
+  const holdMap = new Map();
+  for (const record of holdRecords || []) {
+    if (record && record.taskId && !isHoldEmpty(record.hold)) {
+      holdMap.set(record.taskId, record.hold);
+    }
+  }
+
+  let downgradedCount = 0;
+  for (const finding of findings) {
+    if (!HOLD_DOWNGRADABLE_CHECKS.has(finding.checkName)) continue;
+    if (!holdMap.has(finding.taskId)) continue;
+    if (finding.severity === 'failure' || finding.severity === 'info') continue;
+
+    finding.severity = 'info';
+    finding.holdDowngraded = true;
+    downgradedCount += 1;
+  }
+
+  return downgradedCount;
+}
+
+/**
+ * Recompute `comparison.counts.bySeverity`/`counts.findings`/
+ * `overallCandidateState` from scratch against the current
+ * `comparison.findings` array. Called once, after applyHoldDowngrade() may
+ * have mutated finding severities in place — the incremental math
+ * mergeFindings() does per-check-batch cannot be trusted once a finding's
+ * severity changes after it was already counted. Safe to call unconditionally
+ * (including when no Hold: exists anywhere): it always recomputes purely from
+ * the current findings array, so it reproduces mergeFindings()'s own
+ * aggregation exactly when nothing was downgraded.
+ *
+ * @param {object} comparison - The comparison object built by compareRecords()
+ *   / mutated by mergeFindings() (has `.findings`, `.counts`,
+ *   `.overallCandidateState`).
+ */
+function recomputeComparisonAggregates(comparison) {
+  const bySeverity = { failure: 0, warning: 0, info: 0 };
+  for (const finding of comparison.findings) {
+    bySeverity[finding.severity] = (bySeverity[finding.severity] || 0) + 1;
+  }
+  comparison.counts.bySeverity = bySeverity;
+  comparison.counts.findings = comparison.findings.length;
+  comparison.overallCandidateState = bySeverity.failure > 0
+    ? 'misleading_repair_required'
+    : bySeverity.warning > 0
+      ? 'usable_but_drifting'
+      : 'healthy';
+}
+
 function mergeFindings(comparison, extraFindings) {
   if (extraFindings.length === 0) return;
   comparison.findings.push(...extraFindings);
@@ -2027,6 +2555,16 @@ const CHECKS = [
   { name: 'architecture_doc_stale', run: (ctx) => checkArchitectureDocStale(ctx.backlogAllWaveRecords, ctx.processStatePath) },
   // needs_fix_rounds advisory: info-level nudge for merged runtime/manual tasks missing the field.
   { name: 'merged_needs_fix_rounds', run: (ctx) => checkMergedNeedsFixRounds(ctx.taskStatusRecords) },
+  // conflicting needs_fix_rounds / validator_blocked (T-558): warning-level
+  // distinct-values check over every TASK_STATUS.md section (active, recently
+  // completed, archived) — a second, disagreeing occurrence in a task's
+  // Evidence field means skill-reflection's first-match parse can read a
+  // stale/wrong value. Uses taskStatusAllTasksAnySection (whole-file,
+  // section-agnostic), matching extractTrajectories' read scope, NOT the
+  // active-only taskStatusRecords — every realized corruption on the live
+  // artifact lived in an archived/recently-completed section.
+  { name: 'conflicting_needs_fix_rounds', run: (ctx) => checkConflictingNeedsFixRounds(ctx.taskStatusAllTasksAnySection) },
+  { name: 'conflicting_validator_blocked', run: (ctx) => checkConflictingValidatorBlocked(ctx.taskStatusAllTasksAnySection) },
   // overdue recheck advisory: info-level nudge for rechecks past their due date.
   { name: 'overdue_rechecks', run: (ctx) => checkOverdueRechecks(ctx.processStatePath) },
   // next_action volatile-facts advisory: info-level nudge when next_action embeds
@@ -2064,6 +2602,33 @@ const CHECKS = [
         root: ctx.root,
       }),
   },
+  // cross-section terminal-status disagreement (T-543, failure): a BACKLOG
+  // task terminal (merged/deployed_dev/deployed_prod) in ANY section whose
+  // TASK_STATUS record in ANY section still carries a non-terminal status —
+  // catches the 2026-07-26 corruption shape once both blocks have been
+  // archived out of their active sections.
+  {
+    name: 'cross_section_terminal_status_disagreement',
+    run: (ctx) =>
+      checkCrossSectionTerminalStatusDisagreement(ctx.backlogAllTasksAnySection, ctx.taskStatusAllTasksAnySection),
+  },
+  // non-terminal status inside a TASK_STATUS completed/archived section
+  // (T-543, warning): placement hygiene — a task moved to "Recently
+  // completed tasks" (or any future non-"Active tasks" section) without an
+  // actual terminal status.
+  {
+    name: 'non_terminal_status_in_completed_section',
+    run: (ctx) => checkNonTerminalStatusInCompletedSection(ctx.taskStatusAllTasksAnySection),
+  },
+  // missing TASK_STATUS record anywhere (T-547, warning): complement to the
+  // disagreement check above — fires when a terminal-status BACKLOG task in
+  // ANY section has NO matching TASK_STATUS record in ANY section at all
+  // (nothing to disagree with, because the block was dropped rather than
+  // moved).
+  {
+    name: 'missing_task_status_record_anywhere',
+    run: (ctx) => checkMissingTaskStatusRecordAnywhere(ctx.backlogAllTasksAnySection, ctx.taskStatusAllTasksAnySection),
+  },
 ];
 
 function parseArtifacts({ backlogPath, taskStatusPath }) {
@@ -2077,6 +2642,12 @@ function parseArtifacts({ backlogPath, taskStatusPath }) {
   const taskStatusRecentlyCompletedRecords = parseTaskStatusRecentlyCompletedTasks(taskStatusMarkdown);
   const comparison = compareRecords({ backlogRecords, taskStatusRecords });
 
+  // Whole-file, section-agnostic record sets (T-543) — see
+  // parseAllTaskBlocksBySection() docblock for why these are needed
+  // alongside the section-scoped sets above.
+  const backlogAllTasksAnySection = parseBacklogAllTasksAnySection(backlogMarkdown);
+  const taskStatusAllTasksAnySection = parseTaskStatusAllTasksAnySection(taskStatusMarkdown);
+
   const processStatePath = path.join(path.dirname(backlogPath), 'PROCESS_STATE.json');
 
   const ctx = {
@@ -2089,12 +2660,21 @@ function parseArtifacts({ backlogPath, taskStatusPath }) {
     backlogAllWaveRecords,
     taskStatusRecords,
     taskStatusRecentlyCompletedRecords,
+    backlogAllTasksAnySection,
+    taskStatusAllTasksAnySection,
     root: path.dirname(backlogPath),
   };
 
   for (const check of CHECKS) {
     mergeFindings(comparison, check.run(ctx));
   }
+
+  // T-496 (DR-005): apply the scoped Hold: downgrade, then recompute the
+  // aggregate counts/state from scratch — must run after every check has
+  // contributed its findings, since the whitelist can only ever touch
+  // blocked_by_open (see HOLD_DOWNGRADABLE_CHECKS docblock).
+  applyHoldDowngrade(comparison.findings, backlogAllWaveRecords);
+  recomputeComparisonAggregates(comparison);
 
   return {
     inputs: {
@@ -2281,6 +2861,8 @@ module.exports = {
   LAST_TASK_ID_AUTO_PATCHED_CHECK: 'last_task_id_auto_patched',
   ARCHITECTURE_DOC_STALE_CHECK: 'architecture_doc_stale',
   MERGED_MISSING_NEEDS_FIX_ROUNDS_CHECK: 'merged_missing_needs_fix_rounds',
+  CONFLICTING_NEEDS_FIX_ROUNDS_CHECK: 'conflicting_needs_fix_rounds',
+  CONFLICTING_VALIDATOR_BLOCKED_CHECK: 'conflicting_validator_blocked',
   OVERDUE_RECHECK_CHECK: 'overdue_recheck',
   NEXT_ACTION_VOLATILE_FACTS_CHECK: 'next_action_volatile_facts',
   ARTIFACT_SIZE_BUDGET_CHECK: 'artifact_size_budget',
@@ -2292,13 +2874,20 @@ module.exports = {
   BACKLOG_ACTIVE_WAVE_PER_TASK_LINES,
   TASK_STATUS_ACTIVE_TASKS_PER_TASK_LINES,
   checkMergedNeedsFixRounds,
+  checkConflictingNeedsFixRounds,
+  checkConflictingValidatorBlocked,
   checkOverdueRechecks,
   checkNextActionVolatileFacts,
   checkArtifactSizeBudget,
   checkStateInClaudeMd,
   checkBlockedBy,
+  HOLD_DOWNGRADABLE_CHECKS,
+  applyHoldDowngrade,
+  recomputeComparisonAggregates,
   checkCommitReachable,
   extractCommitHashesFromEvidence,
+  extractCommitEntriesFromEvidence,
+  ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD,
   buildReachableHashIndex,
   isHashReachable,
   resolveSelfRepoId,
@@ -2325,4 +2914,14 @@ module.exports = {
   parseArtifacts,
   renderFindingLines,
   renderValidatorReport,
+  CROSS_SECTION_TERMINAL_STATUS_DISAGREEMENT_CHECK: 'cross_section_terminal_status_disagreement',
+  NON_TERMINAL_STATUS_IN_COMPLETED_SECTION_CHECK: 'non_terminal_status_in_completed_section',
+  MISSING_TASK_STATUS_RECORD_ANYWHERE_CHECK: 'missing_task_status_record_anywhere',
+  parseAllTaskBlocksBySection,
+  parseBacklogAllTasksAnySection,
+  parseTaskStatusAllTasksAnySection,
+  isSkippedByExistingRules,
+  checkCrossSectionTerminalStatusDisagreement,
+  checkNonTerminalStatusInCompletedSection,
+  checkMissingTaskStatusRecordAnywhere,
 };
