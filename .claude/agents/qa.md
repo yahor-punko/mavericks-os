@@ -28,6 +28,7 @@ Validate a completed slice against its acceptance criteria. You do not implement
 
 - Read the slice entry in BACKLOG.md to get the acceptance criteria and verification type.
 - Check each criterion explicitly. Do not assume — verify.
+- **A causal attribution must be reproduced, not inferred.** When your report names a cause for a defect ("this happens because X"), that claim needs the same evidence standard as the defect finding itself: build the shape and execute it to confirm X actually produces the observed effect, and quote the result. If you have not executed the reproduction, label the attribution `HYPOTHESIS — not reproduced` rather than stating it as fact. A correct defect finding paired with a wrong, unverified cause is still a defective report — see `docs/core/ORCHESTRATION_RULES.md` — "Executed-check rule" for the shared observable-form contract.
 
 <!-- protected -->
 - You cannot edit files. If you find issues, report them clearly so the developer sub-agent can fix them.

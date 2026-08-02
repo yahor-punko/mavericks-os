@@ -337,4 +337,159 @@ Tasks preserved for future waves.
   console.log('Test 3 passed: absent-entry path still creates a skeleton Active-tasks entry, unchanged');
 }
 
+// ---------------------------------------------------------------------------
+// Test 4 (T-574 — deferral symmetry, full round trip): deferring a task whose
+// TASK_STATUS entry sits INSIDE "## Active tasks" must relocate that entry out
+// of Active tasks into "## Deferred tasks" (created on demand, the same
+// section the close-session terminal-status sweep writes to), byte-for-byte —
+// then re-activating it must bring the same block back into "## Active tasks"
+// via the existing T-544 path. A hand-edited Notes marker must survive both
+// legs, no duplicate heading may appear at any point, and the validator must
+// exit 0 after each single command.
+//
+// Before the T-574 fix the first leg only rewrote the Status field in place
+// and left the block sitting in "## Active tasks" — the producer of the stale
+// terminal entries that latched wave 70 open.
+// ---------------------------------------------------------------------------
+{
+  const NOTES_MARKER = '- **Notes:** T574-ROUNDTRIP-NOTES-MARKER must survive both legs verbatim';
+  const EVIDENCE_MARKER = 'T574-ROUNDTRIP-EVIDENCE-MARKER';
+
+  const backlog = `# Backlog
+
+## Active Wave
+
+### T-904 — Task deferred mid-wave
+- **Status:** in_progress
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Repo:** mavericks
+
+
+## Recently completed
+`;
+
+  const taskStatus = `# Task Status
+
+## Active tasks
+
+### T-904 — Task deferred mid-wave
+- **Status:** in_progress
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Evidence:** ${EVIDENCE_MARKER}
+${NOTES_MARKER}
+
+
+## Recently completed tasks
+`;
+
+  const root = makeFixtureRoot('t574-defer-roundtrip', { backlog, taskStatus });
+
+  // --- Leg 1: defer ---------------------------------------------------------
+  const deferResult = runRescopeTask(root, ['T-904', '--status', 'deferred']);
+  assert.strictEqual(
+    deferResult.status,
+    0,
+    `Test 4a FAIL: --rescope-task T-904 --status deferred should exit 0, got ${deferResult.status}\nstdout: ${deferResult.stdout}\nstderr: ${deferResult.stderr}`
+  );
+  console.log('Test 4a passed: --rescope-task T-904 --status deferred exits 0');
+
+  const deferredTaskStatus = readUtf8(path.join(root, 'TASK_STATUS.md'));
+
+  assert.strictEqual(
+    countOccurrences(deferredTaskStatus, '### T-904 —'),
+    1,
+    `Test 4b FAIL: expected exactly one T-904 heading after deferral, got ${countOccurrences(deferredTaskStatus, '### T-904 —')}\n${deferredTaskStatus}`
+  );
+  console.log('Test 4b passed: exactly one T-904 heading remains after deferral');
+
+  assert.ok(
+    deferredTaskStatus.includes('## Deferred tasks'),
+    `Test 4c FAIL: "## Deferred tasks" section should be created on demand\n${deferredTaskStatus}`
+  );
+  const deferredHeadingIdx = deferredTaskStatus.indexOf('## Deferred tasks');
+  const deferredCompletedIdx = deferredTaskStatus.indexOf('## Recently completed tasks');
+  const deferredT904Idx = deferredTaskStatus.indexOf('### T-904 —');
+  assert.ok(
+    deferredT904Idx > deferredHeadingIdx,
+    `Test 4c FAIL: T-904 entry must sit AFTER the "## Deferred tasks" heading (i.e. out of Active tasks), got deferredHeading=${deferredHeadingIdx} t904=${deferredT904Idx}\n${deferredTaskStatus}`
+  );
+  assert.ok(
+    deferredCompletedIdx === -1 || deferredT904Idx < deferredCompletedIdx,
+    `Test 4c FAIL: T-904 entry must sit inside "## Deferred tasks", before "## Recently completed tasks", got t904=${deferredT904Idx} completed=${deferredCompletedIdx}\n${deferredTaskStatus}`
+  );
+  console.log('Test 4c passed: T-904 entry relocated out of "## Active tasks" into "## Deferred tasks"');
+
+  const deferredBlockMatch = deferredTaskStatus.match(/### T-904 —[\s\S]*?(?=\n### T-\d+ —|\n## |$)/);
+  assert.ok(deferredBlockMatch, 'Test 4d FAIL: could not isolate T-904 block after deferral');
+  const deferredBlock = deferredBlockMatch[0];
+  assert.ok(
+    deferredBlock.includes(NOTES_MARKER),
+    `Test 4d FAIL: hand-edited Notes marker must survive the deferral relocation verbatim\nBlock was:\n${deferredBlock}`
+  );
+  assert.ok(
+    deferredBlock.includes(EVIDENCE_MARKER),
+    `Test 4d FAIL: hand-edited Evidence must survive the deferral relocation verbatim\nBlock was:\n${deferredBlock}`
+  );
+  assert.ok(
+    /- \*\*Status:\*\* deferred/.test(deferredBlock),
+    `Test 4d FAIL: relocated T-904 block should carry "- **Status:** deferred", got:\n${deferredBlock}`
+  );
+  console.log('Test 4d passed: Notes + Evidence preserved byte-for-byte and Status updated to deferred');
+
+  const deferValidator = runValidator(root);
+  assert.strictEqual(
+    deferValidator.status,
+    0,
+    `Test 4e FAIL: validator should exit 0 after the deferral, got ${deferValidator.status}\n${deferValidator.stdout}\n${deferValidator.stderr}`
+  );
+  console.log('Test 4e passed: validator exits 0 after the deferral');
+
+  // --- Leg 2: re-activate (existing T-544 path closes the round trip) -------
+  const reactivateResult = runRescopeTask(root, ['T-904', '--status', 'in_progress']);
+  assert.strictEqual(
+    reactivateResult.status,
+    0,
+    `Test 4f FAIL: --rescope-task T-904 --status in_progress should exit 0, got ${reactivateResult.status}\nstdout: ${reactivateResult.stdout}\nstderr: ${reactivateResult.stderr}`
+  );
+
+  const reactivatedTaskStatus = readUtf8(path.join(root, 'TASK_STATUS.md'));
+
+  assert.strictEqual(
+    countOccurrences(reactivatedTaskStatus, '### T-904 —'),
+    1,
+    `Test 4g FAIL: expected exactly one T-904 heading after re-activation, got ${countOccurrences(reactivatedTaskStatus, '### T-904 —')}\n${reactivatedTaskStatus}`
+  );
+
+  const reActiveIdx = reactivatedTaskStatus.indexOf('## Active tasks');
+  const reDeferredIdx = reactivatedTaskStatus.indexOf('## Deferred tasks');
+  const reT904Idx = reactivatedTaskStatus.indexOf('### T-904 —');
+  assert.ok(
+    reT904Idx > reActiveIdx && (reDeferredIdx === -1 || reT904Idx < reDeferredIdx),
+    `Test 4g FAIL: T-904 entry must be back inside "## Active tasks", got active=${reActiveIdx} t904=${reT904Idx} deferred=${reDeferredIdx}\n${reactivatedTaskStatus}`
+  );
+
+  const reBlockMatch = reactivatedTaskStatus.match(/### T-904 —[\s\S]*?(?=\n### T-\d+ —|\n## |$)/);
+  assert.ok(reBlockMatch, 'Test 4g FAIL: could not isolate T-904 block after re-activation');
+  const reBlock = reBlockMatch[0];
+  assert.ok(
+    reBlock.includes(NOTES_MARKER) && reBlock.includes(EVIDENCE_MARKER),
+    `Test 4g FAIL: hand-edited Notes/Evidence must survive the return leg verbatim\nBlock was:\n${reBlock}`
+  );
+  assert.ok(
+    /- \*\*Status:\*\* in_progress/.test(reBlock),
+    `Test 4g FAIL: re-activated T-904 block should carry "- **Status:** in_progress", got:\n${reBlock}`
+  );
+  console.log('Test 4g passed: T-904 relocated back into "## Active tasks" with markers intact and no duplicate');
+
+  const reValidator = runValidator(root);
+  assert.strictEqual(
+    reValidator.status,
+    0,
+    `Test 4h FAIL: validator should exit 0 after the re-activation, got ${reValidator.status}\n${reValidator.stdout}\n${reValidator.stderr}`
+  );
+  console.log('Test 4h passed: validator exits 0 after the re-activation — deferral round trip closed');
+}
+
 console.log('All test-rescope-task.js assertions passed.');

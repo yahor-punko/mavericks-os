@@ -315,6 +315,38 @@ const IN_FLIGHT_STATUSES = new Set([
   'in_progress', 'needs_fix', 'security_needs_fix', 'ux_needs_fix',
 ]);
 
+// T-573: statuses that are terminal in the "this task will never be worked
+// again inside this wave" sense — a task in one of these states that is still
+// sitting in TASK_STATUS.md's `## Active tasks` section must be SWEPT OUT of
+// it (relocated to its proper home section) rather than counted as remaining
+// work that keeps the wave open. Consumed by --close-session's terminal sweep
+// in both the interactive and non-interactive paths.
+//
+// DELIBERATELY NOT DERIVED from IN_FLIGHT_STATUSES (i.e. not "everything that
+// is not in-flight") — this is a sibling explicit skip-list, and that choice is
+// the whole safety property. Deriving it would fail OPEN: `planned` and
+// `qa_passed` both sit outside IN_FLIGHT_STATUSES on purpose (planned work has
+// not started; qa_passed awaits the Main-Agent merge ritual) yet both are
+// genuinely unfinished and MUST keep the wave open, and a typo'd/unknown status
+// would silently stop blocking too. As an explicit skip set, anything not
+// literally listed here keeps the wave open — fail-closed.
+//
+// Distinct from ARCHIVABLE_TERMINAL_STATUSES (below), which is the
+// terminal-COMPLETED set (merged/deployed/runtime_verified — work that was
+// finished and shipped). These two sets never overlap: a swept `deferred` or
+// `deprecated` task is NOT a completed task and must never be treated as one
+// (in particular it must never be fed to syncBacklogMergedTasks(), whose
+// BACKLOG-side archival is only correct for completed work).
+const TERMINAL_SKIP_STATUSES = new Set(['deferred', 'deprecated']);
+
+// T-573: TASK_STATUS.md heading that holds deferred task blocks swept out of
+// `## Active tasks`. Note the casing: TASK_STATUS.md uses "## Deferred tasks"
+// (matching its sibling "## Active tasks" / "## Recently completed tasks"),
+// while BACKLOG.md's own deferral section is "## Deferred Tasks" — the two are
+// separate artifacts with separate conventions; do not "normalize" one to the
+// other.
+const DEFERRED_TASK_STATUS_HEADING = '## Deferred tasks';
+
 function parseTaskBlock(block) {
   const headingMatch = block.match(/^###\s+(T-\d+)\s+—\s+(.+)$/m);
   const statusMatch = block.match(/^- \*\*Status:\*\*\s+(.+)$/m);
@@ -1369,7 +1401,16 @@ function archiveActiveWaveInBacklog(backlogPath, waveNumber) {
 // Terminal statuses considered "archivable" — same set used by
 // parseActiveWaveMergedTitles / archiveMergedTasksFromActiveWave /
 // parseMidWaveArchivedTasks below.
-const ARCHIVABLE_TERMINAL_STATUSES = new Set(['merged', 'deployed_dev', 'deployed_prod']);
+//
+// T-573: `runtime_verified` belongs here — it is a post-merge status
+// (merged → runtime_verified), so a task carrying it is strictly MORE
+// finished than a `merged` one; leaving it out meant an optional
+// runtime-verification step demoted a completed task back into "still
+// blocking the wave". Deliberately NOT derived from IN_FLIGHT_STATUSES, and
+// deliberately disjoint from TERMINAL_SKIP_STATUSES (deferred/deprecated) —
+// this set means "completed work, archive it and count it in the wave
+// summary", which is not true of a deferred task.
+const ARCHIVABLE_TERMINAL_STATUSES = new Set(['merged', 'deployed_dev', 'deployed_prod', 'runtime_verified']);
 
 /**
  * T-420: heading text for the mid-wave archive destination BACKLOG.md
@@ -1803,6 +1844,132 @@ function moveParkedBlocksToActiveSection(content, activeHeadingRegex, parkedHead
   ];
 
   return { ok: true, updated: updated.join('\n'), taskIds, error: null };
+}
+
+function escapeRegExpLiteral(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * T-542: returns true only when `line` is a `### ` heading whose LEADING
+ * task ID equals `taskId` exactly — never when `taskId` merely appears
+ * somewhere inside the heading text (e.g. a title that *mentions* another
+ * task's ID, such as "### T-541 — ... T-540 residuals ..." matching a
+ * lookup for "T-540"). Accepts both the usual "### T-NNN — Title" shape
+ * and a heading with no " — " separator at all (a heading whose leading ID
+ * has trailing characters glued on, e.g. "### T-540x", is NOT matched —
+ * the ID must be followed by either " —" or end-of-line/trailing whitespace).
+ *
+ * T-573: relocated here from mavp-operator-close-session.js so the block
+ * movers in this file share ONE matcher with close-session's
+ * moveTaskToCompleted() instead of carrying a second, drift-prone copy —
+ * close-session re-exports it unchanged, and
+ * scripts/test-task-heading-anchor.js still exercises it through that export.
+ */
+function isTaskHeadingFor(line, taskId) {
+  if (!/^###\s+/.test(line)) return false;
+  const re = new RegExp('^###\\s+' + escapeRegExpLiteral(taskId) + '(\\s+—|\\s*$)');
+  return re.test(line);
+}
+
+/** Extracts the leading "T-NNN" id from a "### ..." heading line, or null. */
+function headingLeadingTaskId(line) {
+  const m = line.match(/^###\s+(T-\d+)/);
+  return m ? m[1] : null;
+}
+
+/**
+ * T-573: locate the `## <heading>` section named by `heading`, creating it on
+ * demand when absent. Placement of a newly created section mirrors
+ * archiveActiveWaveInBacklog()'s splice-a-heading-in approach: it goes
+ * immediately BEFORE the first heading matching `beforeHeadingRegex` (default:
+ * TASK_STATUS.md's `## Recently completed tasks`), which is the canonical slot
+ * for the intermediate sections insertIntoActiveTasks() already knows about
+ * (see its T-485 comment); when that anchor is absent the section is appended
+ * at end of file.
+ *
+ * @param {string[]} lines - file content, already split into lines
+ * @param {string} heading - exact heading line to find or create, e.g. "## Deferred tasks"
+ * @param {RegExp} [beforeHeadingRegex] - anchor the created section is inserted before
+ * @returns {{ lines: string[], headingIdx: number, created: boolean }}
+ */
+function ensureSectionHeading(lines, heading, beforeHeadingRegex = /^##\s+Recently completed tasks/) {
+  const existingIdx = lines.findIndex((l) => l.trim() === heading.trim());
+  if (existingIdx !== -1) return { lines, headingIdx: existingIdx, created: false };
+
+  const anchorIdx = lines.findIndex((l) => beforeHeadingRegex.test(l));
+  if (anchorIdx !== -1) {
+    // Rewind past any blank lines directly above the anchor so the new section
+    // is separated from the previous one by exactly one blank line.
+    let insertAt = anchorIdx;
+    while (insertAt > 0 && lines[insertAt - 1].trim() === '') insertAt--;
+    const updated = [...lines.slice(0, insertAt), '', heading, '', ...lines.slice(anchorIdx)];
+    return { lines: updated, headingIdx: insertAt + 1, created: true };
+  }
+
+  const updated = [...lines];
+  while (updated.length > 0 && updated[updated.length - 1].trim() === '') updated.pop();
+  updated.push('', heading, '');
+  return { lines: updated, headingIdx: updated.length - 2, created: true };
+}
+
+/**
+ * T-573: move the `### T-NNN` block for `taskId` out of whichever section it
+ * currently sits in and into the section titled `destHeading`, creating that
+ * destination section on demand (see ensureSectionHeading above). The block's
+ * lines are relocated BYTE-FOR-BYTE — every field line (Evidence, Notes,
+ * Superseded by, …) survives verbatim; nothing in the block is rewritten.
+ *
+ * Generalizes close-session's moveTaskToCompleted() (which hard-codes
+ * "## Recently completed tasks" and no-ops when that section is missing) so
+ * the same relocation works for a section a project may not have yet — the
+ * `## Deferred tasks` case. Shares isTaskHeadingFor()'s anchored matcher and
+ * its belt-and-braces identity re-check, so a heading that merely MENTIONS
+ * another task's id can never be moved by mistake (T-542).
+ *
+ * @param {string} markdown - full file content
+ * @param {string} taskId - e.g. "T-559"
+ * @param {string} destHeading - exact destination heading, e.g. "## Deferred tasks"
+ * @param {RegExp} [beforeHeadingRegex] - where a created section is inserted (see ensureSectionHeading)
+ * @returns {{ ok: boolean, updated: string, created: boolean, error: string|null }}
+ */
+function moveTaskBlockToSection(markdown, taskId, destHeading, beforeHeadingRegex) {
+  const lines = markdown.split(/\r?\n/);
+
+  let taskStart = -1;
+  let taskEnd = lines.length;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (taskStart === -1) {
+      if (isTaskHeadingFor(lines[i], taskId)) taskStart = i;
+    } else if (/^###\s+/.test(lines[i]) || /^##\s+/.test(lines[i])) {
+      taskEnd = i;
+      break;
+    }
+  }
+
+  if (taskStart === -1) {
+    return { ok: false, updated: markdown, created: false, error: `No "### ${taskId}" block found.` };
+  }
+
+  // Belt-and-braces identity invariant on top of the anchored matcher above
+  // (same guard moveTaskToCompleted() carries).
+  if (headingLeadingTaskId(lines[taskStart]) !== taskId) {
+    return { ok: false, updated: markdown, created: false, error: `Block at the matched heading is not headed by ${taskId}.` };
+  }
+
+  const taskBlock = lines.slice(taskStart, taskEnd);
+  const remaining = [...lines.slice(0, taskStart), ...lines.slice(taskEnd)];
+
+  const { lines: withSection, headingIdx, created } = ensureSectionHeading(remaining, destHeading, beforeHeadingRegex);
+
+  const updated = [
+    ...withSection.slice(0, headingIdx + 1),
+    '',
+    ...taskBlock,
+    ...withSection.slice(headingIdx + 1),
+  ];
+
+  return { ok: true, updated: updated.join('\n'), created, error: null };
 }
 
 /**
@@ -3496,6 +3663,7 @@ module.exports = {
   ackRecheck,
   addDays,
   archiveActiveWaveInBacklog,
+  ARCHIVABLE_TERMINAL_STATUSES,
   archiveMergedTasksFromActiveWave,
   ARCHITECT_GATE_ADVISORY,
   armRecheck,
@@ -3507,6 +3675,8 @@ module.exports = {
   collectOperatorData,
   computeDueRechecks,
   computeMustRead,
+  DEFERRED_TASK_STATUS_HEADING,
+  ensureSectionHeading,
   extractHeadingIds,
   extractTrajectories,
   findPreviousCloseSessionCommit,
@@ -3517,6 +3687,7 @@ module.exports = {
   getDeployPendingForRepo,
   getFilesChangedSincePreviousCloseSession,
   getNextTaskId,
+  headingLeadingTaskId,
   IN_FLIGHT_STATUSES,
   insertIntoActiveTasks,
   insertIntoActiveWave,
@@ -3524,12 +3695,14 @@ module.exports = {
   isHoldEmpty,
   isInsideGitRepo,
   isShallowRepository,
+  isTaskHeadingFor,
   isValidHashFormat,
   lookupTaskTitle,
   mergeCommitEvidence,
   MODULE_META_HEADINGS,
   moveActiveBlocksToParkedSection,
   moveParkedBlocksToActiveSection,
+  moveTaskBlockToSection,
   normalizeWhitespace,
   parkedBacklogHeading,
   parkedTaskStatusHeading,
@@ -3561,6 +3734,7 @@ module.exports = {
   scoreTrajectory,
   shortenSessionKey,
   summarizeTrajectories,
+  TERMINAL_SKIP_STATUSES,
   truncateTaskBlockAtLevel2Heading,
   updateLastTaskId,
   writeContextBundle,

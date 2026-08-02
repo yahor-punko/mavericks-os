@@ -421,7 +421,19 @@ function writeFullStackFixture(root, { evidenceStatus, sectionHeading }) {
     `# Repo Map\n\n## this-repo\n\n- **label:** This Repo\n- **path:** ${root}\n`,
     'utf8'
   );
-  fs.writeFileSync(root + '/BACKLOG.md', `# BACKLOG\n\n## Active Wave\n\n`, 'utf8');
+  // T-575: BACKLOG.md must carry a matching archived T-900 block. Archival
+  // MOVES a merged task's block into `## Wave N — Archived...` within
+  // BACKLOG.md rather than deleting it, so "merged in TASK_STATUS.md, absent
+  // from BACKLOG.md entirely" is a state the real tooling cannot produce —
+  // and T-575's missing_backlog_record_anywhere check flags it. Status /
+  // title / verification type / repo all mirror the TASK_STATUS block so no
+  // status_mismatch, title_mismatch or verification_type_mismatch finding is
+  // introduced; this fixture's subject is commit reachability only.
+  fs.writeFileSync(
+    root + '/BACKLOG.md',
+    `# BACKLOG\n\n## Active Wave\n\n## Wave 1 — Archived\n\n### T-900 — Fixture full-stack task\n- **Status:** merged\n- **Repo:** this-repo\n- **Verification type:** runtime\n`,
+    'utf8'
+  );
 
   const block = `### T-900 — Fixture full-stack task\n\n- **Status:** merged\n- **Repo:** this-repo\n- **Verification type:** runtime\n- **Evidence:** commit: ${orphanHash}\n`;
 
@@ -508,7 +520,15 @@ function writeFullStackFixture(root, { evidenceStatus, sectionHeading }) {
     `# Repo Map\n\n## this-repo\n\n- **label:** This Repo\n- **path:** ${root}\n`,
     'utf8'
   );
-  fs.writeFileSync(root + '/BACKLOG.md', `# BACKLOG\n\n## Active Wave\n\n`, 'utf8');
+  // T-575: as in writeFullStackFixture() above — BACKLOG.md must carry a
+  // matching archived T-901 block, because a merged TASK_STATUS record with
+  // no BACKLOG record anywhere is unreachable via real archival and now fires
+  // missing_backlog_record_anywhere.
+  fs.writeFileSync(
+    root + '/BACKLOG.md',
+    `# BACKLOG\n\n## Active Wave\n\n## Wave 1 — Archived\n\n### T-901 — Fixture held-on-branch task\n- **Status:** merged\n- **Repo:** this-repo\n- **Verification type:** runtime\n`,
+    'utf8'
+  );
   const block = `### T-901 — Fixture held-on-branch task\n\n- **Status:** merged\n- **Repo:** this-repo\n- **Verification type:** runtime\n- **Evidence:** commit: ${branchHash}\n`;
   fs.writeFileSync(root + '/TASK_STATUS.md', `# TASK_STATUS\n\n## Active tasks\n\n${block}\n## Recently completed tasks\n\n`, 'utf8');
 
@@ -843,7 +863,14 @@ function makeShallowFixture(name) {
     `# Repo Map\n\n## this-repo\n\n- **label:** This Repo\n- **path:** ${shallowRoot}\n`,
     'utf8'
   );
-  fs.writeFileSync(shallowRoot + '/BACKLOG.md', `# BACKLOG\n\n## Active Wave\n\n`, 'utf8');
+  // T-575: as in the Test 7 fixtures above — BACKLOG.md must carry a matching
+  // archived T-963 block, or missing_backlog_record_anywhere fires and this
+  // test's "exit 0" assertion picks up an unrelated warning.
+  fs.writeFileSync(
+    shallowRoot + '/BACKLOG.md',
+    `# BACKLOG\n\n## Active Wave\n\n## Wave 1 — Archived\n\n### T-963 — Fixture shallow-clone task\n- **Status:** merged\n- **Repo:** this-repo\n- **Verification type:** runtime\n`,
+    'utf8'
+  );
   const block = `### T-963 — Fixture shallow-clone task\n\n- **Status:** merged\n- **Repo:** this-repo\n- **Verification type:** runtime\n- **Evidence:** commit: ${outOfWindowHash}\n`;
   fs.writeFileSync(shallowRoot + '/TASK_STATUS.md', `# TASK_STATUS\n\n## Active tasks\n\n${block}\n## Recently completed tasks\n\n`, 'utf8');
 

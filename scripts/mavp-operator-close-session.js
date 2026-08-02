@@ -46,7 +46,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode, printRepoIdentityHeader, getCommitHashesReachable } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode, printRepoIdentityHeader, getCommitHashesReachable, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 // T-530: checkVersionBump()'s release-awareness reads the public mirror's
 // tags EXCLUSIVELY through these check-changelog-frozen.js exports — never
@@ -490,6 +490,17 @@ function printSessionCompletedTable(sessionCompletedIds, taskStatusContent, back
   console.log('');
 }
 
+/**
+ * Parse every `### T-NNN` block in TASK_STATUS.md's `## Active tasks` section.
+ *
+ * DELIBERATELY UNFILTERED (T-573): this returns EVERY entry regardless of
+ * status, because --mark-merged resolves its argument IDs against this list
+ * and must still find a `qa_passed`/`dev_done` task. Status-based skipping is
+ * the CALLERS' job — see the terminal sweeps in runNonInteractive() and
+ * runInteractive(), which relocate terminal entries out of the section and
+ * then re-parse, so wave completion is computed from post-sweep content.
+ * Do not "fix" wave-completion bugs by adding a filter here.
+ */
 function parseActiveTasks(markdown) {
   const lines = markdown.split(/\r?\n/);
   const start = lines.findIndex(l => /^##\s+Active tasks/.test(l));
@@ -514,31 +525,14 @@ function parseActiveTasks(markdown) {
   });
 }
 
-function escapeRegExpLiteral(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * T-542: returns true only when `line` is a `### ` heading whose LEADING
- * task ID equals `taskId` exactly — never when `taskId` merely appears
- * somewhere inside the heading text (e.g. a title that *mentions* another
- * task's ID, such as "### T-541 — ... T-540 residuals ..." matching a
- * lookup for "T-540"). Accepts both the usual "### T-NNN — Title" shape
- * and a heading with no " — " separator at all (a heading whose leading ID
- * has trailing characters glued on, e.g. "### T-540x", is NOT matched —
- * the ID must be followed by either " —" or end-of-line/trailing whitespace).
- */
-function isTaskHeadingFor(line, taskId) {
-  if (!/^###\s+/.test(line)) return false;
-  const re = new RegExp('^###\\s+' + escapeRegExpLiteral(taskId) + '(\\s+—|\\s*$)');
-  return re.test(line);
-}
-
-/** Extracts the leading "T-NNN" id from a "### ..." heading line, or null. */
-function headingLeadingTaskId(line) {
-  const m = line.match(/^###\s+(T-\d+)/);
-  return m ? m[1] : null;
-}
+// T-573: isTaskHeadingFor() / headingLeadingTaskId() (the T-542 anchored
+// heading matcher and its identity companion) now live in
+// mavp-operator-lib.js so this file and the lib's own block movers share ONE
+// implementation instead of two copies that can drift — the exact defect class
+// T-573 itself closes (close-session's local parseActiveTasks had diverged
+// from the lib's parseActiveTask). They are imported at the top of this file
+// and re-exported unchanged below, so every existing caller and
+// scripts/test-task-heading-anchor.js keep working against this module.
 
 function updateTaskStatusField(markdown, taskId, field, value) {
   const lines = markdown.split(/\r?\n/);
@@ -592,6 +586,219 @@ function moveTaskToCompleted(markdown, taskId) {
 }
 
 /**
+ * T-573: statuses a task can already be sitting at, inside `## Active tasks`,
+ * that mean "this work is COMPLETE" — swept into `## Recently completed tasks`
+ * without prompting and mirrored into BACKLOG.md via syncBacklogMergedTasks().
+ *
+ * Deliberately NOT derived from IN_FLIGHT_STATUSES (T-525) — this is the
+ * complementary terminal-completed set for wave-archival auto-move, a distinct
+ * purpose from "what counts as in-flight work"; a needs-fix task is neither in
+ * this set nor eligible here.
+ *
+ * Shared by both close-session paths, and kept identical to the lib's
+ * ARCHIVABLE_TERMINAL_STATUSES (which drives the BACKLOG-side archival those
+ * same records trigger) — asserted below rather than merely commented, so the
+ * two can never silently diverge. `runtime_verified` is a POST-merge status,
+ * so a task carrying it is more finished than `merged`, not less.
+ */
+const ALREADY_TERMINAL_STATUSES = new Set(['merged', 'deployed_dev', 'deployed_prod', 'runtime_verified']);
+
+// Fail loudly at load time if the two sets ever drift apart.
+for (const s of ALREADY_TERMINAL_STATUSES) {
+  if (!ARCHIVABLE_TERMINAL_STATUSES.has(s)) {
+    throw new Error(`close-session: ALREADY_TERMINAL_STATUSES has "${s}" but mavp-operator-lib's ARCHIVABLE_TERMINAL_STATUSES does not — the TASK_STATUS sweep and the BACKLOG archival would disagree.`);
+  }
+}
+
+/**
+ * T-573: sweep the `deferred` / `deprecated` entries (TERMINAL_SKIP_STATUSES)
+ * that are still sitting in TASK_STATUS.md's `## Active tasks` section out of
+ * it, so wave completion is computed from the work that actually remains.
+ *
+ * The 2026-08-02 incident: Wave 70's real work was all merged and archived,
+ * but 7 terminal entries (1 deprecated + 6 deferred) stayed in `## Active
+ * tasks`, so `remainingTasks.length === 0` was never true and the wave latched
+ * open across sessions.
+ *
+ * Destinations:
+ *   - `deferred`   → `## Deferred tasks` (created on demand — a project that
+ *                    has never deferred a task has no such section yet).
+ *   - `deprecated` → `## Recently completed tasks` (permanently retired work
+ *                    belongs with the other archived blocks; the validator
+ *                    already exempts `deprecated` records from that section's
+ *                    non-terminal-status placement check).
+ *
+ * Blocks are relocated BYTE-FOR-BYTE — Evidence/Notes/Superseded by lines all
+ * survive verbatim.
+ *
+ * CRITICAL: swept records are NOT returned for mergedTaskRecords, and this
+ * function deliberately takes no mergedTaskRecords argument so a future edit
+ * cannot casually add them. syncBacklogMergedTasks() would rewrite the task's
+ * BACKLOG Status and ARCHIVE its BACKLOG block into `## Wave N — Archived
+ * (mid-wave)` — but a deferred task's BACKLOG block lives under
+ * `## Deferred Tasks` and must stay there, untouched. This sweep is
+ * TASK_STATUS-only plus a console line.
+ *
+ * @param {string} content - current TASK_STATUS.md content
+ * @param {Array<{id: string, status: string}>} activeTasks - parseActiveTasks() output
+ * @param {Set<string>} [skipIds] - ids already handled by another sweep this run
+ * @returns {{ content: string, sweptIds: string[] }}
+ */
+function sweepTerminalSkipTasks(content, activeTasks, skipIds = new Set()) {
+  let updated = content;
+  const sweptIds = [];
+
+  for (const task of activeTasks) {
+    if (skipIds.has(task.id)) continue;
+    if (!TERMINAL_SKIP_STATUSES.has(task.status)) continue;
+
+    if (task.status === 'deferred') {
+      const result = moveTaskBlockToSection(updated, task.id, DEFERRED_TASK_STATUS_HEADING);
+      if (!result.ok) {
+        console.log(`${YELLOW}⚠ ${task.id} (deferred) — could not relocate: ${result.error}${RESET}`);
+        continue;
+      }
+      updated = result.updated;
+      console.log(`  ${GREEN}✓ ${task.id} → moved to "${DEFERRED_TASK_STATUS_HEADING}" (deferred — not blocking wave completion)${RESET}`);
+    } else {
+      const before = updated;
+      updated = moveTaskToCompleted(updated, task.id);
+      if (updated === before) {
+        console.log(`${YELLOW}⚠ ${task.id} (deprecated) — could not relocate into "## Recently completed tasks"${RESET}`);
+        continue;
+      }
+      console.log(`  ${GREEN}✓ ${task.id} → moved to completed (deprecated — not blocking wave completion)${RESET}`);
+    }
+
+    sweptIds.push(task.id);
+  }
+
+  return { content: updated, sweptIds };
+}
+
+/**
+ * T-573 (hardening): structural guard on syncBacklogMergedTasks()'s input.
+ *
+ * The property being protected: a task swept out of `## Active tasks` as
+ * `deferred`/`deprecated` must NEVER have its BACKLOG block touched by the
+ * merge-mirror. sweepTerminalSkipTasks() enforces that today by construction
+ * (it takes no mergedTaskRecords argument and its call sites discard
+ * sweptIds), but "by construction" only survives until someone refactors the
+ * deferred branch into the merged path — the whole point of this guard is
+ * that such a refactor must FAIL LOUDLY instead of silently corrupting
+ * BACKLOG.md.
+ *
+ * Two intrinsic rules, both derived from what syncBacklogMergedTasks()
+ * actually does (set a status, then archive the block out of Active Wave):
+ *
+ *  1. RECORD CONTRACT — every record's status must be in
+ *     ARCHIVABLE_TERMINAL_STATUSES. This function only knows how to mirror
+ *     COMPLETED work; a record carrying `deferred`/`deprecated` (or anything
+ *     else) is a caller bug. Catches a same-status leak, which is otherwise
+ *     INVISIBLE: updateTaskStatusField(id, 'Status', 'deferred') rewrites
+ *     `deferred` → `deferred` byte-for-byte, and
+ *     archiveMergedTasksFromActiveWave() will not move a block that is
+ *     neither in `## Active Wave` nor in ARCHIVABLE_TERMINAL_STATUSES, so
+ *     the contaminated run produces a byte-identical BACKLOG.md and no
+ *     file-level assertion anywhere can see it.
+ *
+ *  2. NO PROMOTION OF A DEFERRED/DEPRECATED BLOCK — regardless of what
+ *     status the record claims, refuse when the task's CURRENT BACKLOG
+ *     status is in TERMINAL_SKIP_STATUSES. Catches the realistic refactor
+ *     that folds the deferred branch into the merged path and pushes
+ *     `{id, status: 'merged'}`: rule 1 cannot see that (the status IS
+ *     archivable), but promoting a block that reads `deferred` to `merged`
+ *     is exactly the corruption. This rule is intrinsic — it reads BACKLOG
+ *     itself and needs no cooperation from the caller, so it holds however
+ *     the sweep is later restructured.
+ *
+ * On a genuine pre-existing drift (BACKLOG stale at `deferred`/`deprecated`
+ * while TASK_STATUS says the task was merged) this refuses rather than
+ * papering over it.
+ *
+ * VALIDATOR COVERAGE — corrected by T-575; the paragraph this replaces said
+ * the validator did not detect this shape at all, which was true when it was
+ * written and is now only PARTLY true. What changed and what did not, each
+ * re-measured against a live fixture after T-575 landed:
+ *
+ *   - The `deferred` half is now COVERED. T-575 added
+ *     checkReverseTerminalStatusDisagreement() (mavp-validator.js) — the
+ *     mirror image of the forward check named further down — so the fixture
+ *     the old paragraph quoted as
+ *     "Healthy, 0 failures, 0 warnings, exit 0" (BACKLOG T-810 `deferred`
+ *     under `## Deferred Tasks`, TASK_STATUS T-810 `merged` under
+ *     `## Active tasks`) now reports "Overall result: Misleading / repair
+ *     required", "- Failures: 1", exit 2, and under "## Failures":
+ *       - [T-810] reverse_terminal_status_disagreement
+ *         - Issue: T-810 is merged in TASK_STATUS.md (section: Active tasks)
+ *           but BACKLOG.md (section: Deferred Tasks) still records status
+ *           deferred — the artifacts disagree on whether this task shipped.
+ *   - The `deprecated` half is STILL INVISIBLE. TERMINAL_SKIP_STATUSES holds
+ *     both `deferred` and `deprecated`, but the validator's
+ *     isSkippedByExistingRules() exempts `deprecated` records (and any record
+ *     carrying a real `Superseded by:`) on BOTH sides by design, so the new
+ *     check skips them. Verified by flipping only the BACKLOG status in that
+ *     same fixture to `deprecated`: "Overall result: Healthy", 0 failures,
+ *     0 warnings, exit 0. Rule 2 above still refuses it.
+ *   - The three older checks remain blind in this direction, exactly as the
+ *     old paragraph described — the new coverage comes solely from the new
+ *     check. compareRecords()'s active-vs-active `status_mismatch` never sees
+ *     the BACKLOG block: parseBacklogActiveTasks() keeps only
+ *     ACTIVE_BACKLOG_STATUSES, and `deferred` is not in that set. That is a
+ *     STATUS filter, not a section filter — moving the same block into
+ *     `## Active Wave` leaves it equally invisible to it (re-verified in
+ *     test-validator-cross-section-status.js Test G: no `status_mismatch`
+ *     finding, and the block is dropped from the active record count).
+ *     checkCrossSectionTerminalStatusDisagreement() and
+ *     checkMissingTaskStatusRecordAnywhere() both read whole-file records, so
+ *     they CAN see a `## Deferred Tasks` block, but both fire only when the
+ *     BACKLOG side is terminal — the opposite direction. Section placement
+ *     was never what hid this shape; direction was.
+ *
+ * The guard is still load-bearing even for the now-covered half, for two
+ * reasons. First, ORDERING: close-session calls syncBacklogMergedTasks()
+ * before runValidator(), so by the time the validator runs the sweep has
+ * already rewritten BACKLOG.md to agree with TASK_STATUS.md — the
+ * disagreement the new check looks for has been erased by the very write the
+ * guard exists to prevent. A validator check reports drift at rest; only this
+ * throw stops the corrupting write. Second, this shape cannot come out of a
+ * sanctioned ritual: `--rescope-task --status deferred` sets the BACKLOG
+ * Status in the same write that relocates the block and mirrors the same
+ * value into TASK_STATUS.md, and `--set-status` writes both artifacts. It
+ * appears only via a direct hand-edit of TASK_STATUS.md — sync-status mirrors
+ * BACKLOG → TASK_STATUS only, never back.
+ *
+ * Throws before any BACKLOG.md write, so a tripped guard leaves BACKLOG.md
+ * untouched — the safe direction.
+ *
+ * @param {Array<{id: string, status: string}>} mergedTaskRecords
+ * @param {string} backlogContent - BACKLOG.md content, read before any mutation
+ */
+function assertMergedRecordsUncontaminated(mergedTaskRecords, backlogContent) {
+  const backlogStatuses = parseBacklogStatuses(backlogContent);
+
+  for (const rec of mergedTaskRecords) {
+    if (!ARCHIVABLE_TERMINAL_STATUSES.has(rec.status)) {
+      throw new Error(
+        `close-session: refusing to mirror ${rec.id} into BACKLOG.md with status "${rec.status}" — ` +
+        `syncBacklogMergedTasks() only mirrors completed work (${[...ARCHIVABLE_TERMINAL_STATUSES].join('/')}). ` +
+        `A deferred/deprecated task swept out of "## Active tasks" must never reach mergedTaskRecords; ` +
+        `its BACKLOG block stays where it is, untouched.`
+      );
+    }
+
+    const currentBacklogStatus = backlogStatuses.get(rec.id);
+    if (currentBacklogStatus && TERMINAL_SKIP_STATUSES.has(currentBacklogStatus)) {
+      throw new Error(
+        `close-session: refusing to promote ${rec.id} from "${currentBacklogStatus}" to "${rec.status}" in BACKLOG.md — ` +
+        `a ${currentBacklogStatus} task must never be mirrored as completed work. ` +
+        `If ${rec.id} genuinely was completed, adjudicate the BACKLOG/TASK_STATUS disagreement by hand first.`
+      );
+    }
+  }
+}
+
+/**
  * T-438: mirror TASK_STATUS.md's merge state into BACKLOG.md — set each merged
  * task's `- **Status:**` field to match, then archive its block out of
  * BACKLOG's `## Active Wave` section via the same
@@ -612,6 +819,12 @@ function syncBacklogMergedTasks(mergedTaskRecords, waveNumber) {
   if (!mergedTaskRecords.length || !fs.existsSync(BACKLOG_MD)) return;
 
   let backlogContent = readUtf8(BACKLOG_MD);
+
+  // T-573: fail loudly before touching BACKLOG.md if a swept deferred/
+  // deprecated task leaked into mergedTaskRecords — see the guard's doc
+  // comment above for why neither rule can be dropped.
+  assertMergedRecordsUncontaminated(mergedTaskRecords, backlogContent);
+
   for (const rec of mergedTaskRecords) {
     backlogContent = updateTaskStatusField(backlogContent, rec.id, 'Status', rec.status);
   }
@@ -1075,11 +1288,21 @@ async function runNonInteractive(args) {
   // Also move any tasks that were already merged before --close-session was called
   const alreadyHandled = new Set(args.markMerged);
   for (const task of activeTasks) {
-    if ((task.status === 'merged' || task.status === 'deployed_dev' || task.status === 'deployed_prod') && !alreadyHandled.has(task.id)) {
+    if (ALREADY_TERMINAL_STATUSES.has(task.status) && !alreadyHandled.has(task.id)) {
       updatedContent = moveTaskToCompleted(updatedContent, task.id);
       mergedTaskRecords.push({ id: task.id, status: task.status });
-      console.log(`  ${GREEN}✓ ${task.id} → moved to completed (was already merged)${RESET}`);
+      console.log(`  ${GREEN}✓ ${task.id} → moved to completed (was already ${task.status})${RESET}`);
+      alreadyHandled.add(task.id);
     }
+  }
+
+  // T-573: sweep deferred/deprecated entries out of Active tasks. Runs BEFORE
+  // remainingTasks is computed below, so wave completion is derived from
+  // post-sweep content. Swept ids are deliberately NOT added to
+  // mergedTaskRecords — see sweepTerminalSkipTasks()'s doc comment.
+  {
+    const swept = sweepTerminalSkipTasks(updatedContent, activeTasks, alreadyHandled);
+    updatedContent = swept.content;
   }
 
   // Write TASK_STATUS.md
@@ -1389,19 +1612,29 @@ async function runInteractive() {
   // [m]/[n]/[k]/[enter] question as any other active task, and Enter-skipping
   // one left its already-merged status untouched in the Active tasks section,
   // which then counted as "remaining" and silently blocked wave completion.
-  // Deliberately NOT derived from IN_FLIGHT_STATUSES (T-525) — this is the complementary
-  // terminal-completed set for wave-archival auto-move, a distinct purpose from "what
-  // counts as in-flight work"; a needs-fix task is neither in this set nor eligible here.
-  const alreadyTerminalStatuses = new Set(['merged', 'deployed_dev', 'deployed_prod']);
-  const alreadyTerminalTasks = activeTasks.filter(t => alreadyTerminalStatuses.has(t.status));
+  // Deliberately NOT derived from IN_FLIGHT_STATUSES (T-525) — see
+  // ALREADY_TERMINAL_STATUSES's doc comment above, which is the shared
+  // definition this path and runNonInteractive both use (T-573 unified them).
+  const alreadyTerminalTasks = activeTasks.filter(t => ALREADY_TERMINAL_STATUSES.has(t.status));
   for (const task of alreadyTerminalTasks) {
     updatedContent = moveTaskToCompleted(updatedContent, task.id);
     mergedTaskRecords.push({ id: task.id, status: task.status });
     console.log(`  ${GREEN}✓ ${task.id} → moved to completed (was already ${task.status})${RESET}`);
   }
 
+  // T-573: sweep deferred/deprecated entries out of Active tasks — same
+  // contract as runNonInteractive's sweep (relocate only; never fed to
+  // mergedTaskRecords), so identical state closes identically in both modes.
+  {
+    const swept = sweepTerminalSkipTasks(updatedContent, activeTasks);
+    updatedContent = swept.content;
+  }
+
   for (const task of activeTasks) {
-    if (alreadyTerminalStatuses.has(task.status)) continue;
+    // T-573: a swept deferred/deprecated entry is terminal — never prompt for
+    // it. Prompting would offer [m]erged on a task that was explicitly NOT
+    // done, and an Enter-skip would leave it counted as remaining work.
+    if (ALREADY_TERMINAL_STATUSES.has(task.status) || TERMINAL_SKIP_STATUSES.has(task.status)) continue;
     const answer = await prompt(rl, `${BOLD}${task.id}${RESET} — ${task.title}\n  [m]erged / [n]eeds_fix / [k]eep / [enter] skip: `);
     const choice = answer.trim().toLowerCase();
 
@@ -1660,4 +1893,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE };
+module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE };

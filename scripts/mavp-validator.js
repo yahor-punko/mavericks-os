@@ -376,6 +376,8 @@ function getSeverityForCheck(checkName) {
     cross_section_terminal_status_disagreement: 'failure',
     non_terminal_status_in_completed_section: 'warning',
     missing_task_status_record_anywhere: 'warning',
+    reverse_terminal_status_disagreement: 'failure',
+    missing_backlog_record_anywhere: 'warning',
   };
 
   return severityByCheckName[checkName] || 'warning';
@@ -1601,6 +1603,116 @@ function checkMissingTaskStatusRecordAnywhere(allBacklogRecords, allTaskStatusRe
 }
 
 /**
+ * Failure-severity (T-575) — the REVERSE direction of
+ * checkCrossSectionTerminalStatusDisagreement(). That check is gated on the
+ * BACKLOG side being terminal, so the mirror-image shape raised zero findings:
+ * a TASK_STATUS record claiming terminal status (merged/deployed_dev/
+ * deployed_prod) while the same-ID BACKLOG record — in ANY section — still
+ * reads something non-terminal (`deferred`, `planned`, `qa_passed`, ...).
+ * That is an artifact claiming a task shipped while the plan of record says it
+ * did not, which is the same class of contradiction as the forward direction
+ * and carries the same failure severity.
+ *
+ * Note this is NOT a section-visibility gap: parseAllTaskBlocksBySection()
+ * already parses `## Deferred Tasks` and every other `##` section on both
+ * sides. The gap was purely directional. compareRecords()'s active-vs-active
+ * `status_mismatch` cannot cover it either, because parseBacklogActiveTasks()
+ * keeps only ACTIVE_BACKLOG_STATUSES — a STATUS filter, not a section filter,
+ * so a `deferred` BACKLOG block is invisible to it even when it sits in
+ * `## Active Wave`.
+ *
+ * Deliberately a separate check rather than a widening of the forward one:
+ * severity is assigned per check name (getSeverityForCheck()), the forward
+ * check ships with documented one-direction semantics adopters rely on, and
+ * the repair guidance genuinely differs by direction — here the BACKLOG side
+ * is the one that is behind.
+ */
+function checkReverseTerminalStatusDisagreement(allBacklogRecords, allTaskStatusRecords) {
+  const findings = [];
+  const backlogIndex = createTaskRecordIndex(allBacklogRecords);
+
+  for (const taskStatusRecord of allTaskStatusRecords) {
+    if (!TERMINAL_TASK_STATUSES.has(taskStatusRecord.status)) continue;
+    if (isSkippedByExistingRules(taskStatusRecord)) continue;
+
+    const matches = backlogIndex.get(taskStatusRecord.taskId) || [];
+    for (const backlogRecord of matches) {
+      if (isSkippedByExistingRules(backlogRecord)) continue;
+      if (TERMINAL_TASK_STATUSES.has(backlogRecord.status)) continue;
+
+      findings.push(
+        createFinding({
+          checkName: 'reverse_terminal_status_disagreement',
+          taskId: taskStatusRecord.taskId,
+          message: `${taskStatusRecord.taskId} is ${taskStatusRecord.status} in TASK_STATUS.md (section: ${taskStatusRecord.sourceSection}) but BACKLOG.md (section: ${backlogRecord.sourceSection}) still records status ${backlogRecord.status} — the artifacts disagree on whether this task shipped.`,
+          repairTarget: 'BACKLOG.md + TASK_STATUS.md',
+          suggestedAction: `Determine which record is correct: if ${taskStatusRecord.taskId} really was ${taskStatusRecord.status}, bring BACKLOG.md's block into line with \`--rescope-task ${taskStatusRecord.taskId} --status ${taskStatusRecord.status}\` (or \`--update-status ${taskStatusRecord.taskId} ${taskStatusRecord.status}\` if the block is already in the right section); if it was not, revert TASK_STATUS.md's ${taskStatusRecord.taskId} status to match BACKLOG.md.`,
+          details: {
+            backlogSection: backlogRecord.sourceSection,
+            backlogStatus: backlogRecord.status,
+            taskStatusSection: taskStatusRecord.sourceSection,
+            taskStatusStatus: taskStatusRecord.status,
+          },
+        })
+      );
+    }
+  }
+
+  return findings;
+}
+
+/**
+ * Warning-severity (T-575) — reverse-direction sibling of
+ * checkMissingTaskStatusRecordAnywhere(), and the worse variant of the gap
+ * checkReverseTerminalStatusDisagreement() above closes: a TASK_STATUS record
+ * claiming terminal status for a task BACKLOG never registered ANYWHERE.
+ * Nothing else catches it — `missing_in_backlog` deliberately exempts
+ * terminal-status TASK_STATUS records (see SKIP_BACKLOG_PRESENCE_STATUSES and
+ * the TERMINAL_TASK_STATUSES exemption in compareRecords()), because merged
+ * tasks legitimately archive out of BACKLOG's Active Wave — so a fabricated
+ * `merged` record with no plan of record behind it is fully silent.
+ *
+ * Warning, not failure: a project that trims old waves out of BACKLOG.md
+ * entirely would mass-trip this, and absence alone is not proof of
+ * fabrication — the same reasoning that keeps the forward-direction
+ * missing_task_status_record_anywhere at warning.
+ *
+ * NOTE (carried over from checkMissingTaskStatusRecordAnywhere(), applies
+ * symmetrically here): if BACKLOG.md's history is ever trimmed by moving
+ * archived waves into a separate file, this check will need to read that file
+ * too — otherwise it will start firing on every legitimately-trimmed task
+ * rather than only on genuinely unregistered ones. Revisit at that point.
+ */
+function checkMissingBacklogRecordAnywhere(allBacklogRecords, allTaskStatusRecords) {
+  const findings = [];
+  const backlogIndex = createTaskRecordIndex(allBacklogRecords);
+
+  for (const taskStatusRecord of allTaskStatusRecords) {
+    if (!TERMINAL_TASK_STATUSES.has(taskStatusRecord.status)) continue;
+    if (isSkippedByExistingRules(taskStatusRecord)) continue;
+
+    const matches = backlogIndex.get(taskStatusRecord.taskId) || [];
+    if (matches.length > 0) continue;
+
+    findings.push(
+      createFinding({
+        checkName: 'missing_backlog_record_anywhere',
+        taskId: taskStatusRecord.taskId,
+        message: `${taskStatusRecord.taskId} is ${taskStatusRecord.status} in TASK_STATUS.md (section: ${taskStatusRecord.sourceSection}) but has no BACKLOG.md record in any section — a task cannot have shipped without ever being registered in the plan of record.`,
+        repairTarget: 'BACKLOG.md',
+        suggestedAction: `Add a BACKLOG.md record for ${taskStatusRecord.taskId} (a minimal retroactive block is acceptable for pre-existing archived history) so both artifacts' task sets agree — or, if the TASK_STATUS record was fabricated, remove it.`,
+        details: {
+          taskStatusSection: taskStatusRecord.sourceSection,
+          taskStatusStatus: taskStatusRecord.status,
+        },
+      })
+    );
+  }
+
+  return findings;
+}
+
+/**
  * Extract candidate `commit:` hashes from an evidence block (T-448). Cross-repo
  * evidence may carry multiple `commit:` lines (one per repo), so this returns
  * an array. Each match is re-validated against the anchored hex pattern before
@@ -2695,6 +2807,27 @@ const CHECKS = [
     name: 'missing_task_status_record_anywhere',
     run: (ctx) => checkMissingTaskStatusRecordAnywhere(ctx.backlogAllTasksAnySection, ctx.taskStatusAllTasksAnySection),
   },
+  // reverse-direction terminal-status disagreement (T-575, failure): the
+  // mirror image of cross_section_terminal_status_disagreement above — a
+  // TASK_STATUS record terminal in ANY section whose BACKLOG record in ANY
+  // section is still non-terminal (e.g. TASK_STATUS `merged` vs BACKLOG
+  // `deferred`). The forward check is gated on the BACKLOG side being
+  // terminal, so this shape previously raised zero findings.
+  {
+    name: 'reverse_terminal_status_disagreement',
+    run: (ctx) =>
+      checkReverseTerminalStatusDisagreement(ctx.backlogAllTasksAnySection, ctx.taskStatusAllTasksAnySection),
+  },
+  // missing BACKLOG record anywhere (T-575, warning): reverse-direction
+  // sibling of missing_task_status_record_anywhere — fires when a
+  // terminal-status TASK_STATUS record in ANY section has NO matching BACKLOG
+  // record in ANY section, i.e. a task claiming to have shipped that the plan
+  // of record never registered. `missing_in_backlog` cannot see this: it
+  // deliberately exempts terminal-status TASK_STATUS records.
+  {
+    name: 'missing_backlog_record_anywhere',
+    run: (ctx) => checkMissingBacklogRecordAnywhere(ctx.backlogAllTasksAnySection, ctx.taskStatusAllTasksAnySection),
+  },
 ];
 
 function parseArtifacts({ backlogPath, taskStatusPath }) {
@@ -2990,4 +3123,6 @@ module.exports = {
   checkCrossSectionTerminalStatusDisagreement,
   checkNonTerminalStatusInCompletedSection,
   checkMissingTaskStatusRecordAnywhere,
+  checkReverseTerminalStatusDisagreement,
+  checkMissingBacklogRecordAnywhere,
 };

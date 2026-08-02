@@ -5,6 +5,19 @@ inspired by [Keep a Changelog](https://keepachangelog.com/). For how the
 framework actually works, see [README.md](README.md) and the core process
 docs in [`docs/core/`](docs/core/).
 
+## [0.40.0] — 2026-08-02
+
+### Fixed
+
+- **`--close-session` no longer stalls a wave whose real work is already merged** (T-573) — terminal entries (`deferred`, `deprecated`) left inside `TASK_STATUS.md`'s "## Active tasks" section were being counted as remaining work, so a wave could sit open indefinitely even after every actual deliverable had merged. `--close-session` now sweeps `deferred` entries into a "## Deferred tasks" section and `deprecated` entries into "## Recently completed tasks" before computing wave completion, so only genuinely unfinished statuses hold a wave open. A structural guard shipped alongside it: the close-session merge-mirror now refuses to promote a task to `merged` in BACKLOG.md if that task's own BACKLOG block currently reads `deferred` or `deprecated`, closing the write-side half of the same disagreement.
+- **`--rescope-task --status deferred` now relocates the TASK_STATUS block instead of editing its status in place** (T-574) — deferring a task previously left its entry sitting inside "## Active tasks" with just a `Status: deferred` line rewritten, which is exactly the shape T-573 had to sweep up after the fact. The deferral path now moves the block into a "## Deferred tasks" section (created on demand) byte-for-byte, so hand-written Evidence/Notes survive verbatim and stale entries stop accumulating at the source rather than being cleaned up downstream.
+
+### Added
+
+- **Validator: two new checks close a direction-gated blind spot in status verification** (T-575) — `reverse_terminal_status_disagreement` (failure severity) fires when a TASK_STATUS.md record claims `merged` but the same task's BACKLOG.md block says something else, and `missing_backlog_record_anywhere` (warning severity) fires when a TASK_STATUS record claims `merged` and there is no BACKLOG record for that task at all. Previously the validator only checked agreement in the BACKLOG-to-TASK_STATUS direction, so a TASK_STATUS record claiming `merged` while BACKLOG said `deferred` (or said nothing) raised zero findings. **Adopters upgrading to 0.40.0 may see new findings surface against existing artifacts** — this is a new failure-severity check and it can block a commit via the pre-commit hook. Measured against the canonical repo's own history (574 BACKLOG records, 562 TASK_STATUS records), it raised zero findings, so it is not expected to be noisy in ordinary use — but that is a measurement on one repo's history, not a guarantee, and a project with hand-edited or out-of-band artifact history is exactly the population most likely to trip it for the first time.
+- **New "Executed-check rule" in `docs/core/ORCHESTRATION_RULES.md`, plus a matching `.claude/rules/backlog.md` bullet** (T-571) — codifies a brief-composition duty: before a named verification command or acceptance criterion is written into a durable artifact (a BACKLOG task, a role spec, an RCA codification), whoever writes it must actually run it once rather than assume it works. Closes a pattern where criteria defects reached shipped tasks because a check was described but never executed.
+- **The same executed-check duty added to the developer, QA, and architect role specs** (T-582) — each sub-agent role now carries an explicit instruction not to assert a component's behavior from reading it alone: run the check (or a test able to fail against the bug it targets) and quote the real output, or label the claim `UNEXECUTED — verify before relying`. The architect's version accounts for its restricted toolset (no general Bash) with read-then-cite-and-label instead of execute-then-write.
+
 ## [0.39.1] — 2026-07-29
 
 ### Fixed

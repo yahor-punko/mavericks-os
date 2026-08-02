@@ -5,8 +5,10 @@
  *
  * Atomically re-scope (or un-defer) an existing task: moves its block between
  * BACKLOG.md sections (## Deferred Tasks <-> ## Active Wave), updates
- * Status/Owner role/title, ensures a matching TASK_STATUS.md "## Active
- * tasks" entry, then runs the MavP validator exactly once.
+ * Status/Owner role/title, and keeps TASK_STATUS.md's sectioning symmetric —
+ * ensuring a matching "## Active tasks" entry when activating, and moving an
+ * existing entry OUT of "## Active tasks" into "## Deferred tasks" when
+ * deferring — then runs the MavP validator exactly once.
  *
  * Usage:
  *   ./scripts/mavp-operator --rescope-task T-NNN [--status <s>] [--owner <role>] [--title "..."]
@@ -18,11 +20,19 @@
  *
  * Behavior:
  *   - --status deferred moves the task block INTO "## Deferred Tasks" in
- *     BACKLOG.md (creating the section on demand if the project has none).
+ *     BACKLOG.md (creating the section on demand if the project has none),
+ *     and — when the task has a TASK_STATUS.md entry inside "## Active
+ *     tasks" — relocates that entry byte-for-byte into TASK_STATUS.md's
+ *     "## Deferred tasks" section (also created on demand; note the
+ *     deliberate lower-case "tasks", matching the section the close-session
+ *     terminal-status sweep writes to). Hand-edited Evidence/Notes are
+ *     preserved verbatim — nothing is regenerated from a skeleton.
  *   - --status <anything else> moves the task block INTO "## Active Wave" in
  *     BACKLOG.md, and ensures a corresponding entry exists in TASK_STATUS.md
  *     "## Active tasks" (creating one if the task had none — e.g. a
- *     previously-deferred task with no mirrored TASK_STATUS entry).
+ *     previously-deferred task with no mirrored TASK_STATUS entry;
+ *     relocating an existing one back out of whatever section it sits in,
+ *     which closes the round trip with the deferral case above).
  *   - When --status is omitted, the task's current section is preserved and
  *     only --owner / --title are applied in place.
  *   - The task ID is never reassigned. Duplicate or missing IDs in
@@ -45,7 +55,14 @@ const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
 const VALIDATOR = path.join(__dirname, 'mavp-validator.js');
 
-const { insertIntoActiveWave, insertIntoActiveTasks, writeContextBundle, printRepoIdentityHeader } = require('./mavp-operator-lib.js');
+const {
+  insertIntoActiveWave,
+  insertIntoActiveTasks,
+  moveTaskBlockToSection,
+  DEFERRED_TASK_STATUS_HEADING,
+  writeContextBundle,
+  printRepoIdentityHeader,
+} = require('./mavp-operator-lib.js');
 
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -358,6 +375,7 @@ function main() {
 
   // --- Mirror the change into TASK_STATUS.md ---
   let taskStatusChanged = false;
+  let taskStatusRelocatedTo = null;
   if (taskStatusLoc.count === 1) {
     let updatedStatusBlock = taskStatusLoc.rawBlock;
     if (newStatus) updatedStatusBlock = setBlockField(updatedStatusBlock, 'Status', newStatus);
@@ -387,6 +405,38 @@ function main() {
       const trimmedStatusBlock = updatedStatusBlock.trim();
       const relocatedEntry = `\n${trimmedStatusBlock}\n`;
       taskStatus = insertIntoActiveTasks(withoutStatusBlock, relocatedEntry);
+    } else if (targetSection === 'deferred' && isInActiveTasks) {
+      // T-574: the mirror image of the T-544 activation path above. Deferring
+      // a task whose TASK_STATUS.md entry sits inside "## Active tasks" used
+      // to edit the Status field in place and leave the block where it was,
+      // so the entry stayed in Active tasks forever — the producer of the
+      // stale terminal entries that latched wave 70 open. The convention the
+      // comment at the bottom of this block already stated (deferred tasks
+      // are not mirrored into Active tasks) was honored only when the entry
+      // happened to be ABSENT; now it is honored when one exists too.
+      //
+      // The field edits are applied in place FIRST, then the resulting
+      // document is handed to the shared lib mover, which relocates the block
+      // BYTE-FOR-BYTE into the same "## Deferred tasks" section
+      // (DEFERRED_TASK_STATUS_HEADING) the close-session sweep uses — created
+      // on demand, immediately before "## Recently completed tasks". Nothing
+      // is regenerated from a skeleton, so hand-edited Evidence/Notes survive
+      // verbatim, and exactly one heading for the task remains in the file.
+      const editedTaskStatus =
+        taskStatus.slice(0, taskStatusLoc.startIndex) +
+        updatedStatusBlock +
+        taskStatus.slice(taskStatusLoc.endIndex);
+      const moved = moveTaskBlockToSection(editedTaskStatus, taskId, DEFERRED_TASK_STATUS_HEADING);
+      if (!moved.ok) {
+        console.error(
+          `${RED}Error: could not relocate ${taskId} into "${DEFERRED_TASK_STATUS_HEADING}" in TASK_STATUS.md — ${moved.error}${RESET}`
+        );
+        console.error(`${DIM}No files were written.${RESET}`);
+        process.exitCode = 1;
+        return;
+      }
+      taskStatus = moved.updated;
+      taskStatusRelocatedTo = DEFERRED_TASK_STATUS_HEADING;
     } else {
       taskStatus =
         taskStatus.slice(0, taskStatusLoc.startIndex) +
@@ -412,7 +462,9 @@ function main() {
   }
   // targetSection === 'deferred' (or null) with no existing TASK_STATUS entry:
   // leave it absent — matches the project convention of not mirroring
-  // deferred tasks into TASK_STATUS.md's Active tasks section.
+  // deferred tasks into TASK_STATUS.md's Active tasks section. When an entry
+  // DOES exist, the T-574 branch above enforces the same convention by
+  // relocating it out of Active tasks rather than leaving it behind.
 
   writeUtf8(BACKLOG_MD, backlog);
   if (taskStatusChanged) {
@@ -438,6 +490,9 @@ function main() {
     console.log(
       `${GREEN}BACKLOG.md section: → ${targetSection === 'deferred' ? DEFERRED_SECTION_HEADING : '## Active Wave'}${RESET}`
     );
+  }
+  if (taskStatusRelocatedTo) {
+    console.log(`${GREEN}TASK_STATUS.md section: → ${taskStatusRelocatedTo}${RESET}`);
   }
   console.log(
     `${GREEN}Updated: BACKLOG.md${taskStatusChanged ? ', TASK_STATUS.md' : ''}${RESET}`
