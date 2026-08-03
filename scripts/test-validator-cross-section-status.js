@@ -31,6 +31,67 @@ const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 
 const VALIDATOR_PATH = path.join(__dirname, 'mavp-validator.js');
+const REPO_ROOT = path.resolve(__dirname, '..');
+
+// --- T-585: canonical-repo gate for the real-artifact layer ----------------
+// Tests K and L below read this repo's REAL BACKLOG.md / TASK_STATUS.md and
+// assert a non-trivial (>100) parsed record count. That claim is only
+// required to hold in the canonical private repo. `scripts/publish-manifest.json`
+// classifies both artifacts as `reset` -> one-record `templates/` starters, so
+// in the public mirror (and in any adopter fork) those files hold exactly ONE
+// `### T-` record each and the vacuity guard throws — which is exactly what
+// reddened 0.40.0's mirror CI on all three node cells (backlog=1
+// task_status=1).
+//
+// Two DIFFERENT questions, deliberately kept apart:
+//   - "is this an environment where the claim is required to hold?" -> the
+//     gate below (canonical-repo detection).
+//   - "did the claim actually engage?" -> the `> 100` record count, which
+//     stays a HARD assertion INSIDE the gate. Making the vacuity guard itself
+//     conditional on input size was considered and rejected: the guard exists
+//     to catch a parser regression returning an empty set in the canonical
+//     repo, and a size-conditional form would read that regression as "small
+//     input, skip" — fail-open, the exact shape T-573 removed elsewhere.
+//
+// Detection REUSES the exported isCanonicalRepo() ("every `exclude` key is
+// git-tracked") from check-publish-manifest.js rather than re-implementing it
+// — see that function's own comment ("do not invent a new one"). Same
+// defensive load/degrade posture as check-changelog-frozen.js's
+// repoIsCanonical(): a missing helper, a missing/unparseable manifest, or a
+// non-git directory all read as NON-canonical instead of throwing.
+let isCanonicalRepoHelper = null;
+try {
+  ({ isCanonicalRepo: isCanonicalRepoHelper } = require('./check-publish-manifest.js'));
+} catch {
+  isCanonicalRepoHelper = null;
+}
+
+/** True iff `repoRoot` is the canonical private repo. Never throws. */
+function repoIsCanonical(repoRoot) {
+  if (typeof isCanonicalRepoHelper !== 'function') return false;
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(repoRoot, 'scripts', 'publish-manifest.json'), 'utf8'));
+  } catch {
+    return false;
+  }
+  try {
+    // stderr ignored: in a non-git directory git writes "fatal: not a git
+    // repository" before exiting non-zero, and that line would otherwise
+    // land in the CI log of every non-canonical run as if something broke.
+    const tracked = execFileSync('git', ['ls-files'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .split('\n')
+      .filter(Boolean);
+    return isCanonicalRepoHelper(manifest, tracked);
+  } catch {
+    // Not a git repo / git unavailable — treat as non-canonical.
+    return false;
+  }
+}
 
 function makeTmpDir(label) {
   const tmpDir = path.join(os.tmpdir(), `t543-test-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -492,6 +553,10 @@ function reverseTaskStatus({ taskStatusStatus, extraField = '' }) {
 //       Every other finding in that report is ignored by design.
 //   (3) baseline, ADVISORY — the same run's exit code and failure/warning
 //       counts are printed for a human, never asserted.
+//
+// T-585 — this whole layer (Test K AND Test L) only runs in the canonical
+// repo; see the repoIsCanonical() note at the top of this file. Everything
+// above (fixture Tests A-J, the logic coverage) runs everywhere, unchanged.
 const NEW_CHECK_NAMES = ['reverse_terminal_status_disagreement', 'missing_backlog_record_anywhere'];
 
 /** The T-575 check names present in a validator report — the only failure signal this guard honours. */
@@ -499,14 +564,31 @@ function newCheckNamesIn(validatorStdout) {
   return NEW_CHECK_NAMES.filter((name) => validatorStdout.includes(name));
 }
 
-{
-  const REPO_ROOT = path.resolve(__dirname, '..');
+const REAL_ARTIFACT_LAYER = repoIsCanonical(REPO_ROOT);
+if (!REAL_ARTIFACT_LAYER) {
+  console.log(
+    '  [SKIP] Tests K + L (real-artifact layer) — NON-CANONICAL REPO: publish-manifest.json ships ' +
+      'BACKLOG.md/TASK_STATUS.md as one-record templates/ starters, so this repo has no live task ' +
+      'artifacts to read and the >100-record vacuity guard cannot hold here (T-585). The guard stays a ' +
+      'HARD assertion inside the gate, and fixture Tests A-J above ran in full.'
+  );
+}
+
+if (REAL_ARTIFACT_LAYER) {
   const validator = require(path.join(REPO_ROOT, 'scripts', 'mavp-validator.js'));
 
   const realBacklog = fs.readFileSync(path.join(REPO_ROOT, 'BACKLOG.md'), 'utf8');
   const realTaskStatus = fs.readFileSync(path.join(REPO_ROOT, 'TASK_STATUS.md'), 'utf8');
   const backlogAll = validator.parseAllTaskBlocksBySection(realBacklog, 'backlog');
   const taskStatusAll = validator.parseAllTaskBlocksBySection(realTaskStatus, 'task_status');
+
+  // Proof-of-engagement (T-585): print the real counts unconditionally, so a
+  // canonical run visibly demonstrates the layer READ live artifacts rather
+  // than merely not having been skipped.
+  console.log(
+    `  [advisory] real-artifact layer ENGAGED (canonical repo): parsed ` +
+      `${backlogAll.length} BACKLOG.md records, ${taskStatusAll.length} TASK_STATUS.md records`
+  );
 
   // Guard against the guard being vacuous: if the parsers ever returned an
   // empty set, "zero findings" below would pass for the wrong reason.
@@ -565,6 +647,12 @@ function newCheckNamesIn(validatorStdout) {
 // empty T-575 signal. The probe id is chosen at runtime from a range verified
 // absent in both artifacts, so it can never collide with a real task and
 // manufacture duplicate_task_id / duplicate_active_task noise.
+//
+// T-585 — gated on the SAME canonical-repo condition as Test K, because it
+// reads the same real artifacts. Before T-585 this test carried the mirror
+// defect LATENTLY: it never reached the point of failing only because Test K
+// threw first and aborted the file. Gating K alone would have traded one
+// mirror failure for the next one.
 
 /** First `T-NNN` in [from, to] that appears in none of the given texts. */
 function pickUnusedTaskId(texts, from = 880, to = 999) {
@@ -575,8 +663,7 @@ function pickUnusedTaskId(texts, from = 880, to = 999) {
   return null;
 }
 
-{
-  const REPO_ROOT = path.resolve(__dirname, '..');
+if (REAL_ARTIFACT_LAYER) {
   const tmpDir = makeTmpDir('advisory-tolerates-unrelated-warning');
 
   const realBacklog = fs.readFileSync(path.join(REPO_ROOT, 'BACKLOG.md'), 'utf8');
@@ -636,5 +723,8 @@ function pickUnusedTaskId(texts, from = 880, to = 999) {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 }
 
-console.log(`All T-543 + T-575 assertions passed (${passCount} checks).`);
+console.log(
+  `All T-543 + T-575 assertions passed (${passCount} checks` +
+    (REAL_ARTIFACT_LAYER ? ', real-artifact layer INCLUDED).' : ', real-artifact layer SKIPPED — see above).')
+);
 

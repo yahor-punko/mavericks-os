@@ -5,6 +5,28 @@ inspired by [Keep a Changelog](https://keepachangelog.com/). For how the
 framework actually works, see [README.md](README.md) and the core process
 docs in [`docs/core/`](docs/core/).
 
+## [0.40.1] — 2026-08-03
+
+### Fixed
+
+- **Shipped T-575 real-artifact test layer no longer asserts a canonical-only
+  property outside the canonical repo** (T-585) — the public mirror's CI went
+  RED on all three node cells immediately after the 0.40.0 release: T-575's
+  false-positive guard in `scripts/test-validator-cross-section-status.js`
+  demanded more than 100 records from the repo's own `BACKLOG.md` /
+  `TASK_STATUS.md`, but the publish manifest ships both as one-record `reset`
+  templates, so the mirror's real artifacts measured `backlog=1
+  task_status=1` and the assertion failed loudly on every run. The affected
+  test layer is now gated on the shared `isCanonicalRepo()` detector (the same
+  heuristic `check-publish-manifest.js --if-canonical` already uses), with
+  the vacuity guard itself kept hard inside the gate rather than weakened.
+  **If you pulled 0.40.0, this test-only defect can fail your own suite too:**
+  any repo whose `BACKLOG.md` / `TASK_STATUS.md` are still template-shaped
+  (freshly bootstrapped, or not yet past 100 real task records) will see the
+  same false-positive red run until you upgrade to 0.40.1 — no validator or
+  operator behavior shipped in 0.40.0 was wrong, only the test's assumption
+  that every consumer's artifacts look like the canonical repo's history.
+
 ## [0.40.0] — 2026-08-02
 
 ### Fixed
