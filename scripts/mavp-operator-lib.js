@@ -60,6 +60,21 @@ function printRepoIdentityHeader(root) {
  * and also scanning BACKLOG.md + TASK_STATUS.md for the highest existing ID.
  * Takes the max of both sources to avoid duplicates.
  *
+ * The heading regex is anchored to line start (`^###\s+T-(\d+)`, multiline)
+ * so it only matches real `### T-NNN` headings, never a heading-shaped
+ * substring sitting mid-line inside prose or a backticked inline code span
+ * (T-593 — wave 72 incident: a backticked `T-900` citation quoted mid-prose
+ * in a task's Problem field was matched by the old un-anchored regex and
+ * burned the 592-900 ID range in one mint).
+ *
+ * Residual (documented, not hidden): a line-initial `### T-NNN` heading
+ * shape sitting inside a FENCED CODE BLOCK still matches, because this is a
+ * plain line-based scan with no fence-tracking (the same fence-blindness
+ * shared by every line-based parser in this repo, including the validator's
+ * block parsers — see T-593 brief for why stripping fences here was
+ * rejected as a false-comfort fix). That residual is covered by the
+ * mint-time tripwire below, not by the regex.
+ *
  * @param {string} backlogPath - Absolute path to BACKLOG.md
  * @param {string} taskStatusPath - Absolute path to TASK_STATUS.md
  * @param {string} processStateJsonPath - Absolute path to PROCESS_STATE.json
@@ -70,7 +85,7 @@ function getNextTaskId(backlogPath, taskStatusPath, processStateJsonPath) {
   const backlog = fs.existsSync(backlogPath) ? fs.readFileSync(backlogPath, 'utf8') : '';
   const taskStatus = fs.existsSync(taskStatusPath) ? fs.readFileSync(taskStatusPath, 'utf8') : '';
   const combined = backlog + '\n' + taskStatus;
-  const matches = [...combined.matchAll(/###\s+T-(\d+)/g)];
+  const matches = [...combined.matchAll(/^###\s+T-(\d+)/gm)];
   if (matches.length) {
     maxFromFiles = Math.max(...matches.map(m => parseInt(m[1], 10)));
   }
@@ -85,6 +100,20 @@ function getNextTaskId(backlogPath, taskStatusPath, processStateJsonPath) {
     }
   } catch {
     // ignore — fall back to file scan
+  }
+
+  // Mint-time tripwire (T-593): non-blocking — files-max always keeps
+  // winning the max() below, including for a fresh/adopter repo with no
+  // PROCESS_STATE (maxFromState stays 0 there, so this never fires). This
+  // fires only when state is present (maxFromState > 0) AND the file scan
+  // jumped past it — exactly the wave-72 incident signature (files said
+  // 900, state said 591), and also a genuine drift signal in its legitimate
+  // case (a hand-registered task without a matching last_task_id bump).
+  if (maxFromState > 0 && maxFromFiles > maxFromState) {
+    process.stderr.write(
+      `mavp-operator: task-id mint tripwire — file scan found T-${maxFromFiles} but PROCESS_STATE.json last_task_id is ${maxFromState}. ` +
+      `This can mean a heading-shaped ID jump (fenced-code-block residual, hand-registered task, or corrupted state) — verify before relying on the minted ID.\n`
+    );
   }
 
   const max = Math.max(maxFromFiles, maxFromState);
@@ -1153,17 +1182,28 @@ function renderThinSnapshot(data) {
     ...((() => {
       if (!waveTasks || !waveTasks.length) return [];
       const waveNum = workflow.wave ? `Wave ${workflow.wave}` : 'Wave';
+      // T-581: buckets are derived from the shared exported status sets rather
+      // than re-listed inline, so a future status added to one of those sets
+      // stays consistent here automatically. Fail-closed: anything that is not
+      // literally one of ARCHIVABLE_TERMINAL_STATUSES / IN_FLIGHT_STATUSES /
+      // `qa_passed` / literal `planned` / TERMINAL_SKIP_STATUSES falls into a
+      // visible `unknown` bucket naming the verbatim status — it must never be
+      // silently absorbed into `planned` (the bug this task closes).
       const counts = waveTasks.reduce((acc, t) => {
         const s = t.status;
-        if (s === 'merged') acc.merged++;
-        else if (s === 'in_progress' || s === 'dev_done' || s === 'ready_for_qa' || s === 'qa_in_progress' || s === 'qa_passed' || s === 'ux_review' || s === 'ux_passed' || s === 'security_review' || s === 'security_passed') acc.in_progress++;
-        else acc.planned++;
+        if (ARCHIVABLE_TERMINAL_STATUSES.has(s)) acc.completed++;
+        else if (IN_FLIGHT_STATUSES.has(s) || s === 'qa_passed') acc.in_progress++;
+        else if (s === 'planned') acc.planned++;
+        else if (TERMINAL_SKIP_STATUSES.has(s)) acc.skipped++;
+        else acc.unknown.push(s);
         return acc;
-      }, { merged: 0, in_progress: 0, planned: 0 });
+      }, { completed: 0, in_progress: 0, planned: 0, skipped: 0, unknown: [] });
       const parts = [];
-      if (counts.merged) parts.push(`${counts.merged} merged`);
+      if (counts.completed) parts.push(`${counts.completed} completed`);
       if (counts.in_progress) parts.push(`${counts.in_progress} in_progress`);
       if (counts.planned) parts.push(`${counts.planned} planned`);
+      if (counts.skipped) parts.push(`${counts.skipped} deferred/deprecated`);
+      if (counts.unknown.length) parts.push(`${counts.unknown.length} unknown (${counts.unknown.join(', ')})`);
       return [`${waveNum}: ${parts.join(', ') || 'no tasks'}`];
     })()),
     ...(workflow.wave_goal ? [`Wave goal: ${workflow.wave_goal}`] : []),

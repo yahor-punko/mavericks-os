@@ -31,7 +31,7 @@
  * section/tasks to sync, no missing entries to create) emit NOTHING on
  * stdout or stderr — the PostToolUse hook surfaces any stderr output to the
  * agent as feedback, so a noisy no-op looks like an error on every
- * BACKLOG/TASK_STATUS edit. Only four categories write to stderr:
+ * BACKLOG/TASK_STATUS edit. Only five categories write to stderr:
  *   1. Real errors — missing/unreadable files, parse/write exceptions.
  *   2. Actual status-sync mutations — one line per synced task, exactly:
  *      "sync-status: synced T-NNN: <old> -> <new>"
@@ -39,6 +39,16 @@
  *      exactly: "sync-status: created T-NNN entry"
  *   4. Actual heading-title mutations (T-432) — one line per retitled task,
  *      exactly: "sync-status: retitled T-NNN"
+ *   5. Stranded-heading advisories (T-578) — a BACKLOG Active Wave task
+ *      whose `### T-NNN` heading exists ANYWHERE in TASK_STATUS.md outside
+ *      `## Active tasks` (e.g. `## Deferred tasks`, `## Recently completed
+ *      tasks`) is never duplicated by the auto-create path (T-419) — that
+ *      path is keyed on whole-file presence, not presence within `## Active
+ *      tasks` alone. Its existing block is still status-synced in place
+ *      (applyStatuses already walks every `### T-NNN` heading regardless of
+ *      section), and exactly one advisory line is emitted per stranded task:
+ *      "sync-status: T-NNN found in <section>, not in \"## Active tasks\" —
+ *      use --rescope-task to relocate"
  */
 
 'use strict';
@@ -136,22 +146,63 @@ function parseTaskStatusActiveIds(content) {
 }
 
 /**
- * Given the parsed BACKLOG task map and the set of task ids already present
- * in TASK_STATUS.md's Active tasks section, determine which tasks need a
- * skeleton entry created — skipping `deprecated` status and any task with a
- * real `Superseded by:` value (both are validly absent from TASK_STATUS.md).
+ * Scan the ENTIRE TASK_STATUS.md content — not just `## Active tasks` — and
+ * return a Map of taskId -> the verbatim `## ...` heading text of the
+ * top-level section its `### T-NNN` heading was found in (T-578). Used to
+ * detect a task stranded outside `## Active tasks` (e.g. `## Deferred
+ * tasks`, `## Recently completed tasks`) so skeleton creation can be keyed
+ * on whole-file presence rather than only within `## Active tasks`.
  *
- * Returns an array of { taskId, info } in BACKLOG document order.
+ * If a task id somehow appears under more than one top-level section, the
+ * first one encountered wins — duplicate headings are a separate, pre-
+ * existing failure mode this function does not need to adjudicate.
  */
-function findMissingEntries(backlogMap, existingIds) {
+function findTaskSections(content) {
+  const sectionOf = new Map();
+  const sectionHeadings = [...content.matchAll(/^## .*/gm)];
+
+  for (let i = 0; i < sectionHeadings.length; i++) {
+    const heading = sectionHeadings[i][0].trim();
+    const bodyStart = sectionHeadings[i].index + sectionHeadings[i][0].length;
+    const bodyEnd = i + 1 < sectionHeadings.length ? sectionHeadings[i + 1].index : content.length;
+    const body = content.slice(bodyStart, bodyEnd);
+
+    for (const m of body.matchAll(/^###\s+(T-\d+)\b/gm)) {
+      if (!sectionOf.has(m[1])) {
+        sectionOf.set(m[1], heading);
+      }
+    }
+  }
+
+  return sectionOf;
+}
+
+/**
+ * Given the parsed BACKLOG task map, the set of task ids already present in
+ * TASK_STATUS.md's Active tasks section, and the whole-file section map from
+ * findTaskSections, determine which tasks need a skeleton entry created and
+ * which are stranded elsewhere in the file and need a repair advisory
+ * instead (T-578) — skipping `deprecated` status and any task with a real
+ * `Superseded by:` value in both cases (both are validly absent from
+ * TASK_STATUS.md).
+ *
+ * Returns { missing: [{ taskId, info }], stranded: [{ taskId, section }] },
+ * both in BACKLOG document order.
+ */
+function findMissingEntries(backlogMap, existingIds, sectionOf) {
   const missing = [];
+  const stranded = [];
   for (const [taskId, info] of backlogMap) {
     if (existingIds.has(taskId)) continue;
     if (info.status === 'deprecated') continue;
     if (info.supersededBy) continue;
+    if (sectionOf.has(taskId)) {
+      stranded.push({ taskId, section: sectionOf.get(taskId) });
+      continue;
+    }
     missing.push({ taskId, info });
   }
-  return missing;
+  return { missing, stranded };
 }
 
 /**
@@ -265,11 +316,15 @@ function main() {
   }
 
   // Determine which BACKLOG tasks are missing a TASK_STATUS.md Active-tasks
-  // entry and need one created (T-419).
-  let missingEntries;
+  // entry and need one created (T-419), vs. which are already present
+  // somewhere else in the file and need a repair advisory instead (T-578).
+  let missingEntries, strandedEntries;
   try {
     const existingIds = parseTaskStatusActiveIds(taskStatusContent);
-    missingEntries = findMissingEntries(backlogMap, existingIds);
+    const sectionOf = findTaskSections(taskStatusContent);
+    const found = findMissingEntries(backlogMap, existingIds, sectionOf);
+    missingEntries = found.missing;
+    strandedEntries = found.stranded;
   } catch (e) {
     process.stderr.write('sync-status: failed to process TASK_STATUS.md — ' + e.message + '\n');
     process.exit(0);
@@ -294,18 +349,27 @@ function main() {
     process.exit(0);
   }
 
-  // Nothing created, no titles to rewrite, and statuses already in sync is a
-  // no-op — stay silent (T-418).
-  if (missingEntries.length === 0 && result.changes.length === 0 && result.retitles.length === 0) {
+  // Nothing created, no titles to rewrite, statuses already in sync, and no
+  // stranded headings to flag is a no-op — stay silent (T-418).
+  if (
+    missingEntries.length === 0 &&
+    result.changes.length === 0 &&
+    result.retitles.length === 0 &&
+    strandedEntries.length === 0
+  ) {
     process.exit(0);
   }
 
-  // Write only if something changed
-  try {
-    fs.writeFileSync(TASK_STATUS_MD, result.updatedContent, 'utf8');
-  } catch (e) {
-    process.stderr.write('sync-status: failed to write TASK_STATUS.md — ' + e.message + '\n');
-    process.exit(0);
+  // Write only if the content actually changed (a stranded-only run with no
+  // status change or creation leaves workingContent === taskStatusContent,
+  // in which case there is nothing to write — only the advisory to print).
+  if (result.updatedContent !== taskStatusContent) {
+    try {
+      fs.writeFileSync(TASK_STATUS_MD, result.updatedContent, 'utf8');
+    } catch (e) {
+      process.stderr.write('sync-status: failed to write TASK_STATUS.md — ' + e.message + '\n');
+      process.exit(0);
+    }
   }
 
   for (const { taskId } of missingEntries) {
@@ -318,6 +382,12 @@ function main() {
 
   for (const { taskId, oldStatus, newStatus } of result.changes) {
     process.stderr.write('sync-status: synced ' + taskId + ': ' + oldStatus + ' -> ' + newStatus + '\n');
+  }
+
+  for (const { taskId, section } of strandedEntries) {
+    process.stderr.write(
+      'sync-status: ' + taskId + ' found in ' + section + ', not in "## Active tasks" — use --rescope-task to relocate\n'
+    );
   }
 
   process.exit(0);

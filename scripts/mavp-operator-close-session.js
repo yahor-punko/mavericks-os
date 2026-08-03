@@ -157,15 +157,26 @@ function buildRenameLabel(wave, waveSession, mergedIds) {
 
 /**
  * Build an auto-generated wave_summary from merged task titles.
- * Format: "Wave N: <title1>, <title2>, ..."
+ *
+ * T-584: growth is linear in the wave's completed-task count (buildAutoSummary
+ * used to join every title), so a long-running wave produced a wave_summary of
+ * thousands of characters instead of the documented "one sentence". This is a
+ * count-plus-highlights form with a constant upper bound: the count, up to the
+ * first three clipped titles, and a "+K more." tail when there are more than
+ * three. Format: "Wave N: M task(s) completed — <t1>; <t2>; <t3>; +K more."
  */
+const AUTO_SUMMARY_HIGHLIGHT_COUNT = 3;
+
 function buildAutoSummary(waveNumber, mergedTitles) {
   if (mergedTitles.length === 0) {
     return `Wave ${waveNumber}: no tasks recorded.`;
   }
   // Trim long titles to keep the summary readable
   const clipped = mergedTitles.map(t => t.length > 60 ? t.slice(0, 57) + '...' : t);
-  return `Wave ${waveNumber}: ${clipped.join('; ')}.`;
+  const highlights = clipped.slice(0, AUTO_SUMMARY_HIGHLIGHT_COUNT);
+  const remaining = clipped.length - highlights.length;
+  const tail = remaining > 0 ? `; +${remaining} more.` : '.';
+  return `Wave ${waveNumber}: ${clipped.length} task(s) completed — ${highlights.join('; ')}${tail}`;
 }
 
 /**
@@ -1893,4 +1904,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE };
+module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, buildAutoSummary };

@@ -14,6 +14,7 @@ work_dir: [absolute path to target repo]  # cross-repo only — OMIT for same-re
 Module: [module id from docs/MODULES.md, if applicable — e.g. web-panel, antispam]
 Repo: [repo name(s) this task touches — e.g. example-service, or example-service, mavericks]
 Stale risk: [true | false — set true if this task touches cached data, ML models, or long-lived config]
+Test scope: [worktree developer only — seed a `node scripts/run-tests.js --filter <fragment>` baseline; the developer extends it with its own test files and grep-derived coverage and reports the delta; never instruct the full suite in a worktree — see docs/core/ORCHESTRATION_RULES.md — "Test-execution scope (worktree developers)"]
 Files to modify: [explicit list]
 What NOT to change: [boundaries — other files, other tasks]
 Definition of done: [acceptance criteria verbatim from BACKLOG.md]

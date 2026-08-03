@@ -270,7 +270,7 @@ console.log(`Passed: ${CHECKER_ONLY_CASES.length} checker-only exclude/preserve 
     );
   } else if (!isCanonical) {
     console.log(
-      `PINNED CONTROL SKIPPED: ${ratio} exclude keys are git-tracked — this repo's own real manifest exit-0 claim only holds in the canonical (private) repo (test-publish-overlay.js Tests 4/35/39 gate the identical claim the same way).`
+      `[SKIP] PINNED CONTROL SKIPPED: ${ratio} exclude keys are git-tracked — this repo's own real manifest exit-0 claim only holds in the canonical (private) repo (test-publish-overlay.js Tests 4/35/39 gate the identical claim the same way).`
     );
   } else {
     const checkerResult = spawnSync(process.execPath, [CHECK_SCRIPT_SRC], { cwd: REAL_ROOT, encoding: 'utf8' });

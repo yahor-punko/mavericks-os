@@ -9,6 +9,7 @@ const os = require('node:os');
 const { execFileSync, spawn } = require('node:child_process');
 
 const { parseActiveWaveMergedTitles } = require('./mavp-operator-lib.js');
+const { buildAutoSummary } = require('./mavp-operator-close-session.js');
 
 const SCRIPTS_DIR = __dirname;
 const CLOSE_SESSION_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-close-session.js');
@@ -87,6 +88,65 @@ assert.deepStrictEqual(
 );
 
 console.log('Part 1 (unit) assertions passed.');
+
+// ---------------------------------------------------------------------------
+// Part 1b — T-584: buildAutoSummary(waveNumber, mergedTitles) must produce a
+// constant-upper-bounded, count-plus-highlights summary regardless of how
+// many titles are handed in. The old implementation joined EVERY title
+// (clipped at 60 chars each), so a wave with many completed tasks produced a
+// summary thousands of characters long instead of the documented "one
+// sentence" contract.
+// ---------------------------------------------------------------------------
+
+// 92 synthetic titles: must be bounded at <= 300 chars, and must contain the
+// count (92), the first three clipped titles, and the "+89 more" tail — this
+// is the mutant the old code failed to kill (it would have produced
+// thousands of chars here instead).
+const NINETY_TWO_TITLES = [];
+for (let i = 1; i <= 92; i++) {
+  NINETY_TWO_TITLES.push(`Synthetic task title number ${i} padded out to be a decently long realistic title`);
+}
+const summary92 = buildAutoSummary(70, NINETY_TWO_TITLES);
+assert.ok(
+  summary92.length <= 300,
+  `Part 1b FAIL: buildAutoSummary(92 titles) must be <= 300 chars, got ${summary92.length}: ${summary92}`
+);
+assert.ok(
+  summary92.includes('92 task(s) completed'),
+  `Part 1b FAIL: buildAutoSummary(92 titles) must contain the count 92, got: ${summary92}`
+);
+const clippedFirstThree = NINETY_TWO_TITLES.slice(0, 3).map(t => t.length > 60 ? t.slice(0, 57) + '...' : t);
+for (const t of clippedFirstThree) {
+  assert.ok(
+    summary92.includes(t),
+    `Part 1b FAIL: buildAutoSummary(92 titles) must contain clipped title "${t}", got: ${summary92}`
+  );
+}
+assert.ok(
+  summary92.includes('+89 more'),
+  `Part 1b FAIL: buildAutoSummary(92 titles) must contain "+89 more", got: ${summary92}`
+);
+
+console.log(`Part 1b-i (92 titles) passed — length ${summary92.length}: "${summary92}"`);
+
+// 3 titles: all three appear, no "+more" suffix (M is not > highlight count).
+const summary3 = buildAutoSummary(70, ['Alpha task', 'Beta task', 'Gamma task']);
+assert.ok(summary3.includes('Alpha task'), `Part 1b FAIL: summary3 missing "Alpha task", got: ${summary3}`);
+assert.ok(summary3.includes('Beta task'), `Part 1b FAIL: summary3 missing "Beta task", got: ${summary3}`);
+assert.ok(summary3.includes('Gamma task'), `Part 1b FAIL: summary3 missing "Gamma task", got: ${summary3}`);
+assert.ok(!summary3.includes('more'), `Part 1b FAIL: summary3 must not have a "+more" suffix, got: ${summary3}`);
+
+console.log(`Part 1b-ii (3 titles) passed — "${summary3}"`);
+
+// 0 titles: preserves the existing "no tasks recorded" text verbatim.
+const summary0 = buildAutoSummary(70, []);
+assert.strictEqual(
+  summary0,
+  'Wave 70: no tasks recorded.',
+  `Part 1b FAIL: buildAutoSummary(0 titles) must preserve the existing text verbatim, got: ${summary0}`
+);
+
+console.log(`Part 1b-iii (0 titles) passed — "${summary0}"`);
 
 // ---------------------------------------------------------------------------
 // Part 2 — end-to-end: two successive wave closes in a temp fixture.
@@ -467,7 +527,7 @@ runCloseSessionFlaglessNonTTY(FLAGLESS_DIR);
 const flaglessState = JSON.parse(fs.readFileSync(path.join(FLAGLESS_DIR, 'PROCESS_STATE.json'), 'utf8'));
 assert.strictEqual(
   flaglessState.wave_summary,
-  'Wave 2: Wave 2 task.',
+  'Wave 2: 1 task(s) completed — Wave 2 task.',
   `Part 4a FAIL: flagless non-TTY all-merged close should auto-scope wave_summary, got: ${flaglessState.wave_summary}`
 );
 
@@ -731,7 +791,7 @@ await driveInteractive(INTERACTIVE_DIR, [
 const interactiveState = JSON.parse(fs.readFileSync(path.join(INTERACTIVE_DIR, 'PROCESS_STATE.json'), 'utf8'));
 assert.strictEqual(
   interactiveState.wave_summary,
-  'Wave 2: Wave 2 task.',
+  'Wave 2: 1 task(s) completed — Wave 2 task.',
   `Part 5a FAIL: interactive wave-complete close should write the scoped wave_summary, got: ${interactiveState.wave_summary}`
 );
 assert.strictEqual(

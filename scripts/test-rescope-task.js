@@ -492,4 +492,271 @@ ${NOTES_MARKER}
   console.log('Test 4h passed: validator exits 0 after the re-activation — deferral round trip closed');
 }
 
+// ---------------------------------------------------------------------------
+// Test 5 (T-576 — deferral normalizes from ANY section, not just Active
+// tasks): T-905's TASK_STATUS entry is stranded in "## Recently completed
+// tasks" (its BACKLOG block correspondingly archived), the exact failure mode
+// left unfixed by T-574's narrower guard (isInActiveTasks). A single
+// `--rescope-task --status deferred` must relocate the TASK_STATUS entry
+// byte-for-byte into "## Deferred tasks" (created on demand), move the
+// BACKLOG block into "## Deferred Tasks", and leave the validator at exit 0.
+// A second `--status deferred` run on the now-already-deferred entry must be
+// idempotent: no duplicate heading, no error, entry stays inside "## Deferred
+// tasks".
+// ---------------------------------------------------------------------------
+{
+  const EVIDENCE_MARKER = 'T576-STRANDED-EVIDENCE-MARKER';
+  const NOTES_MARKER = '- **Notes:** T576-STRANDED-NOTES-MARKER must survive relocation verbatim';
+
+  const backlog = `# Backlog
+
+## Active Wave
+
+
+## Wave 1 — Archived (2026-01-01)
+
+### T-905 — Task stranded outside Active tasks
+- **Status:** merged
+- **Owner role:** developer
+- **Verification type:** unit
+`;
+
+  const taskStatus = `# Task Status
+
+## Active tasks
+
+
+## Recently completed tasks
+
+### T-905 — Task stranded outside Active tasks
+- **Status:** merged
+- **Owner role:** developer
+- **Verification type:** unit
+- **Evidence:** ${EVIDENCE_MARKER}
+${NOTES_MARKER}
+`;
+
+  const root = makeFixtureRoot('t576-defer-from-stranded', { backlog, taskStatus });
+
+  // --- Leg 1: defer from a third section (not Active tasks) ---------------
+  const deferResult = runRescopeTask(root, ['T-905', '--status', 'deferred']);
+  assert.strictEqual(
+    deferResult.status,
+    0,
+    `Test 5a FAIL: --rescope-task T-905 --status deferred should exit 0, got ${deferResult.status}\nstdout: ${deferResult.stdout}\nstderr: ${deferResult.stderr}`
+  );
+  console.log('Test 5a passed: --rescope-task T-905 --status deferred (from Recently completed tasks) exits 0');
+
+  const deferredTaskStatus = readUtf8(path.join(root, 'TASK_STATUS.md'));
+
+  assert.strictEqual(
+    countOccurrences(deferredTaskStatus, '### T-905 —'),
+    1,
+    `Test 5b FAIL: expected exactly one T-905 heading after deferral, got ${countOccurrences(deferredTaskStatus, '### T-905 —')}\n${deferredTaskStatus}`
+  );
+  console.log('Test 5b passed: exactly one T-905 heading remains after deferral from a stranded section');
+
+  assert.ok(
+    deferredTaskStatus.includes('## Deferred tasks'),
+    `Test 5c FAIL: "## Deferred tasks" section should be created on demand\n${deferredTaskStatus}`
+  );
+  const deferredHeadingIdx = deferredTaskStatus.indexOf('## Deferred tasks');
+  const deferredCompletedIdx = deferredTaskStatus.indexOf('## Recently completed tasks');
+  const deferredT905Idx = deferredTaskStatus.indexOf('### T-905 —');
+  assert.ok(
+    deferredT905Idx > deferredHeadingIdx && deferredT905Idx < deferredCompletedIdx,
+    `Test 5c FAIL: T-905 entry must sit inside "## Deferred tasks" (between the heading and "## Recently completed tasks"), got deferredHeading=${deferredHeadingIdx} t905=${deferredT905Idx} completed=${deferredCompletedIdx}\n${deferredTaskStatus}`
+  );
+  console.log('Test 5c passed: T-905 entry relocated out of "## Recently completed tasks" into "## Deferred tasks" — the T-576 fix, not just the narrower T-574 guard');
+
+  const deferredBlockMatch = deferredTaskStatus.match(/### T-905 —[\s\S]*?(?=\n### T-\d+ —|\n## |$)/);
+  assert.ok(deferredBlockMatch, 'Test 5d FAIL: could not isolate T-905 block after deferral');
+  const deferredBlock = deferredBlockMatch[0];
+  assert.ok(
+    deferredBlock.includes(EVIDENCE_MARKER) && deferredBlock.includes(NOTES_MARKER),
+    `Test 5d FAIL: hand-edited Evidence/Notes must survive the deferral relocation byte-for-byte\nBlock was:\n${deferredBlock}`
+  );
+  assert.ok(
+    /- \*\*Status:\*\* deferred/.test(deferredBlock),
+    `Test 5d FAIL: relocated T-905 block should carry "- **Status:** deferred", got:\n${deferredBlock}`
+  );
+  console.log('Test 5d passed: Evidence + Notes preserved byte-for-byte and Status updated to deferred');
+
+  const updatedBacklog = readUtf8(path.join(root, 'BACKLOG.md'));
+  assert.ok(
+    updatedBacklog.includes('## Deferred Tasks'),
+    `Test 5e FAIL: BACKLOG.md "## Deferred Tasks" section should exist after deferral\n${updatedBacklog}`
+  );
+  const backlogDeferredIdx = updatedBacklog.indexOf('## Deferred Tasks');
+  const backlogT905Idx = updatedBacklog.indexOf('### T-905 —');
+  assert.ok(
+    backlogT905Idx > backlogDeferredIdx,
+    'Test 5e FAIL: T-905 BACKLOG block should be moved into "## Deferred Tasks"'
+  );
+  console.log('Test 5e passed: BACKLOG.md block moved into "## Deferred Tasks"');
+
+  const deferValidator = runValidator(root);
+  assert.strictEqual(
+    deferValidator.status,
+    0,
+    `Test 5f FAIL: validator should exit 0 after the deferral, got ${deferValidator.status}\n${deferValidator.stdout}\n${deferValidator.stderr}`
+  );
+  console.log('Test 5f passed: validator exits 0 after the deferral');
+
+  // --- Leg 2: defer AGAIN — idempotent, entry already inside "## Deferred
+  // tasks" (no duplicate, no error, no move to a new position). -------------
+  const reDeferResult = runRescopeTask(root, ['T-905', '--status', 'deferred']);
+  assert.strictEqual(
+    reDeferResult.status,
+    0,
+    `Test 5g FAIL: re-running --status deferred on an already-deferred entry should exit 0, got ${reDeferResult.status}\nstdout: ${reDeferResult.stdout}\nstderr: ${reDeferResult.stderr}`
+  );
+
+  const reDeferredTaskStatus = readUtf8(path.join(root, 'TASK_STATUS.md'));
+  assert.strictEqual(
+    countOccurrences(reDeferredTaskStatus, '### T-905 —'),
+    1,
+    `Test 5g FAIL: re-deferring an already-deferred entry must not create a duplicate heading, got ${countOccurrences(reDeferredTaskStatus, '### T-905 —')}\n${reDeferredTaskStatus}`
+  );
+  const reDeferredHeadingIdx = reDeferredTaskStatus.indexOf('## Deferred tasks');
+  const reDeferredCompletedIdx = reDeferredTaskStatus.indexOf('## Recently completed tasks');
+  const reDeferredT905Idx = reDeferredTaskStatus.indexOf('### T-905 —');
+  assert.ok(
+    reDeferredT905Idx > reDeferredHeadingIdx &&
+      (reDeferredCompletedIdx === -1 || reDeferredT905Idx < reDeferredCompletedIdx),
+    `Test 5g FAIL: T-905 entry must remain inside "## Deferred tasks" after the idempotent re-run, got deferredHeading=${reDeferredHeadingIdx} t905=${reDeferredT905Idx} completed=${reDeferredCompletedIdx}\n${reDeferredTaskStatus}`
+  );
+  console.log('Test 5g passed: deferring an already-deferred entry is idempotent — no duplicate, no error, still inside "## Deferred tasks"');
+
+  const reDeferValidator = runValidator(root);
+  assert.strictEqual(
+    reDeferValidator.status,
+    0,
+    `Test 5h FAIL: validator should exit 0 after the idempotent re-defer, got ${reDeferValidator.status}\n${reDeferValidator.stdout}\n${reDeferValidator.stderr}`
+  );
+  console.log('Test 5h passed: validator exits 0 after the idempotent re-defer');
+}
+
+// ---------------------------------------------------------------------------
+// Test 6 (T-576 — second defect: `--status deprecated` must never move the
+// BACKLOG block into Active Wave): T-906's BACKLOG block and TASK_STATUS
+// entry both start inside their respective "Deferred" sections (the
+// permanently-rejected task was previously deferred, not active). A single
+// `--rescope-task --status deprecated` must (a) leave the BACKLOG block
+// inside "## Deferred Tasks" — field-edited in place, no section move, no
+// "BACKLOG.md section: →" line printed — and (b) relocate the TASK_STATUS
+// entry byte-for-byte into "## Recently completed tasks" (the T-573 sweep
+// destination), with the validator exiting 0.
+//
+// Before the T-576 fix, `targetSection` mapped every non-`deferred` status
+// (including `deprecated`) to `'active'`, so this same command printed
+// "BACKLOG.md section: → ## Active Wave" and moved the block into the live
+// wave — a permanently-rejected task inserted into current work.
+// ---------------------------------------------------------------------------
+{
+  const EVIDENCE_MARKER = 'T576-DEPRECATE-EVIDENCE-MARKER';
+  const NOTES_MARKER = '- **Notes:** T576-DEPRECATE-NOTES-MARKER must survive relocation verbatim';
+
+  const backlog = `# Backlog
+
+## Active Wave
+
+
+## Deferred Tasks
+
+Tasks preserved for future waves. Not in the active validator set. Re-activate by moving to the current Active Wave section.
+
+### T-906 — Task rejected permanently
+- **Status:** deferred
+- **Owner role:** developer
+- **Verification type:** unit
+`;
+
+  const taskStatus = `# Task Status
+
+## Active tasks
+
+## Deferred tasks
+
+### T-906 — Task rejected permanently
+- **Status:** deferred
+- **Owner role:** developer
+- **Verification type:** unit
+- **Evidence:** ${EVIDENCE_MARKER}
+${NOTES_MARKER}
+
+
+## Recently completed tasks
+`;
+
+  const root = makeFixtureRoot('t576-deprecate-no-active-move', { backlog, taskStatus });
+
+  const result = runRescopeTask(root, ['T-906', '--status', 'deprecated']);
+  assert.strictEqual(
+    result.status,
+    0,
+    `Test 6a FAIL: --rescope-task T-906 --status deprecated should exit 0, got ${result.status}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+  );
+  assert.ok(
+    !result.stdout.includes('BACKLOG.md section:'),
+    `Test 6a FAIL: --status deprecated must never print a "BACKLOG.md section:" relocation line (it must not move the BACKLOG block)\nstdout: ${result.stdout}`
+  );
+  console.log('Test 6a passed: --rescope-task T-906 --status deprecated exits 0 and prints no BACKLOG.md section relocation');
+
+  const updatedBacklog = readUtf8(path.join(root, 'BACKLOG.md'));
+  assert.strictEqual(
+    countOccurrences(updatedBacklog, '### T-906 —'),
+    1,
+    `Test 6b FAIL: expected exactly one T-906 heading in BACKLOG.md, got ${countOccurrences(updatedBacklog, '### T-906 —')}`
+  );
+  const backlogActiveWaveIdx = updatedBacklog.indexOf('## Active Wave');
+  const backlogDeferredIdx = updatedBacklog.indexOf('## Deferred Tasks');
+  const backlogT906Idx = updatedBacklog.indexOf('### T-906 —');
+  assert.ok(
+    backlogT906Idx > backlogDeferredIdx,
+    `Test 6b FAIL: T-906 BACKLOG block must remain inside "## Deferred Tasks", not move to "## Active Wave" — active=${backlogActiveWaveIdx} deferred=${backlogDeferredIdx} t906=${backlogT906Idx}\n${updatedBacklog}`
+  );
+  assert.ok(
+    /### T-906 —[\s\S]*?- \*\*Status:\*\* deprecated/.test(updatedBacklog),
+    `Test 6b FAIL: BACKLOG.md T-906 block should carry "- **Status:** deprecated" (field edited in place)\n${updatedBacklog}`
+  );
+  console.log('Test 6b passed: BACKLOG.md block stays inside "## Deferred Tasks" — field-edited in place, no section move');
+
+  const updatedTaskStatus = readUtf8(path.join(root, 'TASK_STATUS.md'));
+  assert.strictEqual(
+    countOccurrences(updatedTaskStatus, '### T-906 —'),
+    1,
+    `Test 6c FAIL: expected exactly one T-906 heading in TASK_STATUS.md, got ${countOccurrences(updatedTaskStatus, '### T-906 —')}`
+  );
+  const statusDeferredIdx = updatedTaskStatus.indexOf('## Deferred tasks');
+  const statusCompletedIdx = updatedTaskStatus.indexOf('## Recently completed tasks');
+  const statusT906Idx = updatedTaskStatus.indexOf('### T-906 —');
+  assert.ok(
+    statusT906Idx > statusCompletedIdx,
+    `Test 6c FAIL: T-906 TASK_STATUS entry must be relocated into "## Recently completed tasks" (after that heading, out of "## Deferred tasks"), got deferred=${statusDeferredIdx} completed=${statusCompletedIdx} t906=${statusT906Idx}\n${updatedTaskStatus}`
+  );
+  console.log('Test 6c passed: TASK_STATUS.md entry relocated out of "## Deferred tasks" into "## Recently completed tasks"');
+
+  const t906BlockMatch = updatedTaskStatus.match(/### T-906 —[\s\S]*?(?=\n### T-\d+ —|\n## |$)/);
+  assert.ok(t906BlockMatch, 'Test 6d FAIL: could not isolate T-906 block after relocation');
+  const t906Block = t906BlockMatch[0];
+  assert.ok(
+    t906Block.includes(EVIDENCE_MARKER) && t906Block.includes(NOTES_MARKER),
+    `Test 6d FAIL: hand-edited Evidence/Notes must survive the deprecation relocation byte-for-byte\nBlock was:\n${t906Block}`
+  );
+  assert.ok(
+    /- \*\*Status:\*\* deprecated/.test(t906Block),
+    `Test 6d FAIL: relocated T-906 block should carry "- **Status:** deprecated", got:\n${t906Block}`
+  );
+  console.log('Test 6d passed: Evidence + Notes preserved byte-for-byte and Status updated to deprecated');
+
+  const validatorResult = runValidator(root);
+  assert.strictEqual(
+    validatorResult.status,
+    0,
+    `Test 6e FAIL: validator should exit 0 after the deprecation, got ${validatorResult.status}\n${validatorResult.stdout}\n${validatorResult.stderr}`
+  );
+  console.log('Test 6e passed: validator exits 0 after the deprecation (no BACKLOG-into-Active-Wave defect, TASK_STATUS relocated as expected)');
+}
+
 console.log('All test-rescope-task.js assertions passed.');

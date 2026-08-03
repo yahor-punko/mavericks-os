@@ -17,6 +17,13 @@
 //      BACKLOG's title, a subsequent BACKLOG rename is mirrored on its own
 //      re-run as exactly one "sync-status: retitled T-NNN" line (no
 //      duplicate "created" line for an entry that already exists).
+//   6. Stranded-in-Deferred (T-578) — a BACKLOG task whose TASK_STATUS
+//      heading exists ONLY inside "## Deferred tasks" gets no duplicate
+//      heading created; the existing block is still status-synced in place,
+//      its Notes marker survives verbatim, and exactly one stderr advisory
+//      names the task, the section, and --rescope-task as the repair path.
+//   7. Stranded-in-Recently-completed (T-578) — same as #6 but for a task
+//      stranded in "## Recently completed tasks".
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -345,8 +352,173 @@ function run(root) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 6 (T-578): stranded-in-Deferred — a BACKLOG task (`planned`) whose
+// TASK_STATUS heading exists ONLY inside "## Deferred tasks" (with a Notes
+// marker) must not get a duplicate heading created. The existing block is
+// still status-synced in place, the Notes marker survives verbatim, and
+// exactly one stderr advisory names the task, the section, and
+// --rescope-task.
+// ---------------------------------------------------------------------------
+{
+  const root = path.join(TMP_DIR, 'stranded-deferred-fixture');
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(
+    path.join(root, 'BACKLOG.md'),
+    `# Backlog
+
+## Active Wave
+### T-900 — Fixture task deferred stranded
+- **Status:** planned
+- **Owner role:** developer
+- **Verification type:** runtime
+`,
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(root, 'TASK_STATUS.md'),
+    `# Task Status
+
+## Active tasks
+
+## Deferred tasks
+### T-900 — Fixture task deferred stranded
+- **Status:** deferred
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** —
+- **Evidence:** —
+- **Notes:** stranded marker text should survive
+`,
+    'utf8'
+  );
+
+  const before = fs.readFileSync(path.join(root, 'TASK_STATUS.md'), 'utf8');
+  const beforeCount = (before.match(/### T-900\b/g) || []).length;
+  assert.strictEqual(beforeCount, 1, `Test 6 FAIL: expected 1 heading before running, got ${beforeCount}`);
+
+  const result = run(root);
+
+  assert.strictEqual(result.status, 0, `Test 6 FAIL: expected exit 0, got ${result.status}`);
+  assert.strictEqual(
+    result.stderr,
+    'sync-status: synced T-900: deferred -> planned\n' +
+      'sync-status: T-900 found in ## Deferred tasks, not in "## Active tasks" — use --rescope-task to relocate\n',
+    `Test 6 FAIL: expected exactly the synced line + one stranded advisory, got: ${JSON.stringify(result.stderr)}`
+  );
+  assert.strictEqual(
+    Buffer.byteLength(result.stdout, 'utf8'),
+    0,
+    `Test 6 FAIL: expected zero bytes on stdout, got: ${JSON.stringify(result.stdout)}`
+  );
+
+  const updated = fs.readFileSync(path.join(root, 'TASK_STATUS.md'), 'utf8');
+  const afterCount = (updated.match(/### T-900\b/g) || []).length;
+  assert.strictEqual(
+    afterCount,
+    1,
+    `Test 6 FAIL: expected heading count to stay exactly 1 (pre-fix baseline was 2), got ${afterCount}, got:\n${updated}`
+  );
+  assert.ok(
+    updated.includes('- **Notes:** stranded marker text should survive'),
+    `Test 6 FAIL: expected the Notes marker to survive verbatim, got:\n${updated}`
+  );
+  assert.ok(
+    updated.includes('- **Status:** planned'),
+    `Test 6 FAIL: expected the existing stranded block to be status-synced to planned, got:\n${updated}`
+  );
+  assert.ok(
+    !updated.includes('## Active tasks\n\n### T-900') && !updated.includes('## Active tasks\n### T-900'),
+    `Test 6 FAIL: expected no new T-900 skeleton inside "## Active tasks", got:\n${updated}`
+  );
+  console.log('Test 6 passed: a task stranded in "## Deferred tasks" is not duplicated, its block is still status-synced, its Notes marker survives, and exactly one stderr advisory is emitted');
+
+  // A second run with the status already in sync must still surface the
+  // advisory (the structural stranding is unresolved) but must not touch
+  // the file (no duplicate, no rewrite of the unchanged block).
+  const secondRun = run(root);
+  assert.strictEqual(secondRun.status, 0, `Test 6b FAIL: expected exit 0, got ${secondRun.status}`);
+  assert.strictEqual(
+    secondRun.stderr,
+    'sync-status: T-900 found in ## Deferred tasks, not in "## Active tasks" — use --rescope-task to relocate\n',
+    `Test 6b FAIL: expected exactly the stranded advisory (no synced line, status already matches), got: ${JSON.stringify(secondRun.stderr)}`
+  );
+  const afterSecond = fs.readFileSync(path.join(root, 'TASK_STATUS.md'), 'utf8');
+  assert.strictEqual(
+    (afterSecond.match(/### T-900\b/g) || []).length,
+    1,
+    `Test 6b FAIL: expected heading count to stay exactly 1 on a second run, got:\n${afterSecond}`
+  );
+  console.log('Test 6b passed: a second run against an already-synced stranded task re-surfaces the advisory without touching the file');
+}
+
+// ---------------------------------------------------------------------------
+// Test 7 (T-578): stranded-in-Recently-completed — same defect, entry
+// stranded in "## Recently completed tasks" instead of "## Deferred tasks".
+// ---------------------------------------------------------------------------
+{
+  const root = path.join(TMP_DIR, 'stranded-completed-fixture');
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(
+    path.join(root, 'BACKLOG.md'),
+    `# Backlog
+
+## Active Wave
+### T-901 — Fixture task completed stranded
+- **Status:** planned
+- **Owner role:** developer
+- **Verification type:** runtime
+`,
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(root, 'TASK_STATUS.md'),
+    `# Task Status
+
+## Active tasks
+
+## Recently completed tasks
+### T-901 — Fixture task completed stranded
+- **Status:** merged
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** —
+- **Evidence:** commit: abc1234
+- **Notes:** completed marker text should survive
+`,
+    'utf8'
+  );
+
+  const result = run(root);
+
+  assert.strictEqual(result.status, 0, `Test 7 FAIL: expected exit 0, got ${result.status}`);
+  assert.strictEqual(
+    result.stderr,
+    'sync-status: synced T-901: merged -> planned\n' +
+      'sync-status: T-901 found in ## Recently completed tasks, not in "## Active tasks" — use --rescope-task to relocate\n',
+    `Test 7 FAIL: expected exactly the synced line + one stranded advisory, got: ${JSON.stringify(result.stderr)}`
+  );
+
+  const updated = fs.readFileSync(path.join(root, 'TASK_STATUS.md'), 'utf8');
+  const afterCount = (updated.match(/### T-901\b/g) || []).length;
+  assert.strictEqual(
+    afterCount,
+    1,
+    `Test 7 FAIL: expected heading count to stay exactly 1, got ${afterCount}, got:\n${updated}`
+  );
+  assert.ok(
+    updated.includes('- **Notes:** completed marker text should survive'),
+    `Test 7 FAIL: expected the Notes marker to survive verbatim, got:\n${updated}`
+  );
+  assert.ok(
+    updated.includes('- **Evidence:** commit: abc1234'),
+    `Test 7 FAIL: expected the Evidence field to survive verbatim, got:\n${updated}`
+  );
+  console.log('Test 7 passed: a task stranded in "## Recently completed tasks" is not duplicated, its block is still status-synced, and exactly one stderr advisory is emitted');
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
 
-console.log('\nAll T-419/T-485 assertions passed.');
+console.log('\nAll T-419/T-485/T-578 assertions passed.');

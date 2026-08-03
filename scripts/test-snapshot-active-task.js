@@ -32,7 +32,7 @@ const path = require('node:path');
 const assert = require('node:assert');
 const { execFileSync } = require('node:child_process');
 
-const { IN_FLIGHT_STATUSES } = require('./mavp-operator-lib.js');
+const { IN_FLIGHT_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, TERMINAL_SKIP_STATUSES } = require('./mavp-operator-lib.js');
 
 const SCRIPTS_DIR = __dirname;
 const SNAPSHOT_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-snapshot.js');
@@ -186,4 +186,201 @@ ${activeTasksBody}
   fs.rmSync(TMP, { recursive: true, force: true });
 }
 
-console.log('\nAll T-493 assertions passed.');
+// ---------------------------------------------------------------------------
+// T-581 — the wave-counter line inside renderThinSnapshot() must never absorb
+// an unrecognized status into `planned` via a catch-all `else`. Buckets are
+// derived from the shared exported status sets: completed =
+// ARCHIVABLE_TERMINAL_STATUSES, in-flight = IN_FLIGHT_STATUSES ∪ qa_passed,
+// planned = the literal `planned` only, deferred/deprecated =
+// TERMINAL_SKIP_STATUSES as its own visible count, and anything else must
+// surface as a visible `unknown` bucket naming the verbatim status.
+// ---------------------------------------------------------------------------
+
+function writeWaveFixture(dir, activeTasksBody, wave) {
+  const backlogPath = path.join(dir, 'BACKLOG.md');
+  const taskStatusPath = path.join(dir, 'TASK_STATUS.md');
+  const processStateJsonPath = path.join(dir, 'PROCESS_STATE.json');
+
+  writeUtf8(backlogPath, `# BACKLOG
+
+## Selection rules
+
+- unblockers first
+
+## Active Wave
+
+### T-900 — fixture task
+- **Status:** in_progress
+- **Owner role:** developer
+- **Repo:** mavericks
+- **Verification type:** unit
+`);
+
+  writeUtf8(taskStatusPath, `# TASK_STATUS
+
+## Active tasks
+
+${activeTasksBody}
+## Recently completed tasks
+`);
+
+  writeUtf8(processStateJsonPath, JSON.stringify({
+    initiative: 'T-581 test fixture',
+    stage: 'execution',
+    wave,
+    wave_status: 'execution',
+    wave_goal: null,
+    parked_waves: [],
+    active_slices: [],
+    next_action: 'T-900 → developer → do the thing',
+    blocker: null,
+    stage_owner: 'main_agent',
+    last_task_id: 900,
+    last_updated: '2026-01-01',
+    deploy_contours: 0,
+    wave_summary: null,
+    rechecks: [],
+  }, null, 2) + '\n');
+
+  return { backlogPath, taskStatusPath, processStateJsonPath };
+}
+
+function runSnapshot(dir) {
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: dir, MAVERICKS_SCRIPTS: SCRIPTS_DIR };
+  return execFileSync('node', [SNAPSHOT_PATH], { cwd: dir, env, encoding: 'utf8' });
+}
+
+function waveLine(output) {
+  const m = output.match(/^Wave \d+:.*$/m);
+  return m ? m[0] : null;
+}
+
+// ---------------------------------------------------------------------------
+// Part 5 — the executed pre-fix baseline mutant: a fixture holding
+// needs_fix + runtime_verified + deprecated + planned rendered, through the
+// unfixed catch-all `else`, exactly `Wave 9: 4 planned` (verified by hand
+// against the pre-fix code before this fix landed). Post-fix it must count
+// needs_fix as in-flight, runtime_verified as completed, deprecated in the
+// skip bucket, and exactly 1 planned — never 4 planned.
+// ---------------------------------------------------------------------------
+{
+  const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 't581-buckets-'));
+
+  writeWaveFixture(TMP, `### T-900 — needs fix task
+- **Status:** needs_fix
+- **Owner role:** developer
+- **Verification type:** unit
+- **Last verified by:** —
+- **Evidence:** —
+
+### T-901 — runtime verified task
+- **Status:** runtime_verified
+- **Owner role:** developer
+- **Verification type:** unit
+- **Last verified by:** qa
+- **Evidence:** commit: aaaaaaa branch: main
+
+### T-902 — deprecated task
+- **Status:** deprecated
+- **Owner role:** developer
+- **Verification type:** unit
+- **Last verified by:** —
+- **Evidence:** —
+
+### T-903 — planned task
+- **Status:** planned
+- **Owner role:** developer
+- **Verification type:** unit
+- **Last verified by:** —
+- **Evidence:** —
+
+`, 9);
+
+  const output = runSnapshot(TMP);
+  const line = waveLine(output);
+
+  assert.ok(line, `Test 5 FAIL: expected a "Wave N: ..." line in output, got:\n${output}`);
+  assert.ok(!/^Wave 9: 4 planned$/.test(line), `Test 5 FAIL: the pre-fix mutant "Wave 9: 4 planned" must never reappear, got: "${line}"`);
+  assert.ok(/\b1 completed\b/.test(line), `Test 5 FAIL: expected runtime_verified to count as 1 completed, got: "${line}"`);
+  assert.ok(/\b1 in_progress\b/.test(line), `Test 5 FAIL: expected needs_fix to count as 1 in_progress, got: "${line}"`);
+  assert.ok(/\b1 planned\b/.test(line), `Test 5 FAIL: expected exactly 1 planned, got: "${line}"`);
+  assert.ok(/\b1 deferred\/deprecated\b/.test(line), `Test 5 FAIL: expected deprecated to sit in a distinct deferred/deprecated bucket, got: "${line}"`);
+  console.log(`Test 5 passed: wave line correctly buckets needs_fix/runtime_verified/deprecated/planned — "${line}"`);
+
+  fs.rmSync(TMP, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// Part 6 — a nonsense/unrecognized status must surface labeled `unknown`,
+// verbatim, never silently absorbed into `planned`.
+// ---------------------------------------------------------------------------
+{
+  const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 't581-unknown-'));
+
+  writeWaveFixture(TMP, `### T-900 — a task with a nonsense status
+- **Status:** frobnicating
+- **Owner role:** developer
+- **Verification type:** unit
+- **Last verified by:** —
+- **Evidence:** —
+
+`, 10);
+
+  const output = runSnapshot(TMP);
+  const line = waveLine(output);
+
+  assert.ok(line, `Test 6 FAIL: expected a "Wave N: ..." line in output, got:\n${output}`);
+  assert.ok(!/\bplanned\b/.test(line), `Test 6 FAIL: the nonsense status must never be counted as planned, got: "${line}"`);
+  assert.ok(/\b1 unknown \(frobnicating\)/.test(line), `Test 6 FAIL: expected the unrecognized status to surface labeled "unknown (frobnicating)", got: "${line}"`);
+  console.log(`Test 6 passed: an unrecognized status surfaces as a visible unknown bucket naming the verbatim status — "${line}"`);
+
+  fs.rmSync(TMP, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// Part 7 — a merged + planned-only fixture still renders a sensible line
+// with no empty-bucket noise (no "0 in_progress", no trailing/leading commas).
+// ---------------------------------------------------------------------------
+{
+  const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 't581-noempty-'));
+
+  writeWaveFixture(TMP, `### T-900 — a merged task
+- **Status:** merged
+- **Owner role:** developer
+- **Verification type:** unit
+- **Last verified by:** qa
+- **Evidence:** commit: aaaaaaa branch: main
+
+### T-901 — a planned task
+- **Status:** planned
+- **Owner role:** developer
+- **Verification type:** unit
+- **Last verified by:** —
+- **Evidence:** —
+
+`, 11);
+
+  const output = runSnapshot(TMP);
+  const line = waveLine(output);
+
+  assert.ok(line, `Test 7 FAIL: expected a "Wave N: ..." line in output, got:\n${output}`);
+  assert.strictEqual(line, 'Wave 11: 1 completed, 1 planned', `Test 7 FAIL: expected exactly "Wave 11: 1 completed, 1 planned" with no empty-bucket noise, got: "${line}"`);
+  console.log(`Test 7 passed: a merged + planned-only fixture renders with no empty-bucket noise — "${line}"`);
+
+  fs.rmSync(TMP, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// Part 8 — sanity check on the exported status sets themselves, so a future
+// edit to their membership cannot silently break the bucket derivation
+// without also breaking this test.
+// ---------------------------------------------------------------------------
+{
+  assert.ok(ARCHIVABLE_TERMINAL_STATUSES instanceof Set, 'Test 8 FAIL: ARCHIVABLE_TERMINAL_STATUSES must be an exported Set');
+  assert.ok(ARCHIVABLE_TERMINAL_STATUSES.has('runtime_verified'), 'Test 8 FAIL: expected ARCHIVABLE_TERMINAL_STATUSES to include "runtime_verified"');
+  assert.ok(TERMINAL_SKIP_STATUSES instanceof Set, 'Test 8 FAIL: TERMINAL_SKIP_STATUSES must be an exported Set');
+  assert.ok(TERMINAL_SKIP_STATUSES.has('deprecated'), 'Test 8 FAIL: expected TERMINAL_SKIP_STATUSES to include "deprecated"');
+  console.log('Test 8 passed: the wave-counter bucket derivation reads from the shared exported status sets');
+}
+
+console.log('\nAll T-493/T-581 assertions passed.');

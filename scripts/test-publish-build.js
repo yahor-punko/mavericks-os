@@ -142,12 +142,33 @@ function initBareMirrorWithMain(prefix) {
   return bareDir;
 }
 
+// T-587 — the receipt-writer the publish preflight (step 0.5) consumes.
+// Sourced from the writer module itself rather than hand-rolling the JSON here,
+// so a change to the receipt path or shape cannot silently leave these fixtures
+// writing a file nothing reads. Fixtures write it against their own clone's
+// HEAD and NEVER run an inner suite: mavp-publish-build.js's gate is
+// evidence-based precisely so these clone-based e2e cases stay affordable and
+// non-recursive (each assembled tree contains THIS file, which clones again —
+// see check-assembled-suite.js's header).
+const { writeReceiptForHead } = require(path.join(__dirname, 'check-assembled-suite.js'));
+
 // Runs a CLONE's own scripts/mavp-publish-build.js as a CLI subprocess.
 // `extraOpts` (T-523 round 2) is spread into spawnSync's options — used only by
 // the cases that must run the script under a modified environment (an exported
 // identity, or a `git` wrapper earlier on PATH). Every other call passes
 // nothing and keeps inheriting this process's environment unchanged.
-function runBuildCli(cloneRepoDir, args, extraOpts) {
+//
+// T-587: every call writes a fresh assembled-suite receipt for the clone's
+// CURRENT HEAD first, so the step-0.5 gate is satisfied for whatever commit
+// this particular fixture just created (several cases commit between two runs
+// against the same clone). The receipt is git-ignored by the shipped
+// .gitignore, so it never dirties the clone the script then requires to be
+// clean, and never reaches the assembled tree (which comes from HEAD).
+// Tests that must observe the gate REFUSING pass `{ skipReceipt: true }`.
+function runBuildCli(cloneRepoDir, args, extraOpts, options) {
+  if (!(options && options.skipReceipt)) {
+    writeReceiptForHead(cloneRepoDir);
+  }
   return spawnSync(process.execPath, [path.join(cloneRepoDir, 'scripts', 'mavp-publish-build.js'), ...args], {
     encoding: 'utf8',
     ...(extraOpts || {}),
@@ -4533,6 +4554,140 @@ console.log('\nAll T-506 (build.js lock wiring) assertions passed.');
       'already tracking a gitignore-matched reset destination binds its mode from the starter\'s new HEAD mode ' +
       '(core.fileMode=false, disk mode force-decoupled), the committed blob stays byte-equal to the starter, ' +
       'and the publish stays green throughout'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Test 41 (T-587): the assembled-suite receipt gate refuses — with NO receipt,
+// and with a STALE-commit receipt — before anything touches the mirror, and
+// names the exact command to run. Both cases abort at step 0.5, so neither
+// assembles, scans, clones, nor runs any suite: they are cheap.
+//
+// Able-to-fail demonstration is structural here: the third case in this block
+// is the SAME publish with a current receipt (written by runBuildCli's default
+// path), which proceeds all the way to a real push against the local bare
+// mirror. If the gate were inert, the first two cases would take that same
+// exit-0 path and their notStrictEqual(status, 0) assertions would fail.
+// ---------------------------------------------------------------------------
+{
+  const { ASSEMBLED_SUITE_CHECK_COMMAND } = require(BUILD_SCRIPT);
+  const { receiptPathFor, writeReceipt } = require(path.join(__dirname, 'check-assembled-suite.js'));
+
+  const cloneRepoDir = cloneRepoFixture('mavp-build-t587-clone-');
+  const bareMirror = initBareMirrorWithMain('mavp-build-t587-');
+  const parentDir = mkTempDir('mavp-build-t587-parent-');
+  // Built by concatenation, never as contiguous literals: this file is
+  // ship-classified, so 41c's assembled tree CONTAINS it, and a literal here
+  // would self-match in the step-2 scan and abort the very run 41c asserts
+  // reaches a push (the T-513 trap this file's other cases already document).
+  const nameA = 'zzzT587' + 'ReceiptGateAlpha' + 'NeverMatches';
+  const nameB = nameA + 'Beta';
+  const NAMES = `${nameA},${nameB}`;
+
+  // --- 41a: no receipt at all ---
+  const noReceiptCloneDir = path.join(parentDir, 'clone-dir-no-receipt');
+  assert.strictEqual(
+    fs.existsSync(receiptPathFor(cloneRepoDir)),
+    false,
+    'Test 41a FAIL: the fixture clone must start with no assembled-suite receipt'
+  );
+  const noReceiptRun = runBuildCli(cloneRepoDir, [bareMirror, noReceiptCloneDir, '--private-names', NAMES], undefined, {
+    skipReceipt: true,
+  });
+  assert.notStrictEqual(
+    noReceiptRun.status,
+    0,
+    `Test 41a FAIL: expected a non-zero exit with no assembled-suite receipt, got ${noReceiptRun.status}:\n${noReceiptRun.stdout}\n${noReceiptRun.stderr}`
+  );
+  assert.ok(
+    /no current assembled-suite receipt/.test(noReceiptRun.stderr),
+    `Test 41a FAIL: expected the receipt-gate refusal, got: ${noReceiptRun.stderr}`
+  );
+  assert.ok(
+    noReceiptRun.stderr.includes(ASSEMBLED_SUITE_CHECK_COMMAND),
+    `Test 41a FAIL: the refusal must name the exact command to run (${ASSEMBLED_SUITE_CHECK_COMMAND}), got: ${noReceiptRun.stderr}`
+  );
+  // Refusing BEFORE anything touches the mirror: no assembly, no scan output,
+  // no clone dir, and a mirror still holding only its seeded `main`.
+  assert.ok(
+    !/Step 1\/7: assemble/.test(noReceiptRun.stdout),
+    `Test 41a FAIL: the gate must refuse before the assemble step runs, got stdout: ${noReceiptRun.stdout}`
+  );
+  assert.strictEqual(
+    fs.existsSync(noReceiptCloneDir),
+    false,
+    'Test 41a FAIL: clone-dir must never be created when the receipt gate refuses'
+  );
+  assert.ok(
+    !/refs\/heads\/edge/.test(gitShowRefOrEmpty(bareMirror)),
+    'Test 41a FAIL: the mirror must have no `edge` ref (nothing was published)'
+  );
+
+  // --- 41b: a receipt recorded against a DIFFERENT commit (stale) ---
+  const staleCloneDir = path.join(parentDir, 'clone-dir-stale-receipt');
+  const staleCommit = 'b'.repeat(40);
+  writeReceipt(cloneRepoDir, {
+    commit: staleCommit,
+    suite: { total: 76, passed: 76, failed: 0 },
+    summaryLine: 'Summary: 76 passed, 0 failed (of 76 total)',
+    assembledTestFiles: 76,
+    assembledFileCount: 212,
+    note: 'Test 41b fixture: an all-green receipt bound to a commit that is not HEAD',
+  });
+  const headSha = git(cloneRepoDir, ['rev-parse', 'HEAD']).trim();
+  assert.notStrictEqual(headSha, staleCommit, 'Test 41b FAIL: the fixture stale commit must differ from HEAD');
+  const staleRun = runBuildCli(cloneRepoDir, [bareMirror, staleCloneDir, '--private-names', NAMES], undefined, {
+    skipReceipt: true,
+  });
+  assert.notStrictEqual(
+    staleRun.status,
+    0,
+    `Test 41b FAIL: expected a non-zero exit on a stale-commit receipt, got ${staleRun.status}:\n${staleRun.stdout}\n${staleRun.stderr}`
+  );
+  assert.ok(
+    /it is STALE/.test(staleRun.stderr) && staleRun.stderr.includes(staleCommit) && staleRun.stderr.includes(headSha),
+    `Test 41b FAIL: expected a STALE refusal naming both the receipt's commit and HEAD, got: ${staleRun.stderr}`
+  );
+  assert.ok(
+    staleRun.stderr.includes(ASSEMBLED_SUITE_CHECK_COMMAND),
+    `Test 41b FAIL: the stale refusal must name the exact command to run, got: ${staleRun.stderr}`
+  );
+  assert.ok(
+    !/Step 1\/7: assemble/.test(staleRun.stdout),
+    `Test 41b FAIL: the gate must refuse before the assemble step runs, got stdout: ${staleRun.stdout}`
+  );
+  assert.strictEqual(
+    fs.existsSync(staleCloneDir),
+    false,
+    'Test 41b FAIL: clone-dir must never be created when the receipt is stale'
+  );
+
+  // --- 41c: THE SAME publish with a current receipt proceeds and publishes ---
+  const okCloneDir = path.join(parentDir, 'clone-dir-current-receipt');
+  const okRun = runBuildCli(cloneRepoDir, [bareMirror, okCloneDir, '--private-names', NAMES]);
+  assert.strictEqual(
+    okRun.status,
+    0,
+    `Test 41c FAIL: expected exit 0 once a receipt matching HEAD exists, got ${okRun.status}:\n${okRun.stdout}\n${okRun.stderr}`
+  );
+  assert.ok(
+    /Receipt current: /.test(okRun.stdout) && okRun.stdout.includes(headSha),
+    `Test 41c FAIL: expected the gate to log the current receipt (naming HEAD ${headSha}), got stdout: ${okRun.stdout}`
+  );
+  assert.ok(
+    /Step 1\/7: assemble/.test(okRun.stdout) && /Scan GREEN/.test(okRun.stdout),
+    `Test 41c FAIL: expected the run to proceed past the gate into assemble+scan, got stdout: ${okRun.stdout}`
+  );
+  // GROUND TRUTH — the mirror's own refs, not stdout text.
+  assert.ok(
+    /refs\/heads\/edge/.test(gitShowRefOrEmpty(bareMirror)),
+    `Test 41c FAIL: expected the mirror to hold an 'edge' ref after a gated-and-passed publish, got refs: ${gitShowRefOrEmpty(bareMirror)}`
+  );
+
+  console.log(
+    'Test 41 passed (T-587): the assembled-suite receipt gate refuses with no receipt and with a ' +
+      'stale-commit receipt — each before any assemble/scan/clone, naming the exact check command — and the ' +
+      'same publish proceeds to a real push once a receipt matching HEAD exists'
   );
 }
 

@@ -73,7 +73,7 @@ Validator exit codes: `0` = healthy, `1` = drifting, `2` = repair required.
 
 **Bootstrap** — `node scripts/mavp-install.js <target-dir>` seeds a new project with the bash wrapper, project-specific scripts, and artifact templates, and activates the Claude Code hooks (`SessionStart`, `PostCompact`, `PostToolUse`) in `.claude/settings.local.json` by default. Use `--check` to preview, `--update` to re-sync agents/rules/hooks — idempotent, and it only ever replaces the installer-managed hook entries, never operator-authored ones. Pass `--no-hooks` to `--update` to skip the hooks merge for that run. See `docs/core/BOOTSTRAP_GUIDE.md` — "Claude Code hooks activation" for the managed-entry ownership rule and the canonical self-activation step. VSCode projects must also add `Agent(*)` to `permissions.allow` in `.claude/settings.local.json` — see the **VSCode Agent permissions** convention below.
 
-**Pre-commit hook** — `.claude/hooks/pre-commit` runs the validator on every `git commit`. Exit code 2 blocks the commit. To install: copy or symlink to `.git/hooks/pre-commit`.
+**Pre-commit hook** — `.claude/hooks/pre-commit` runs the validator on every `git commit`. Exit code 2 blocks the commit. It fires via `git config core.hooksPath .claude/hooks/`, set automatically by `mavp-install.js` (see `docs/core/BOOTSTRAP_GUIDE.md`); while `core.hooksPath` is set this way, git ignores `.git/hooks` entirely. Liveness check: `git config core.hooksPath`.
 
 ## Key conventions
 
@@ -168,6 +168,7 @@ Read current main: [optional — set when the task must READ current-main state 
 Model: [opus | sonnet]     # optional — only include when escalating a worker away from its sonnet default; see docs/AGENT_SPEC.md — Model selection
 Effort: [medium | high | xhigh | max]   # optional — only include when deviating from the session default; see docs/AGENT_SPEC.md — Effort selection
 Turn budget: [role's maxTurns from docs/AGENT_SPEC.md's per-role table]   # optional — fill on a retry after a cap-hit, or any spawn at risk of approaching its cap, so the sub-agent can self-count against a known ceiling; see docs/core/ORCHESTRATION_RULES.md — "Cap-hit triage"
+Test scope: [worktree developer only — seed a `node scripts/run-tests.js --filter <fragment>` baseline; the developer extends it with its own test files and grep-derived coverage and reports the delta; never instruct the full suite in a worktree — see docs/core/ORCHESTRATION_RULES.md — "Test-execution scope (worktree developers)"]
 Files to modify: [explicit list]
 What NOT to change: [boundaries — other files, other tasks]
 Definition of done: [acceptance criteria verbatim from BACKLOG.md]

@@ -123,6 +123,8 @@ A check named in an acceptance criterion, sub-agent brief, or evidence field cos
 
 **Fixture vs. live reproduction:** an executed check discharges this duty only if its execution context can actually expose the failure it claims to guard against — a fixture verifies LOGIC, a live reproduction verifies FORM. T-565 satisfied six criteria and reddened five named mutants, yet only a real shallow clone exposed that its advisory printed a 471-item wall, a regression against the output it replaced that none of the six fixture-based criteria could have caught.
 
+**Environment matrix:** for a `ship`-classified check, the environment class it ran in — the canonical private repo, or the mirror-shaped assembled publish tree, where live state artifacts are one-record `templates/` starters and internal-only paths are absent entirely — is part of the execution context, not a detail of it. Green in the first is not evidence about the second, so "I ran it" is an incomplete claim unless it names the class: two consecutive releases published a red mirror CI on exactly this gap while the private CI was green (0.39.0/T-570, 0.40.0/T-575). `scripts/check-assembled-suite.js` is the mechanical backstop — it runs the shipped suite inside an assembled tree and records a receipt `scripts/mavp-publish-build.js` refuses to publish without (`docs/PUBLIC_RELEASE_STRATEGY.md` §3a) — but it closes only the omission case, so a criterion or brief asserting behavior about shipped content still has to say which environment class its quoted output came from.
+
 Complementary to the behavioral-assertion rule in `docs/ARCHITECT_OUTPUT.md` (the `acceptance_criteria:` field, which requires a behavioral outcome rather than a structural-only check like exit code or shape): that rule governs what a criterion must assert; this rule governs whether the named check was ever run. See also "Recon-preloading" above — both are brief-composition duties that spend the Main Agent's own time before a spawn rather than the sub-agent's after.
 
 ## Worktree integration — Main Agent
@@ -187,6 +189,24 @@ The Main Agent updates `wave_status` manually in `PROCESS_STATE.json` at each tr
 ## Parallelization rule
 
 Parallelize only when tasks are narrow and have no direct dependency conflicts.
+
+## Test-execution scope (worktree developers)
+
+Worktree developer briefs MUST name a targeted test scope via `node scripts/run-tests.js --filter <fragment>` — never instruct a worktree developer to run the full suite. The full suite runs exactly once, on main, as a single Main-Agent integration step: after every sibling task's commit has been cherry-picked/merged in and before the wave closes. That single run is the backstop that makes targeted-only dispatch complete coverage rather than a workaround — no task's coverage is actually skipped, it is deferred to the one place a full run is cheap.
+
+**Never do either of these:**
+- **Never instruct parallel worktree agents to each run the full suite.** A large suite is effectively serial work competing for the same CPU cores regardless of how many agents invoke it, so N-way parallel full-suite runs do not run N times faster — they run roughly N times slower per agent while all N compete. Measured (Wave 72): five developer agents each instructed to run the full 76-file suite measured ~20 minutes wall-clock with 12 concurrent `run-tests.js` invocations observed, and four of the five agents were damaged by the wait: T-576 hit its 140-turn cap and was truncated mid-sentence; T-581 stalled three separate times (61, 73, 81 tool uses), each time by backgrounding `run-tests.js` and idling on its own command; T-578 stalled at 67 tool uses and separately killed its own test process while trying to work out which of five identically-shaped sibling `run-tests.js` processes was its own; only T-588 was unaffected. The Main Agent's own sequential full-suite runs on main during the same wave exceeded 600 seconds each and had to be backgrounded twice.
+- **Never background `run-tests.js` and idle-wait on it.** A turn that ends on a passive wait has no later turn coming to observe the outcome — this is the mechanism behind the T-581/T-578 stalls above (see the developer sub-agent spec's "Never end a turn passively waiting on a background task" rule, `.claude/agents/developer.md`).
+
+**How to select the targeted filter.** A rule that says "run targeted tests" without saying how to choose them will be followed badly. Compose the scope from three parts:
+
+1. **Own test files** — the test file(s) the task itself adds or edits, filtered by basename (e.g. `--filter test-foo`).
+2. **Grep-derived coverage** — `grep -l` over `scripts/test-*.js` for the changed source files' basenames and their exported symbols; run every file that hits.
+3. **The brief's `Test scope:` field** — a Main-Agent-seeded baseline (see `CLAUDE.md` — "Sub-agent brief template") that the developer extends via (1) and (2) above and reports back as a delta from what the Main Agent seeded.
+
+**Caveat — shared-library edits can outgrow a clean targeted set.** For `mavp-operator-lib.js`-class edits (a shared module many test files exercise), the grep-derived set from step 2 can be large. Beyond roughly ten files, run them serially and say so in the report, rather than silently backgrounding the batch or claiming full coverage — breadth past that point is exactly what the Main Agent's post-integration full-suite run exists to close.
+
+This is division of labor with a backstop, not a shortcut: per-worktree coverage is intentionally partial, and it stays complete overall only because the Main Agent runs the full suite once on main, after every sibling task's commit is integrated and before the wave closes.
 
 ## Selection rule after acceptance
 

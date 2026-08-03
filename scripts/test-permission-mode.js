@@ -373,6 +373,25 @@ function runCloseSessionPush(root) {
   // agent.js silently read the real repo's state instead of the fixture's.
   const REAL_ROOT = path.resolve(__dirname, '..');
   const realProcessState = JSON.parse(fs.readFileSync(path.join(REAL_ROOT, 'PROCESS_STATE.json'), 'utf8'));
+  // T-587 — the leakage assertion below searches the output for THIS value, so
+  // it only means anything when the value is a real, non-empty string. This
+  // file is ship-classified and therefore also runs in the mirror-shaped
+  // assembled tree, where PROCESS_STATE.json is the templates/ starter rather
+  // than live state — so the search term is environment-dependent by nature.
+  // Checking it explicitly keeps the test environment-INDEPENDENT in the only
+  // way that matters: a template-shaped, empty, null or non-string initiative
+  // now fails HERE with a message naming the cause, instead of silently
+  // degrading the assertion below (`includes('')` is always true and
+  // `includes(null)` searches for the substring "null", which real JSON output
+  // routinely contains — both would report a bogus "leak" instead of the
+  // actual problem).
+  assert.ok(
+    typeof realProcessState.initiative === 'string' && realProcessState.initiative.trim().length > 0,
+    'Test 12 FAIL: the real PROCESS_STATE.json at ' +
+      `${path.join(REAL_ROOT, 'PROCESS_STATE.json')} has no non-empty string "initiative" ` +
+      `(got ${JSON.stringify(realProcessState.initiative)}) — the leakage assertion below needs a concrete ` +
+      'value to search the --agent output for, so this is a hard failure rather than a vacuous pass'
+  );
   assert.ok(
     !rawOutput.includes(realProcessState.initiative),
     `Test 12 FAIL: --agent output leaked the real mavericks initiative ("${realProcessState.initiative}") — MAVERICKS_PROJECT_ROOT redirect failed`

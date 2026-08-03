@@ -98,6 +98,12 @@ const DEFERRED_SECTION_HEADING = '## Deferred Tasks';
 const DEFERRED_SECTION_BLURB =
   'Tasks preserved for future waves. Not in the active validator set. Re-activate by moving to the current Active Wave section.';
 
+// T-576: TASK_STATUS.md destination for a `deprecated` task's mirrored entry
+// — matches the T-573 close-session sweep's deprecated destination exactly,
+// so a permanently-retired task always lands in the same place regardless of
+// which path (sweep or --rescope-task) put it there.
+const RECENTLY_COMPLETED_HEADING = '## Recently completed tasks';
+
 function readUtf8(p) {
   return fs.readFileSync(p, 'utf8');
 }
@@ -201,25 +207,28 @@ function insertIntoDeferredSection(markdown, entry) {
 }
 
 /**
- * Compute the character-offset bounds of TASK_STATUS.md's "## Active tasks"
- * section (T-544). Mirrors insertIntoActiveTasks()'s own section-boundary
- * logic in mavp-operator-lib.js (terminated by the next "## " heading, or
- * end of file) so presence-inside-the-section can be checked against the
- * exact same boundary insertIntoActiveTasks() itself would insert into —
- * keeping "is this entry already where it belongs" and "where would a new
- * entry go" in agreement. If either drifts, update the other.
+ * Compute the character-offset bounds of a named "## <heading>" section in a
+ * TASK_STATUS.md-shaped document (T-544, generalized for T-576). Mirrors
+ * insertIntoActiveTasks()'s own section-boundary logic in
+ * mavp-operator-lib.js (terminated by the next "## " heading, or end of
+ * file) so presence-inside-the-section can be checked against the exact
+ * same boundary insertIntoActiveTasks() itself would insert into — keeping
+ * "is this entry already where it belongs" and "where would a new entry go"
+ * in agreement. If either drifts, update the other.
  *
- * Returns null when the document has no "## Active tasks" heading at all.
+ * Returns null when the document has no heading matching `headingText`.
  *
  * @param {string} markdown - Content of TASK_STATUS.md
+ * @param {string} headingText - exact heading line, e.g. "## Active tasks"
  * @returns {{headerEnd: number, end: number}|null}
  */
-function activeTasksSectionRange(markdown) {
-  const activeTasksMatch = markdown.match(/\n## Active tasks[^\n]*/);
-  if (!activeTasksMatch) return null;
+function namedSectionRange(markdown, headingText) {
+  const escaped = headingText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const headingMatch = markdown.match(new RegExp(`\\n${escaped}[^\\n]*`));
+  if (!headingMatch) return null;
 
-  const activeTasksStart = markdown.indexOf(activeTasksMatch[0]);
-  const headerEnd = activeTasksStart + activeTasksMatch[0].length;
+  const sectionStart = markdown.indexOf(headingMatch[0]);
+  const headerEnd = sectionStart + headingMatch[0].length;
   const restOfFile = markdown.slice(headerEnd);
   const nextSectionMatch = restOfFile.match(/\n(?=## )/);
   const end = nextSectionMatch && nextSectionMatch.index !== undefined
@@ -227,6 +236,11 @@ function activeTasksSectionRange(markdown) {
     : markdown.length;
 
   return { headerEnd, end };
+}
+
+/** Convenience wrapper for the "## Active tasks" section (kept for readability at call sites). */
+function activeTasksSectionRange(markdown) {
+  return namedSectionRange(markdown, '## Active tasks');
 }
 
 function runValidatorOnce() {
@@ -350,7 +364,18 @@ function main() {
     return;
   }
 
-  const targetSection = newStatus ? (newStatus === 'deferred' ? 'deferred' : 'active') : null;
+  // BACKLOG.md section placement. 'deferred' moves into Deferred Tasks;
+  // 'deprecated' is a permanent rejection, not a return to the active wave
+  // (T-576, second defect) — its block stays wherever it already sits, so it
+  // gets the same "null" no-section-move treatment as an omitted --status;
+  // every other status still defaults to 'active'.
+  const targetSection = newStatus
+    ? newStatus === 'deferred'
+      ? 'deferred'
+      : newStatus === 'deprecated'
+        ? null
+        : 'active'
+    : null;
 
   // --- Build the updated BACKLOG.md block ---
   let updatedBlock = backlogLoc.rawBlock;
@@ -359,7 +384,8 @@ function main() {
   if (newTitle) updatedBlock = setBlockTitle(updatedBlock, newTitle);
 
   if (targetSection === null) {
-    // No status change requested — edit fields in place, no section move.
+    // No status change requested, OR --status deprecated (T-576) — either
+    // way, edit fields in place with no BACKLOG.md section move.
     backlog =
       backlog.slice(0, backlogLoc.startIndex) + updatedBlock + backlog.slice(backlogLoc.endIndex);
   } else {
@@ -399,21 +425,37 @@ function main() {
       taskStatusLoc.startIndex >= activeRange.headerEnd &&
       taskStatusLoc.startIndex < activeRange.end;
 
+    // T-576: the deferral guard is now FULL SYMMETRY with the activation
+    // guard above — "not already inside the destination section" — instead
+    // of the narrower T-574 guard (isInActiveTasks), which only normalized an
+    // entry stranded outside Active tasks if that entry deferred FROM Active
+    // tasks specifically. An entry already stranded in a third section (e.g.
+    // "## Recently completed tasks") now also gets relocated into "## Deferred
+    // tasks" on deferral, and an entry already inside "## Deferred tasks" is
+    // left alone by the final else branch below (idempotent — no duplicate).
+    const deferredRange = namedSectionRange(taskStatus, DEFERRED_TASK_STATUS_HEADING);
+    const isInDeferredSection =
+      !!deferredRange &&
+      taskStatusLoc.startIndex >= deferredRange.headerEnd &&
+      taskStatusLoc.startIndex < deferredRange.end;
+
     if (targetSection === 'active' && !isInActiveTasks) {
       const withoutStatusBlock =
         taskStatus.slice(0, taskStatusLoc.startIndex) + taskStatus.slice(taskStatusLoc.endIndex);
       const trimmedStatusBlock = updatedStatusBlock.trim();
       const relocatedEntry = `\n${trimmedStatusBlock}\n`;
       taskStatus = insertIntoActiveTasks(withoutStatusBlock, relocatedEntry);
-    } else if (targetSection === 'deferred' && isInActiveTasks) {
-      // T-574: the mirror image of the T-544 activation path above. Deferring
-      // a task whose TASK_STATUS.md entry sits inside "## Active tasks" used
-      // to edit the Status field in place and leave the block where it was,
-      // so the entry stayed in Active tasks forever — the producer of the
-      // stale terminal entries that latched wave 70 open. The convention the
-      // comment at the bottom of this block already stated (deferred tasks
-      // are not mirrored into Active tasks) was honored only when the entry
-      // happened to be ABSENT; now it is honored when one exists too.
+    } else if (targetSection === 'deferred' && !isInDeferredSection) {
+      // T-574/T-576: the mirror image of the T-544 activation path above.
+      // Deferring a task whose TASK_STATUS.md entry sits ANYWHERE other than
+      // "## Deferred tasks" (Active tasks, Recently completed tasks, or any
+      // other section) used to edit the Status field in place and leave the
+      // block where it was — for entries stranded outside Active tasks, that
+      // left a terminal-status disagreement magnet behind (T-576). The
+      // convention the comment at the bottom of this block already stated
+      // (deferred tasks are not mirrored into Active tasks) is now honored
+      // from any starting section, not just when the entry happened to be
+      // absent or sitting in Active tasks.
       //
       // The field edits are applied in place FIRST, then the resulting
       // document is handed to the shared lib mover, which relocates the block
@@ -437,6 +479,30 @@ function main() {
       }
       taskStatus = moved.updated;
       taskStatusRelocatedTo = DEFERRED_TASK_STATUS_HEADING;
+    } else if (newStatus === 'deprecated' && (isInActiveTasks || isInDeferredSection)) {
+      // T-576 (second defect): --status deprecated is a permanent rejection.
+      // Its BACKLOG.md block never moves (targetSection is null — see above),
+      // but a TASK_STATUS.md entry still sitting in "## Active tasks" or
+      // "## Deferred tasks" is relocated into "## Recently completed tasks",
+      // matching the destination the T-573 close-session sweep already uses
+      // for a deprecated entry it finds in Active tasks. An entry that is
+      // anywhere else already (e.g. already inside Recently completed tasks)
+      // is left in place by the final else branch below.
+      const editedTaskStatus =
+        taskStatus.slice(0, taskStatusLoc.startIndex) +
+        updatedStatusBlock +
+        taskStatus.slice(taskStatusLoc.endIndex);
+      const moved = moveTaskBlockToSection(editedTaskStatus, taskId, RECENTLY_COMPLETED_HEADING);
+      if (!moved.ok) {
+        console.error(
+          `${RED}Error: could not relocate ${taskId} into "${RECENTLY_COMPLETED_HEADING}" in TASK_STATUS.md — ${moved.error}${RESET}`
+        );
+        console.error(`${DIM}No files were written.${RESET}`);
+        process.exitCode = 1;
+        return;
+      }
+      taskStatus = moved.updated;
+      taskStatusRelocatedTo = RECENTLY_COMPLETED_HEADING;
     } else {
       taskStatus =
         taskStatus.slice(0, taskStatusLoc.startIndex) +
@@ -460,11 +526,13 @@ function main() {
     taskStatus = insertIntoActiveTasks(taskStatus, entry);
     taskStatusChanged = true;
   }
-  // targetSection === 'deferred' (or null) with no existing TASK_STATUS entry:
-  // leave it absent — matches the project convention of not mirroring
-  // deferred tasks into TASK_STATUS.md's Active tasks section. When an entry
-  // DOES exist, the T-574 branch above enforces the same convention by
-  // relocating it out of Active tasks rather than leaving it behind.
+  // targetSection === 'deferred' (or null — which now also covers --status
+  // deprecated, T-576) with no existing TASK_STATUS entry: leave it absent —
+  // matches the project convention of not mirroring deferred/deprecated
+  // tasks into TASK_STATUS.md's Active tasks section. When an entry DOES
+  // exist, the T-574/T-576 branches above enforce the same convention by
+  // relocating it out of Active tasks (or Deferred tasks) rather than
+  // leaving it behind.
 
   writeUtf8(BACKLOG_MD, backlog);
   if (taskStatusChanged) {

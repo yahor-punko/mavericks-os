@@ -30,6 +30,13 @@ HANDOFF.md
 # Task context prefetch bundles (regenerated at registration/update time, not committed)
 .mavp/context/
 
+# Assembled-suite receipt (T-587) — machine-local evidence that the shipped
+# suite ran green in a mirror-shaped assembled tree at a specific commit.
+# Written by scripts/check-assembled-suite.js, read by the publish preflight in
+# scripts/mavp-publish-build.js. Must stay untracked AND ignored: an ignored
+# file keeps `git status --porcelain` clean, which both of those scripts require.
+.mavp/assembled-suite-receipt.json
+
 # Session-transcript archive (opt-in, --transcript-archive) — privacy-sensitive
 # full session content, local-disk only, never git-tracked
 .mavp/transcripts/

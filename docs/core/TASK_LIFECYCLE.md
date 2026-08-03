@@ -118,14 +118,18 @@ This status is optional. Tasks may remain at `merged`. Use `runtime_verified` wh
 Distinguished from `deployed_dev`/`deployed_prod`: those track deployment state. `runtime_verified` tracks behavioral confirmation.
 
 ### deferred
-_(Optional)_ Task is parked indefinitely — it is not active but may re-enter the backlog. When a task is set to `deferred` in BACKLOG.md, its entry moves to the `## Deferred Tasks` section. The corresponding TASK_STATUS.md entry should be moved to the `## Deferred tasks` section. The validator does not raise `missing_in_backlog` for tasks with `deferred` status in TASK_STATUS.md — they are skipped even if absent from the active backlog set.
+_(Optional)_ Task is parked indefinitely — it is not active but may re-enter the backlog. When a task is set to `deferred` in BACKLOG.md, its entry moves to the `## Deferred Tasks` section. Use `--rescope-task --status deferred` to relocate the TASK_STATUS.md entry to the `## Deferred tasks` section mechanically — hand-moving it is how duplicate entries get created. The validator does not raise `missing_in_backlog` for tasks with `deferred` status in TASK_STATUS.md — they are skipped even if absent from the active backlog set.
 
 ### deprecated
 _(Optional)_ Task is rejected permanently — as opposed to `deferred`, which may return, a `deprecated` task will never be done. Tasks with `deprecated` status skip `missing_in_backlog` and `missing_in_task_status` validator checks, require no evidence, and do not appear in active counts.
 
 **Wave-end requirement:** when the last task in a wave is marked `merged`, a `git push` (or equivalent publish step) is required before the wave is considered closed. Mid-wave merges may defer push until wave close, but the push must happen before opening the next wave. Use `--close-session` — in interactive mode (TTY) it prompts for push when all active tasks are merged; in non-interactive/headless mode it prints a "Wave complete — run git push to close the wave" reminder instead of prompting. Use `--interactive` to force the prompt even in headless contexts.
 
-**Wave-close sweep:** `--close-session` automatically moves tasks with status `merged`, `deployed_dev`, or `deployed_prod` out of the `## Active tasks` section of TASK_STATUS.md into `## Recently completed tasks`. This ensures the next wave's session-start shows a clean deploy queue — no stale "awaiting prod deploy" warnings for tasks that were already deployed in the previous wave.
+**Wave-close sweep:** `--close-session` sweeps two distinct sets out of TASK_STATUS.md's `## Active tasks` section before computing wave completion:
+- **Terminal-completed** — `merged`, `deployed_dev`, `deployed_prod`, `runtime_verified` → moved to `## Recently completed tasks`.
+- **Terminal-skip** — `deferred` → moved to `## Deferred tasks` (created on demand); `deprecated` → moved to `## Recently completed tasks`. Neither counts as completed work, but neither blocks the wave either.
+
+**Fail-closed rule:** an unrecognized status holds the wave open — this is deliberate. A wave that will not close is a visible problem; a wave that closes over unfinished work is invisible. Mechanically, only the two sets above are ever swept, so `planned`, `qa_passed`, any in-flight status (`in_progress`, `needs_fix`, `ready_for_qa`, etc.), and any status the sweep doesn't recognize all remain in `## Active tasks` and keep the wave open.
 
 **Version bump requirement:** before closing a wave (before `git push`), check whether `scripts/mavp-version.js` needs a bump:
 - **patch** (`0.3.x → 0.3.y`) — any wave that changed scripts, the validator, or the installer

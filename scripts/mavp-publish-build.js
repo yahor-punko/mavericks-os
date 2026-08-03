@@ -4,6 +4,10 @@
 // Chains the six-step manual publish ritual (docs/PUBLIC_RELEASE_STRATEGY.md
 // §2) plus the DR-006 release-train's `edge` branch into a single command:
 //
+//   0.5. assembled-suite receipt gate (T-587) — refuses, before anything
+//        else happens, unless scripts/check-assembled-suite.js has recorded a
+//        green run of the SHIPPED suite in a mirror-shaped assembled tree at
+//        this exact HEAD. Flag-less; see assertCurrentAssembledSuiteReceipt().
 //   1. assemble    (scripts/mavp-publish-assemble.js)
 //   1.5. sanity-check the assembled tree (non-empty + a size floor — see
 //        assertAssembledTreeNonTrivial() below; this is a hard gate too)
@@ -104,6 +108,8 @@
 //       mirror instead of from stdout.
 //
 // HARD GATES: this script must never reach step 7 (`git push`) unless:
+//   (a0) a CURRENT assembled-suite receipt exists — recorded commit equal to
+//       this repo's HEAD, all-green suite (T-587, step 0.5), AND
 //   (a) the assembled tree passed the size-sanity check (1.5), AND
 //   (b) the secret scan in step 2 is GREEN (zero findings), AND
 //   (c) the composed commit message's own scan in step 6 is GREEN — see
@@ -219,6 +225,17 @@ const SCAN_SCRIPT = path.join(REPO_ROOT, 'scripts', 'mavp-publish-scan.js');
 const OVERLAY_SCRIPT = path.join(REPO_ROOT, 'scripts', 'mavp-publish-overlay.js');
 const LOCK_SCRIPT = path.join(REPO_ROOT, 'scripts', 'mavp-publish-lock.js');
 const VERIFY_PROVENANCE_SCRIPT = path.join(REPO_ROOT, 'scripts', 'mavp-publish-verify-provenance.js');
+const ASSEMBLED_SUITE_SCRIPT = path.join(REPO_ROOT, 'scripts', 'check-assembled-suite.js');
+
+// T-587 — the assembled-suite receipt gate (step 0.5 below). Required, not
+// spawned: this side only READS and shape-validates a small JSON file, and
+// sourcing the path + shape + refusal command from the writer's own module
+// means the two halves cannot drift apart. Requiring it does NOT run it —
+// check-assembled-suite.js guards its main() behind `require.main === module`,
+// so this pulls in the exported helpers only: no assemble, no suite run, no
+// recursion (see that file's header for why a suite-run preflight HERE would
+// recurse through scripts/test-publish-build.js's clone-based e2e cases).
+const { readReceipt: readAssembledSuiteReceipt, CHECK_COMMAND } = require(ASSEMBLED_SUITE_SCRIPT);
 
 // T-506 — shared exclusive concurrency lock on the mirror clone directory.
 // See scripts/mavp-publish-lock.js's own header for the full acquisition
@@ -543,6 +560,83 @@ function assertCleanSourceRepo() {
         'Publishing a tree that does not match any commit makes the build unreproducible.'
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Step 0.5 (preflight, T-587) — refuse without a CURRENT assembled-suite
+// receipt. HARD GATE, and deliberately flag-less.
+// ---------------------------------------------------------------------------
+//
+// Why: two consecutive releases (0.39.0 via T-570, 0.40.0 via T-575) published
+// with a red mirror CI while the private CI was green. Both defects were
+// `ship`-classified checks that only hold in the canonical private repo; the
+// assembled, mirror-shaped tree is a SECOND environment class, and nothing
+// mechanical ever looked at it before the push. scripts/check-assembled-suite.js
+// runs the shipped suite in that second environment and records a receipt;
+// this gate refuses to publish unless such a receipt exists AND its recorded
+// commit equals this repo's current HEAD.
+//
+// Why EVIDENCE and not EXECUTION here: running the suite from inside this
+// script would recurse and cost ~12 minutes per e2e case —
+// scripts/test-publish-build.js's cases run THIS script inside clones of the
+// canonical repo, and each inner assembled tree contains test-publish-build.js,
+// which clones again. Checking a receipt is O(1) and cannot recurse. See
+// check-assembled-suite.js's header for the full reasoning, including the
+// explicit statement that the receipt is an anti-forgetfulness device, not an
+// anti-adversary one (it is forgeable by writing a file, which is exactly as
+// hard as deleting this gate — the observed threat is omission, not malice).
+//
+// NO SKIP FLAG, BY DESIGN. There is no --skip/--force/env override for this
+// gate anywhere, matching the "no flag can relax the contract" invariant the
+// overlay's shape-contract tier already pins. EXACT-HEAD BINDING, ALSO BY
+// DESIGN: any commit after the suite run — a `chore: close session` commit
+// included — invalidates the receipt. The looser "shipped content unchanged"
+// binding was rejected as a fail-open door; the cost is an occasional
+// redundant re-run, and the operator sequence is close-session ->
+// check-assembled-suite -> publish.
+//
+// FAIL DIRECTION: closed, in every undecidable state. A non-git source repo
+// (or an unavailable git) means HEAD cannot be resolved, so the receipt cannot
+// be compared to anything; an unreadable/unparseable/wrong-schema receipt, a
+// receipt whose recorded suite is not all-green, and an absent receipt all land
+// in the same refusal. None of them is treated as "probably fine".
+function assertCurrentAssembledSuiteReceipt() {
+  log('\n=== Step 0.5/7: assembled-suite receipt (hard gate, no skip flag) ===');
+
+  const head = gitCapture(REPO_ROOT, ['rev-parse', 'HEAD']);
+  const headSha = head.ok ? head.stdout.trim() : '';
+  if (!/^[0-9a-f]{40}$/.test(headSha)) {
+    abort(
+      `could not resolve HEAD in ${REPO_ROOT} (git rev-parse HEAD failed or returned an unexpected value) — ` +
+        'the assembled-suite receipt is bound to an exact commit, so with no HEAD there is nothing to ' +
+        `compare it against. Refusing to publish. Run: ${CHECK_COMMAND}`
+    );
+  }
+
+  const result = readAssembledSuiteReceipt(REPO_ROOT);
+  if (!result.ok) {
+    abort(
+      `no current assembled-suite receipt: ${result.reason}. The shipped test suite must be run in a ` +
+        'mirror-shaped ASSEMBLED tree before publishing — green in this repo is not evidence about the ' +
+        'mirror (0.39.0 and 0.40.0 both published a red mirror CI that way). ' +
+        `Run this, then re-run the publish:\n\n    ${CHECK_COMMAND}\n`
+    );
+    return;
+  }
+
+  if (result.receipt.commit !== headSha) {
+    abort(
+      `the assembled-suite receipt at ${result.receiptPath} records commit ${result.receipt.commit}, but ` +
+        `HEAD is ${headSha} — it is STALE. The receipt binds to an exact commit on purpose: anything ` +
+        'committed after the suite ran (a close-session commit included) is unverified shipped content. ' +
+        `Run this, then re-run the publish:\n\n    ${CHECK_COMMAND}\n`
+    );
+  }
+
+  log(
+    `Receipt current: ${result.receiptPath} (commit ${result.receipt.commit}, ` +
+      `${result.receipt.summary_line || JSON.stringify(result.receipt.suite)}). Proceeding.`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2080,6 +2174,11 @@ function main() {
   }
 
   assertCleanSourceRepo();
+  // T-587 HARD GATE — before any assembly, scan, clone, commit or push.
+  // Placed immediately after the dirty-repo refusal because the receipt names a
+  // COMMIT: on a dirty tree HEAD is not the publishable state at all, so that
+  // check is logically prior to comparing anything against HEAD.
+  assertCurrentAssembledSuiteReceipt();
 
   const tempOutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-publish-build-'));
   tempOutDirForCleanup = tempOutDir;
@@ -2199,4 +2298,9 @@ module.exports = {
   resolveChmodFlagForHeadMode,
   pinCloneGitAttributesOrAbort,
   CLONE_OWNED_GIT_ATTRIBUTES_CONTENT,
+  // T-587 — the receipt gate, exported so tests can exercise the preflight
+  // directly, and so the refusal command a test asserts on is read from the
+  // script's own constant rather than duplicated as a literal.
+  assertCurrentAssembledSuiteReceipt,
+  ASSEMBLED_SUITE_CHECK_COMMAND: CHECK_COMMAND,
 };

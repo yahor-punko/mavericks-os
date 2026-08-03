@@ -170,7 +170,7 @@ function writeFile(filePath, content) {
   }
 
   if (!isCanonical) {
-    console.log('Test 4 skipped: not the canonical (private) repo — the manifest completeness invariant only holds against the private tracked set');
+    console.log('[SKIP] Test 4 skipped: not the canonical (private) repo — the manifest completeness invariant only holds against the private tracked set');
   } else {
     const result = require('node:child_process').spawnSync(process.execPath, [CHECK_SCRIPT], {
       cwd: REPO_ROOT,
@@ -2053,7 +2053,7 @@ const T533_EXPECTED_ERROR_LINE_ONE =
   }
 
   if (!isCanonical) {
-    console.log('Test 35 skipped: not the canonical (private) repo — the committed floors are seeded from the private tracked set');
+    console.log('[SKIP] Test 35 skipped: not the canonical (private) repo — the committed floors are seeded from the private tracked set');
   } else {
     const assembledDir = mkTempDir('mavp-overlay-t533-real-assembled-');
     const assemble = require('node:child_process').spawnSync(
@@ -2593,7 +2593,7 @@ const T533_EXPECTED_ERROR_LINE_ONE =
   }
 
   if (!isCanonical) {
-    console.log('Test 39 skipped: not the canonical (private) repo — the enforcement-directory floors are seeded from the private tracked set');
+    console.log('[SKIP] Test 39 skipped: not the canonical (private) repo — the enforcement-directory floors are seeded from the private tracked set');
   } else {
     const { dirOf: dirOfForT540 } = require('./mavp-publish-overlay.js');
     const realAssembled = mkTempDir('mavp-overlay-t540-real-assembled-');
