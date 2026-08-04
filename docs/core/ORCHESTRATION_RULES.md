@@ -168,6 +168,18 @@ Absent this explicit pre-authorization, sub-agents must not reconcile their work
 
 **Empirical grounding:** observed twice this initiative. In the Wave-44 T-330 session, four separate sub-agent spawns each saw framework version `0.23.1` instead of the already-merged `0.23.2`, because their worktrees had branched before that merge landed on main. In this session's T-338, the developer brief pre-authorized `git merge --ff-only main` because the task required bumping the version file — in that instance the merge was a no-op fast-forward (the worktree happened to already be current), but the pattern of pre-authorizing the read-side ff-merge is now proven and should be applied whenever a task's brief depends on current-main state.
 
+### GAP D — Worktree escape: a mutating command reaches the shared main checkout
+
+A worktree developer's shell command can carry an absolute path or a `cd` into the shared main checkout instead of staying inside its own worktree — the T-602 incident: a `sed` invocation prefixed with an absolute `cd` edited main's copy of the target file. The developer-side rule (`.claude/agents/developer.md` — "Worktree mechanics", "Committing from a worktree — critical rules") generalizes the prior git-only absolute-path prohibition to any mutating command and adds a mandatory post-edit self-verification step, so the agent that made the mistake is also the agent best placed to catch it immediately, before it reports back. In the T-602 case the agent's own diff-based self-check caught the escape, restored the file, and redid the edit correctly, and the Main Agent independently confirmed the restoration.
+
+**This is not a closed gap.** Nothing in this repo intercepts a worktree sub-agent's shell command before it runs — `.claude/hooks/` contains only `pre-commit`, no `PreToolUse` hook exists anywhere tracked in this repo, and hooks are activated through a gitignored settings file that is absent from worktree checkouts. Whether a hook defined in the main project's settings would even fire for a worktree sub-agent's Bash calls is harness-internal behavior nobody here has a way to execute a check against, so no such mechanism is claimed. What follows is the Main-Agent-side backstop that relies on the mistake surfacing in `git status` on main, not a fix for the interception gap itself. A `sed`, `mv`, `cp`, or shell redirect that a self-check fails to catch — or a worktree agent that skips the self-check — can still corrupt or silently revert a file on main with no cherry-pick ever carrying evidence of it, and the offending agent's own report would still read as clean, because its worktree remains untouched.
+
+**Main-Agent-side backstop — before integrating any worktree wave:**
+1. Run `git status --porcelain` on the shared main checkout, before cherry-picking or merging any sub-agent's commit.
+2. Treat any modification not attributable to a main-direct agent (product-docs, architect) or to the Main Agent's own state-artifact edits (`BACKLOG.md`, `TASK_STATUS.md`, `PROCESS_STATE.json`/`.md`) as a worktree-escape signal. Investigate which worktree/agent produced it before proceeding.
+3. Restore the affected path with `git checkout HEAD -- <path>` — not a bare `git checkout <path>`. After a `git add`, a bare `git checkout <path>` restores from the INDEX, not from HEAD, which can silently keep the escaped edit staged instead of reverting it; `git checkout HEAD -- <path>` is the form that actually reverts to the last committed state on main.
+4. Only after main is confirmed clean (or the escaped edit has been restored) proceed with GAP-A integration above.
+
 ## Wave architect review gate
 
 Waves with 3 or more planned tasks require architect review before the first task starts.

@@ -40,3 +40,10 @@ HANDOFF.md
 # Session-transcript archive (opt-in, --transcript-archive) — privacy-sensitive
 # full session content, local-disk only, never git-tracked
 .mavp/transcripts/
+
+# Commit-time private-name backstop names source (T-600) — canonical-repo-
+# local only, single line, comma-separated. Can NEVER be git-tracked: a
+# tracked file would ship the very private names it exists to detect. Its
+# absence is what makes scripts/mavp-private-names-guard.js a no-op in every
+# worktree, adopter repo, and the public mirror.
+.mavp/private-names

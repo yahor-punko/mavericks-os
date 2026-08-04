@@ -79,4 +79,23 @@ if [[ -f "scripts/check-changelog-frozen.js" ]]; then
   fi
 fi
 
+# Commit-time private-name backstop (T-600). No-op when the project has no
+# scripts/mavp-private-names-guard.js (adopter repos, public mirror). The
+# guard itself further self-gates: it is inert whenever no untracked names
+# source (.mavp/private-names or MAVP_PRIVATE_NAMES) is present, which is
+# true for every worktree, adopter repo, and mirror clone — the names list
+# can never be git-tracked, since that would ship the very names it exists
+# to detect. The guard's own failure mode is conservative (fails OPEN on any
+# internal error), so this stanza is safe to run unconditionally wherever
+# the script happens to exist.
+if [[ -f "scripts/mavp-private-names-guard.js" ]]; then
+  PRIVATE_NAMES_EXIT=0
+  node scripts/mavp-private-names-guard.js || PRIVATE_NAMES_EXIT=$?
+  if [[ $PRIVATE_NAMES_EXIT -ne 0 ]]; then
+    echo ""
+    echo "COMMIT BLOCKED: private-name collision detected in staged file(s) (see message above)."
+    exit 1
+  fi
+fi
+
 exit 0

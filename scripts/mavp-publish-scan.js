@@ -427,6 +427,43 @@ function scanSymlinkTarget(filePath, findings, categories) {
   scanTextAgainstCategories(filePath, null, target, findings, categories);
 }
 
+// ---------------------------------------------------------------------------
+// Entry-path scanning (T-601)
+// ---------------------------------------------------------------------------
+//
+// Before T-601, every detection category ran against file CONTENTS
+// (scanFile) and symlink TARGET strings (scanSymlinkTarget), but never
+// against an entry's own tree-relative PATH string. A ship-classified file
+// whose NAME embeds a private repo name (or any other detectable shape)
+// would therefore publish completely undetected — the file's bytes could be
+// perfectly clean while its path alone leaked. scanEntryPath closes that
+// gap by running the same category set against the path text.
+//
+// `PATH_LOCATION_MARKER` is passed as the `lineNo` argument to
+// scanTextAgainstCategories (which stores whatever it is given verbatim on
+// `finding.line`) instead of a real line number or the `null` used for
+// symlink-target findings — this keeps a path finding trivially
+// distinguishable from both a content finding (numeric line) and a
+// symlink-target finding (`null`), without changing
+// scanTextAgainstCategories' signature or its existing callers' behavior.
+//
+// Two parameters instead of one (unlike scanSymlinkTarget, which derives its
+// own text via readlinkSync from a single path): `identityPath` is what gets
+// attributed to the finding's `file` field (kept consistent with every other
+// finding shape so callers/renderers that do path.relative(root, f.file)
+// keep working unmodified), while `relPath` is the actual TEXT scanned — the
+// tree-relative path string, never the full filesystem path (scanning the
+// full path would spuriously match "Absolute /Users/ path" on every single
+// entry in a locally-assembled tree). This split also suits a commit-time
+// consumer (T-600) that has no assembled tree at all: it can pass the same
+// repo-relative staged-file path string for both arguments, since there is
+// no separate "full disk path" concept for it to track.
+const PATH_LOCATION_MARKER = 'file path';
+
+function scanEntryPath(identityPath, relPath, findings, categories) {
+  scanTextAgainstCategories(identityPath, PATH_LOCATION_MARKER, relPath, findings, categories);
+}
+
 // Redact long matches in reported output so the gate's own console output
 // does not become a secondary leak vector; short/structural matches
 // (paths, repo names, emails) are shown in full since they are not secrets.
@@ -490,6 +527,12 @@ function main() {
 
   const findings = [];
   for (const entry of entries) {
+    // T-601: every entry's tree-relative PATH string is scanned through the
+    // same category set as its content/target, in addition to (not instead
+    // of) that content/target scan below — a private name can leak through
+    // either channel independently.
+    const relPath = path.relative(resolvedDir, entry.path);
+    scanEntryPath(entry.path, relPath, findings, categories);
     if (entry.type === 'symlink') {
       scanSymlinkTarget(entry.path, findings, categories);
     } else {
@@ -508,7 +551,12 @@ function main() {
   console.error(`FOUND ${findings.length} finding(s) in ${resolvedDir}:\n`);
   for (const f of findings) {
     const rel = path.relative(resolvedDir, f.file);
-    const loc = f.line === null ? `${rel} (symlink target)` : `${rel}:${f.line}`;
+    const loc =
+      f.line === null
+        ? `${rel} (symlink target)`
+        : f.line === PATH_LOCATION_MARKER
+          ? `${rel} (${PATH_LOCATION_MARKER})`
+          : `${rel}:${f.line}`;
     console.error(`  [${f.category}] ${loc}  ${f.match}`);
   }
   console.error(`\nFAILED: ${findings.length} finding(s) — see above.`);
@@ -526,11 +574,20 @@ function main() {
 // scanTextAgainstCategories) to scan the composed mirror commit message
 // through this scanner's exact category set, with no duplicated assembly and
 // no temp file.
+//
+// T-601 adds scanEntryPath/PATH_LOCATION_MARKER — ADDITIVE exports, no
+// signature change to any of the five above. scanEntryPath is designed for
+// exactly two consumers: this file's own main() (assembled-tree entries) and
+// T-600's commit-time backstop (scripts/mavp-private-names-guard.js) scanning
+// a staged-file path list, neither of which needs an assembled tree on disk
+// since scanEntryPath takes plain strings, not filesystem entries.
 module.exports = {
   walk,
   scanFile,
   scanSymlinkTarget,
   scanTextAgainstCategories,
+  scanEntryPath,
+  PATH_LOCATION_MARKER,
   isAllowed,
   parsePrivateNamesList,
   resolvePrivateNames,

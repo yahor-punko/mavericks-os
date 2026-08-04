@@ -149,7 +149,7 @@ Task registration in `BACKLOG.md`/`TASK_STATUS.md` is Main-Agent-only and must n
 
 When a sub-agent completes: remove T-XXX from `active_slices`.
 
-**Worktree integration** — when integrating developer work from a harness worktree, always integrate by the agent's commit (cherry-pick/merge), never by copying files; and inspect `git status` before integrating to recover any orphaned uncommitted work; when a task must read current main state, pre-authorize `git merge --ff-only main` in the brief; record the on-branch hash the cherry-pick/merge itself produces as `commit:` evidence, never the sub-agent's worktree hash. See `docs/core/ORCHESTRATION_RULES.md` — "Worktree integration — Main Agent".
+**Worktree integration** — when integrating developer work from a harness worktree, always integrate by the agent's commit (cherry-pick/merge), never by copying files; and inspect `git status` before integrating to recover any orphaned uncommitted work; when a task must read current main state, pre-authorize `git merge --ff-only main` in the brief; record the on-branch hash the cherry-pick/merge itself produces as `commit:` evidence, never the sub-agent's worktree hash. Before integrating any worktree wave, also run `git status --porcelain` on the shared main checkout and restore any unattributable modification with `git checkout HEAD -- <path>` (not a bare `git checkout <path>`, which restores from the index) — this is a Main-Agent-side backstop, not a closed interception gap. See `docs/core/ORCHESTRATION_RULES.md` — "Worktree integration — Main Agent".
 
 ## Sub-agent brief template
 

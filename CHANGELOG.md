@@ -5,6 +5,18 @@ inspired by [Keep a Changelog](https://keepachangelog.com/). For how the
 framework actually works, see [README.md](README.md) and the core process
 docs in [`docs/core/`](docs/core/).
 
+## [0.42.0] — 2026-08-04
+
+### Added
+
+- **Publish secret scanner now detects a private name leaking through a file's own PATH, not only its contents** (T-601) — a ship-classified file whose NAME embedded a private repo name previously published completely undetected, because every detection category ran only against file contents (`scanFile`) and symlink-target strings (`scanSymlinkTarget`), never against an entry's own tree-relative path string. The scanner now runs the same category set against each entry's path too, via a new additive export `scanEntryPath`; no existing export's signature changed.
+- **New commit-time backstop blocks a private-name collision before it can merge, closing a detection-latency gap between merge and release** (T-600) — a colliding private identifier merged in an earlier wave previously surfaced only two waves later, as an aborted release build, because the publish gate had only ever run at release time in between. A new `scripts/mavp-private-names-guard.js`, wired into the pre-commit hook, scans staged ship-classified files' contents and paths (reusing T-601's path scanning) against an operator-local, untracked name list and blocks the commit on a finding. It is inert wherever that list is absent — every worktree, every adopter repo, and the public mirror all lack it by construction — and fails open (a guard bug prints a warning and lets the commit through) so a defect here can never block every commit in the repo.
+
+### Docs
+
+- **The shipped secret-string rule now states the private-name matcher's family-prefix semantics, which an author cannot discover by reading this repo** (T-599) — the name list the gate checks against is supplied to the scanner at invocation time and appears in no tracked file, and an entry ending in a hyphen matches any hyphenated identifier that begins with those letters, case-insensitive, anywhere on the line, with no actual private name needing to be present to trip it. The rule now also recommends neutral, generic synthetic-identifier segments over abbreviations lexically adjacent to this project's own naming family, and corrects the scanner's documented scope to include file paths (T-601's addition), not just contents and symlink targets.
+- **Developer spec and orchestration docs gained a worktree-escape self-check and a Main-Agent-side restore backstop** (T-602) — the developer role's worktree-mechanics guidance is generalized from a git-only absolute-path prohibition to any mutating command, and now requires a mandatory post-edit self-check (an edit missing from the worktree's own `git status`/`diff` is the escape signature, with a stop-restore-redo-report response). A Main-Agent-side backstop is added alongside it: `git status --porcelain` on the shared checkout before integrating a worktree wave, restoring any unattributable modification with `git checkout HEAD -- <path>` rather than a bare `git checkout <path>` (which restores from the index, not `HEAD`). **This documents discipline and a post-hoc backstop, not a closed mechanism** — no hook exists in this repo today that intercepts a worktree sub-agent's command before it runs, so the underlying harness-level gap stays open.
+
 ## [0.41.0] — 2026-08-03
 
 ### Added
