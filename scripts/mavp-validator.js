@@ -2996,7 +2996,16 @@ function getExitCode(overallCandidateState) {
 }
 
 function main() {
-  const repoRoot = process.argv[2] ? path.resolve(process.argv[2]) : process.cwd();
+  // Resolution order (deliberately mirrors getProjectRoot()'s precedence,
+  // extended with the explicit-argument tier): explicit path argument
+  // (argv[2]) wins when present, else MAVERICKS_PROJECT_ROOT, else
+  // process.cwd(). getProjectRoot() itself is NOT changed — see the comment
+  // on that function; it is require()-consumed by mavp-operator-agent.js,
+  // so reading process.argv there would resolve against the *requiring*
+  // process's argv, not this script's.
+  const repoRoot = process.argv[2]
+    ? path.resolve(process.argv[2])
+    : (process.env.MAVERICKS_PROJECT_ROOT || process.cwd());
   const backlogPath = path.join(repoRoot, 'BACKLOG.md');
   const taskStatusPath = path.join(repoRoot, 'TASK_STATUS.md');
   const parsed = parseArtifacts({ backlogPath, taskStatusPath });

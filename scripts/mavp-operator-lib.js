@@ -3198,19 +3198,63 @@ function parseModuleRegistry(root) {
 }
 
 /**
+ * Locate a single `### T-NNN — <title>` heading block anywhere in a markdown
+ * document (T-606 — promoted from mavp-operator-rescope-task.js's local
+ * `findTaskBlock`, renamed to avoid near-collision with findTaskBlockById).
+ * This is the ONE canonical block-boundary definition for single-block
+ * lookup/mutation: block boundaries run from the heading line up to (but not
+ * including) the next `### T-...` or `## ...` heading, or end of file —
+ * unlike parseAllTaskBlocks(), which only stops at the next `### T-NNN` and
+ * so can run a block past an intervening `## ` section boundary (see that
+ * function's own docblock). Do not build a new mutation path on
+ * parseAllTaskBlocks() — use this instead.
+ *
+ * Returns { count, startIndex, endIndex, rawBlock } — count is the number of
+ * heading matches found (0 = missing, 1 = found, >1 = duplicate; only when
+ * count === 1 are startIndex/endIndex/rawBlock present).
+ *
+ * @param {string} markdown - Raw file content
+ * @param {string} taskId - e.g. "T-394"
+ * @returns {{count: number, startIndex: number=, endIndex: number=, rawBlock: string=}}
+ */
+function locateTaskBlock(markdown, taskId) {
+  const escaped = taskId.replace('-', '\\-');
+  const headingRe = new RegExp(`^###\\s+${escaped}\\s+—.*$`, 'gm');
+  const matches = [...markdown.matchAll(headingRe)];
+
+  if (matches.length !== 1) {
+    return { count: matches.length };
+  }
+
+  const heading = matches[0];
+  const startIndex = heading.index;
+  const searchStart = startIndex + heading[0].length;
+  const rest = markdown.slice(searchStart);
+  const boundaryMatch = rest.match(/\n(?=###\s+T-\d+\s+—|##\s+[^#])/);
+  const endIndex = boundaryMatch ? searchStart + boundaryMatch.index + 1 : markdown.length;
+
+  return {
+    count: 1,
+    startIndex,
+    endIndex,
+    rawBlock: markdown.slice(startIndex, endIndex),
+  };
+}
+
+/**
  * Locate the raw ### T-NNN task block for a given ID inside a BACKLOG.md or
- * TASK_STATUS.md markdown string, using parseAllTaskBlocks(). Returns null
- * when not found.
+ * TASK_STATUS.md markdown string. Returns null when not found OR when the
+ * heading is duplicated (T-606 — thin wrapper over locateTaskBlock(), the
+ * one canonical boundary; a duplicate heading is no longer silently resolved
+ * to "whichever one matches first").
  *
  * @param {string} markdown - Raw file content (may be '')
  * @param {string} taskId - e.g. "T-394"
  * @returns {string|null}
  */
 function findTaskBlockById(markdown, taskId) {
-  const blocks = parseAllTaskBlocks(markdown || '');
-  const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`^###\\s+${escaped}\\b`);
-  return blocks.find((b) => re.test(b)) || null;
+  const loc = locateTaskBlock(markdown || '', taskId);
+  return loc.count === 1 ? loc.rawBlock : null;
 }
 
 /**
@@ -3230,6 +3274,76 @@ function extractBlockField(block, fieldName) {
   const value = m[1].trim();
   if (!value || value === '—' || value === '-') return null;
   return value;
+}
+
+/**
+ * Update (or insert) a `- **Field:** value` bullet within a task block
+ * (T-606 — promoted from mavp-operator-rescope-task.js's local
+ * `setBlockField`, the canonical insert-if-missing within-block write).
+ * Inserts right after the heading line when the field does not yet exist.
+ * Deliberately does NOT normalize placeholder values on write — a write over
+ * `- **Evidence:** —` replaces the placeholder line, it does not skip it.
+ *
+ * @param {string} block - Raw task block starting with `### T-NNN`
+ * @param {string} fieldName - e.g. "Status", "Owner role"
+ * @param {string} value
+ * @returns {string} The updated block
+ */
+function setBlockField(block, fieldName, value) {
+  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const fieldRe = new RegExp(`^(- \\*\\*${escaped}:\\*\\*)\\s*.*$`, 'm');
+  if (fieldRe.test(block)) {
+    return block.replace(fieldRe, `$1 ${value}`);
+  }
+  const lines = block.split('\n');
+  lines.splice(1, 0, `- **${fieldName}:** ${value}`);
+  return lines.join('\n');
+}
+
+/**
+ * Read a single `- **Field:** value` bullet from within a specific task's
+ * block in a BACKLOG.md/TASK_STATUS.md-shaped markdown document, bounded by
+ * locateTaskBlock()'s boundary — so this can never read a value from a
+ * later block when the target block itself lacks the field (T-606, the read
+ * counterpart to updateTaskField()).
+ *
+ * @param {string} markdown
+ * @param {string} taskId - e.g. "T-394"
+ * @param {string} fieldName - e.g. "Status", "Owner role"
+ * @returns {{ok: boolean, value: (string|null), reason: (string|null)}}
+ *   reason is 'task_not_found' or 'duplicate_heading' when ok is false.
+ */
+function readTaskField(markdown, taskId, fieldName) {
+  const loc = locateTaskBlock(markdown, taskId);
+  if (loc.count === 0) return { ok: false, value: null, reason: 'task_not_found' };
+  if (loc.count > 1) return { ok: false, value: null, reason: 'duplicate_heading' };
+  return { ok: true, value: extractBlockField(loc.rawBlock, fieldName), reason: null };
+}
+
+/**
+ * Update (insert-if-missing) a single `- **Field:** value` bullet within a
+ * specific task's block in a BACKLOG.md/TASK_STATUS.md-shaped markdown
+ * document (T-606 — the composer T-607/T-608/T-609's migrations consume).
+ * Refuses to write — and returns the input markdown unchanged — when the
+ * task is missing or its heading is duplicated, instead of silently writing
+ * into whatever later block happens to carry the field (the defect this
+ * task exists to close).
+ *
+ * @param {string} markdown
+ * @param {string} taskId - e.g. "T-394"
+ * @param {string} fieldName - e.g. "Status", "Owner role"
+ * @param {string} value
+ * @returns {{ok: boolean, updated: string, reason: (string|null)}}
+ *   reason is 'task_not_found' or 'duplicate_heading' when ok is false; on
+ *   failure `updated` echoes the input markdown unchanged.
+ */
+function updateTaskField(markdown, taskId, fieldName, value) {
+  const loc = locateTaskBlock(markdown, taskId);
+  if (loc.count === 0) return { ok: false, updated: markdown, reason: 'task_not_found' };
+  if (loc.count > 1) return { ok: false, updated: markdown, reason: 'duplicate_heading' };
+  const updatedBlock = setBlockField(loc.rawBlock, fieldName, value);
+  const updated = markdown.slice(0, loc.startIndex) + updatedBlock + markdown.slice(loc.endIndex);
+  return { ok: true, updated, reason: null };
 }
 
 /**
@@ -3717,9 +3831,11 @@ module.exports = {
   computeMustRead,
   DEFERRED_TASK_STATUS_HEADING,
   ensureSectionHeading,
+  extractBlockField,
   extractHeadingIds,
   extractTrajectories,
   findPreviousCloseSessionCommit,
+  findTaskBlockById,
   formatIsoTime,
   generateProcessStateMd,
   getCommitHashesReachable,
@@ -3737,6 +3853,7 @@ module.exports = {
   isShallowRepository,
   isTaskHeadingFor,
   isValidHashFormat,
+  locateTaskBlock,
   lookupTaskTitle,
   mergeCommitEvidence,
   MODULE_META_HEADINGS,
@@ -3761,6 +3878,7 @@ module.exports = {
   printRepoIdentityHeader,
   readPermissionMode,
   readPersistedPermissionMode,
+  readTaskField,
   relativeTime,
   renameTask,
   renderThinSnapshot,
@@ -3772,11 +3890,13 @@ module.exports = {
   resolveRepoMapPath,
   resolveTaskOrigin,
   scoreTrajectory,
+  setBlockField,
   shortenSessionKey,
   summarizeTrajectories,
   TERMINAL_SKIP_STATUSES,
   truncateTaskBlockAtLevel2Heading,
   updateLastTaskId,
+  updateTaskField,
   writeContextBundle,
   writeTrajectories,
   writeUtf8,

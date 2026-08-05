@@ -46,7 +46,16 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execSync } = require('node:child_process');
-const { resolveCommitHash, mergeCommitEvidence, printRepoIdentityHeader } = require('./mavp-operator-lib.js');
+const {
+  resolveCommitHash,
+  mergeCommitEvidence,
+  printRepoIdentityHeader,
+  locateTaskBlock,
+  extractBlockField,
+  setBlockField,
+  readTaskField,
+  updateTaskField,
+} = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -100,84 +109,102 @@ function taskExistsInFile(markdown, taskId) {
 }
 
 /**
- * Read the current Status field value for a task block in markdown.
- * Returns the status string, or null if the task or Status field is not found.
+ * Read the current Status field value for a SPECIFIC task's own block,
+ * bounded by locateTaskBlock() (T-608 — replaces a family of lazy-but-
+ * unbounded `[\s\S]*?` matchers that did not stop at the next `### T-` or
+ * `## ` heading and so could read a neighboring block's Status when the
+ * target block lacked one). Returns null when the task is absent, its
+ * heading is duplicated, or the Status field itself is not present in its
+ * own block — never a value read from any other block.
+ *
+ * @param {string} markdown
+ * @param {string} taskId
+ * @returns {string|null}
  */
 function readCurrentStatus(markdown, taskId) {
-  const escaped = taskId.replace('-', '\\-');
-  const blockPattern = new RegExp(
-    `###\\s+${escaped}\\s+—[\\s\\S]*?- \\*\\*Status:\\*\\*\\s+(\\S+)`,
-    'm'
-  );
-  const match = markdown.match(blockPattern);
-  return match ? match[1] : null;
+  const result = readTaskField(markdown, taskId, 'Status');
+  return result.ok ? result.value : null;
 }
 
 /**
- * Update the Status field for a task block in markdown.
- * Only modifies the first occurrence of the task heading's Status field.
- * Returns the updated string (unchanged if no match).
+ * Update the Status field for a SPECIFIC task's own block, bounded by
+ * locateTaskBlock() via updateTaskField() (T-608). Returns the input
+ * markdown unchanged when the task is absent or its heading is duplicated —
+ * it never falls through to writing into a later block.
+ *
+ * @param {string} markdown
+ * @param {string} taskId
+ * @param {string} newStatus
+ * @returns {string}
  */
 function updateTaskStatusField(markdown, taskId, newStatus) {
-  const escaped = taskId.replace('-', '\\-');
-  const blockPattern = new RegExp(
-    `(###\\s+${escaped}\\s+—[\\s\\S]*?- \\*\\*Status:\\*\\*)\\s+\\S+`,
-    'm'
-  );
-  if (blockPattern.test(markdown)) {
-    return markdown.replace(blockPattern, `$1 ${newStatus}`);
-  }
-  return markdown;
+  const result = updateTaskField(markdown, taskId, 'Status', newStatus);
+  return result.ok ? result.updated : markdown;
 }
 
 /**
- * Read the current Evidence field text for a task block in markdown.
- * Returns the raw text (may be empty string), or '' if the task or field
- * is not found.
+ * Read the current Evidence field text for a SPECIFIC task's own block,
+ * bounded by locateTaskBlock() (T-608). Returns '' when the task is absent,
+ * its heading is duplicated, the field is not present, or the field holds
+ * only a placeholder ("—" / "-") — extractBlockField() (via readTaskField())
+ * normalizes a placeholder to null on read, which is the deliberate decision
+ * for this call site: a placeholder is never real prior evidence text, so
+ * treating it as "no prior evidence" for the merge below loses nothing (see
+ * mergeCommitEvidence() at the call site, which appends/replaces onto
+ * whatever this returns).
+ *
+ * @param {string} markdown
+ * @param {string} taskId
+ * @returns {string}
  */
 function readCurrentEvidence(markdown, taskId) {
-  const escaped = taskId.replace('-', '\\-');
-  const blockPattern = new RegExp(
-    `###\\s+${escaped}\\s+—[\\s\\S]*?- \\*\\*Evidence:\\*\\*\\s+([^\\n]+)`,
-    'm'
-  );
-  const match = markdown.match(blockPattern);
-  return match ? match[1] : '';
+  const result = readTaskField(markdown, taskId, 'Evidence');
+  return result.ok && result.value ? result.value : '';
 }
 
 /**
- * Update the Evidence field for a task block in TASK_STATUS.md.
- * Only modifies the first occurrence of the task heading's Evidence field.
- * Returns the updated string (unchanged if no match).
+ * Update the Evidence field for a SPECIFIC task's own block in
+ * TASK_STATUS.md, bounded by locateTaskBlock() via updateTaskField()
+ * (T-608). INSERTS the field (right after the heading) when the target
+ * block does not yet have an Evidence line, rather than failing or writing
+ * into a different block — this is what closes the archived-block
+ * falsification defect: a target block with no Evidence line now gets one
+ * inserted directly, instead of the write silently landing on the next
+ * block downstream that happened to have the field. Returns the input
+ * markdown unchanged when the task is absent or its heading is duplicated.
+ *
+ * @param {string} markdown
+ * @param {string} taskId
+ * @param {string} evidence
+ * @returns {string}
  */
 function updateTaskEvidence(markdown, taskId, evidence) {
-  const escaped = taskId.replace('-', '\\-');
-  const blockPattern = new RegExp(
-    `(###\\s+${escaped}\\s+—[\\s\\S]*?- \\*\\*Evidence:\\*\\*)\\s+[^\\n]+`,
-    'm'
-  );
-  if (blockPattern.test(markdown)) {
-    return markdown.replace(blockPattern, `$1 ${evidence}`);
-  }
-  return markdown;
+  const result = updateTaskField(markdown, taskId, 'Evidence', evidence);
+  return result.ok ? result.updated : markdown;
 }
 
 /**
- * Append "needs_fix_rounds: 0" to the Evidence field for a task in TASK_STATUS.md,
- * but only if the field does not already contain "needs_fix_rounds:".
- * Returns the updated string (unchanged if already present or no match).
+ * Append "needs_fix_rounds: 0" to the Evidence field for a SPECIFIC task's
+ * own block in TASK_STATUS.md, but only if the field does not already
+ * contain "needs_fix_rounds:" (T-608 — bounded by locateTaskBlock(), the
+ * same fix as the four functions above). Returns the input markdown
+ * unchanged when the task is absent, its heading is duplicated, or
+ * "needs_fix_rounds:" is already present.
+ *
+ * @param {string} markdown
+ * @param {string} taskId
+ * @returns {string}
  */
 function appendNeedsFixRoundsIfMissing(markdown, taskId) {
-  const escaped = taskId.replace('-', '\\-');
-  const blockPattern = new RegExp(
-    `(###\\s+${escaped}\\s+—[\\s\\S]*?- \\*\\*Evidence:\\*\\*)\\s+([^\\n]+)`,
-    'm'
-  );
-  const match = markdown.match(blockPattern);
-  if (!match) return markdown;
-  const currentEvidence = match[2];
+  const loc = locateTaskBlock(markdown, taskId);
+  if (loc.count !== 1) return markdown;
+  const currentEvidence = extractBlockField(loc.rawBlock, 'Evidence') || '';
   if (currentEvidence.includes('needs_fix_rounds:')) return markdown;
-  return markdown.replace(blockPattern, `$1 ${currentEvidence} needs_fix_rounds: 0`);
+  const mergedEvidence = currentEvidence
+    ? `${currentEvidence} needs_fix_rounds: 0`
+    : 'needs_fix_rounds: 0';
+  const updatedBlock = setBlockField(loc.rawBlock, 'Evidence', mergedEvidence);
+  return markdown.slice(0, loc.startIndex) + updatedBlock + markdown.slice(loc.endIndex);
 }
 
 function printUsage() {
@@ -302,6 +329,15 @@ function main() {
 
     // --from precondition guard: check current status before mutating.
     // Read from BACKLOG.md when available, fall back to TASK_STATUS.md.
+    // Both reads are bounded to taskId's OWN block via readCurrentStatus()
+    // (readTaskField() under the hood) — when the target block has no
+    // Status line (or the task/heading itself can't be resolved), the read
+    // returns null rather than silently falling through to whatever a later
+    // block in the same file happens to contain (T-608). A null read can
+    // never equal a real fromStatus string, so it always falls into the
+    // warn+skip branch below, whose message renders as an explicit
+    // "currently \"unknown\"" — never a neighbor's status masquerading as a
+    // match.
     if (fromStatus !== null) {
       const currentStatus =
         (inBacklog ? readCurrentStatus(backlog, taskId) : null) ||

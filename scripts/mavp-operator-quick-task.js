@@ -241,7 +241,7 @@ async function main() {
 
   // Run validator — print full stdout/stderr, do not swallow output
   console.log(`\n${DIM}Running validator...${RESET}`);
-  const validatorResult = spawnSync('node', [VALIDATOR], {
+  const validatorResult = spawnSync('node', [VALIDATOR, ROOT], {
     stdio: ['inherit', 'pipe', 'pipe'],
     encoding: 'utf8',
   });

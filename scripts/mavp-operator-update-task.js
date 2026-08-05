@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
 const { execSync } = require('node:child_process');
-const { writeContextBundle } = require('./mavp-operator-lib.js');
+const { writeContextBundle, updateTaskField } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -58,14 +58,6 @@ function parseActiveTasks(markdown) {
     id: m[1],
     title: m[2].trim(),
   }));
-}
-
-function updateFieldInMarkdown(markdown, taskId, field, value) {
-  const fieldPattern = new RegExp(`(###\\s+${taskId}\\s+—[\\s\\S]*?- \\*\\*${field}:\\*\\*)\\s+\\S+`, 'm');
-  if (fieldPattern.test(markdown)) {
-    return markdown.replace(fieldPattern, `$1 ${value}`);
-  }
-  return markdown;
 }
 
 function moveToCompleted(markdown, taskId) {
@@ -153,14 +145,46 @@ async function main() {
   let backlog = readUtf8(BACKLOG_MD);
   let status = readUtf8(TASK_STATUS_MD);
 
-  // Update status in both files
-  backlog = updateFieldInMarkdown(backlog, taskId, 'Status', newStatus);
-  status = updateFieldInMarkdown(status, taskId, 'Status', newStatus);
+  // Apply a single field write to BOTH BACKLOG.md and TASK_STATUS.md through
+  // the bounded composer (T-606/T-607). Each write is scoped to taskId's own
+  // block only — a target block missing the field, or a duplicate heading,
+  // is reported via `reason` rather than silently falling through to (or
+  // inserting into) some other block later in the file.
+  const fieldWrites = [];
+  function applyField(fieldName, value) {
+    const backlogResult = updateTaskField(backlog, taskId, fieldName, value);
+    const statusResult = updateTaskField(status, taskId, fieldName, value);
+    if (backlogResult.ok) backlog = backlogResult.updated;
+    if (statusResult.ok) status = statusResult.updated;
+    fieldWrites.push({
+      fieldName,
+      value,
+      backlogOk: backlogResult.ok,
+      backlogReason: backlogResult.reason,
+      statusOk: statusResult.ok,
+      statusReason: statusResult.reason,
+    });
+  }
 
-  // Update owner if provided
+  // Update status in both files
+  applyField('Status', newStatus);
+
+  // Update owner if provided. Field name is "Owner role" — the name every
+  // entry builder (buildTaskStatusEntry, --new-task, --apply-decomposition)
+  // actually emits. A bare "Owner" field does exist on older archived/
+  // completed blocks in this repo, but --update-task only ever targets
+  // in-flight tasks (its own picker only lists "Active tasks"), and no
+  // active block anywhere in this repo carries the legacy bare "Owner" name
+  // — so there is nothing for a legacy-field fallback to usefully match here.
+  // Adding one would also reintroduce exactly the two-names-for-one-concept
+  // drift this task exists to close (see the bug report: the old code wrote
+  // "Owner" everywhere, when every writer had already moved to "Owner role").
+  // If --update-task is ever pointed at an already-archived task carrying a
+  // bare "Owner" line, writing "Owner role" alongside it (rather than
+  // rewriting the legacy line) is the correct, conservative behavior: it
+  // never silently changes the semantics of an already-completed record.
   if (newOwner) {
-    backlog = updateFieldInMarkdown(backlog, taskId, 'Owner', newOwner);
-    status = updateFieldInMarkdown(status, taskId, 'Owner', newOwner);
+    applyField('Owner role', newOwner);
   }
 
   // Move to completed section if merged
@@ -188,12 +212,27 @@ async function main() {
     }
   } catch { /* ignore if PROCESS_STATE.json is absent or malformed */ }
 
-  const ownerNote = newOwner ? ` (owner → ${newOwner})` : '';
-  console.log(`\n${GREEN}✓ ${taskId} → ${newStatus}${ownerNote}${RESET}`);
+  const failedWrites = fieldWrites.filter(w => !w.backlogOk || !w.statusOk);
+
+  if (failedWrites.length > 0) {
+    for (const w of failedWrites) {
+      if (!w.backlogOk) {
+        console.log(`${YELLOW}⚠ BACKLOG.md: ${taskId} — "${w.fieldName}" not written (${w.backlogReason})${RESET}`);
+      }
+      if (!w.statusOk) {
+        console.log(`${YELLOW}⚠ TASK_STATUS.md: ${taskId} — "${w.fieldName}" not written (${w.statusReason})${RESET}`);
+      }
+    }
+    console.log(`${YELLOW}⚠ ${taskId} — one or more requested field writes changed nothing${RESET}\n`);
+    process.exitCode = 1;
+  } else {
+    const ownerNote = newOwner ? ` (owner → ${newOwner})` : '';
+    console.log(`\n${GREEN}✓ ${taskId} → ${newStatus}${ownerNote}${RESET}`);
+  }
 
   // Run validator
   try {
-    execSync(`node "${VALIDATOR}"`, { stdio: 'pipe' });
+    execSync(`node "${VALIDATOR}" "${ROOT}"`, { stdio: 'pipe' });
     console.log(`${GREEN}✓ Validator passed${RESET}\n`);
   } catch (err) {
     console.log(`${YELLOW}⚠ Validator exit ${err.status} — check artifacts${RESET}\n`);

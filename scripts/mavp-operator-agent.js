@@ -460,7 +460,7 @@ function checkFrameworkVersion(json) {
  */
 function runValidatorCheck() {
   try {
-    execSync(`node "${VALIDATOR}"`, { stdio: 'pipe' });
+    execSync(`node "${VALIDATOR}" "${ROOT}"`, { stdio: 'pipe' });
     return { warning: null, warningDetail: null };
   } catch (err) {
     const code = err.status;
@@ -469,7 +469,7 @@ function runValidatorCheck() {
       const warning = 'DRIFTING — BACKLOG and TASK_STATUS are out of sync. Run --close-session.';
       let warningDetail = null;
       try {
-        const jsonOutput = execSync(`node "${VALIDATOR}" --json`, { stdio: 'pipe' }).toString();
+        const jsonOutput = execSync(`node "${VALIDATOR}" "${ROOT}" --json`, { stdio: 'pipe' }).toString();
         const parsed = JSON.parse(jsonOutput);
         const comparison = parsed.comparison || {};
         const findings = comparison.findings || [];

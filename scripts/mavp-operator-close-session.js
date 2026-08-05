@@ -1074,7 +1074,7 @@ function checkVersionBump() {
 // which keep their prior shape and meaning — this is an additive change.
 function runValidator() {
   try {
-    const result = execSync(`node "${VALIDATOR}"`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+    const result = execSync(`node "${VALIDATOR}" "${ROOT}"`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
     return { ok: true, code: 0, output: result };
   } catch (err) {
     const code = typeof err.status === 'number' ? err.status : 1;

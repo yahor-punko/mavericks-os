@@ -25,12 +25,27 @@
  * EXECUTION_LOG line is appended per item, and the validator runs exactly
  * once at the end.
  *
- * Usage: ./scripts/mavp-operator --quick-merge
+ * Usage: ./scripts/mavp-operator --quick-merge [--verification-type <artifact|runtime|unit>] [--owner <role>]
  *
  * Prompts (repeated per item; empty title ends the batch):
  *   1. Title (required)
  *   2. Commit hash (required)
  *   3. One-line note (optional, Enter to skip)
+ *
+ * T-613 — --verification-type and --owner are batch-wide flags (apply to
+ * every item in this run, not per-item — a mixed batch is expected to run the
+ * lane once per grouping instead). Absent flags resolve to the unchanged
+ * defaults (`runtime` / `developer`), so a flagless run stays byte-identical
+ * to pre-T-613 output. The 3-line piped protocol arity is unaffected.
+ *   --verification-type  one of artifact | runtime | unit. `visual` and
+ *                         `manual` are REFUSED — both require human review by
+ *                         definition and must never ride a straight-to-merged
+ *                         lane.
+ *   --owner               one of the known implementer owner roles (see
+ *                         ALLOWED_OWNER_ROLES below).
+ * An invalid value for either flag refuses the ENTIRE run with exit 1 before
+ * any input is collected or any file is written, naming the invalid value and
+ * the allowed set.
  */
 
 'use strict';
@@ -193,25 +208,137 @@ function checkXsGuard(commitHash, cwd) {
 }
 
 // ---------------------------------------------------------------------------
+// Declaration flags — --verification-type / --owner (T-613)
+//
+// Batch-wide: apply to every item registered in this run, not per-item — the
+// 3-line piped protocol arity stays exactly 3. Defaults are unchanged
+// (`runtime` / `developer`), so a flagless run stamps byte-identical output
+// to pre-T-613.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_VERIFICATION_TYPE = 'runtime';
+const DEFAULT_OWNER_ROLE = 'developer';
+
+// The exact set the XS-lane attested conditions in
+// docs/core/ORCHESTRATION_RULES.md enumerate ("Verification type: artifact,
+// or a runtime/unit change trivial enough to be self-evidently correct on
+// inspection"). `visual` and `manual` are deliberately absent — both require
+// human review by definition and must never ride a straight-to-merged lane.
+const ALLOWED_VERIFICATION_TYPES = ['artifact', 'runtime', 'unit'];
+
+// Owner-role set: the implementer roles enumerated for `owner_role:` in
+// docs/ARCHITECT_OUTPUT.md, MINUS `main_agent`. `main_agent` is a real owner
+// value there (exploration tasks with no deliverable code), but this lane
+// always cites a real commit made by a sub-agent — the Main Agent is an
+// orchestrator, never an implementer (CLAUDE.md — "Orchestrator checklist"),
+// so it can never be the actual author of a quick-merge-eligible diff.
+const ALLOWED_OWNER_ROLES = [
+  'developer', 'product-docs', 'technical-writer', 'qa', 'ux',
+  'security-reviewer', 'frontend-design', 'ui-designer', 'analyst', 'exa-researcher',
+];
+
+/**
+ * Parse --verification-type / --owner from argv. Space-separated value —
+ * matches the `--flag value` convention used elsewhere (e.g. new-task.js's
+ * parseCliArgs()). Absent flags resolve to null so validateFlags() can apply
+ * defaults explicitly.
+ *
+ * @param {string[]} argv - process.argv.slice(2)
+ */
+function parseCliArgs(argv) {
+  const flags = { verificationType: null, owner: null };
+  const map = {
+    '--verification-type': 'verificationType',
+    '--owner': 'owner',
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const key = map[argv[i]];
+    if (key && i + 1 < argv.length) {
+      flags[key] = argv[++i];
+    }
+  }
+  return flags;
+}
+
+/**
+ * Build the batch-wide flag-resolution echo line (T-616 — Defect A).
+ *
+ * Always printed once, after flag validation succeeds and before item
+ * collection begins: names the resolved verification type and owner,
+ * marking each as a default when its flag was not supplied, and — whenever
+ * EITHER flag was explicitly supplied — states in words that the resolved
+ * values apply to every item in this batch. Pure — no I/O — so it is
+ * directly unit-testable independent of main()'s console wiring.
+ *
+ * @param {{verificationType: ?string, owner: ?string}} parsedFlags - raw parse (pre-default)
+ * @param {{verificationType: string, owner: string}} resolved - post-default values
+ * @returns {string}
+ */
+function buildFlagEchoLine(parsedFlags, resolved) {
+  const vtLabel = parsedFlags.verificationType
+    ? resolved.verificationType
+    : `${resolved.verificationType} (default)`;
+  const ownerLabel = parsedFlags.owner
+    ? resolved.owner
+    : `${resolved.owner} (default)`;
+  const anyExplicit = Boolean(parsedFlags.verificationType || parsedFlags.owner);
+  const batchWideSuffix = anyExplicit
+    ? ' These resolved values apply to every item in this batch.'
+    : '';
+  return `Verification type: ${vtLabel}. Owner: ${ownerLabel}.${batchWideSuffix}`;
+}
+
+/**
+ * Validate parsed flags against the allowed sets and resolve defaults.
+ * Pure — no I/O, no process.exit — so main() can refuse the entire run
+ * before any input is collected or any file is written.
+ *
+ * @param {{verificationType: ?string, owner: ?string}} flags
+ * @returns {{ok: true, verificationType: string, owner: string} | {ok: false, message: string}}
+ */
+function validateFlags(flags) {
+  const verificationType = flags.verificationType || DEFAULT_VERIFICATION_TYPE;
+  if (!ALLOWED_VERIFICATION_TYPES.includes(verificationType)) {
+    return {
+      ok: false,
+      message: `--verification-type "${verificationType}" is not allowed for the XS fast lane. `
+        + `Allowed values: ${ALLOWED_VERIFICATION_TYPES.join(', ')} `
+        + `(visual/manual require human review and can never ride this lane).`,
+    };
+  }
+
+  const owner = flags.owner || DEFAULT_OWNER_ROLE;
+  if (!ALLOWED_OWNER_ROLES.includes(owner)) {
+    return {
+      ok: false,
+      message: `--owner "${owner}" is not a known owner role. `
+        + `Allowed values: ${ALLOWED_OWNER_ROLES.join(', ')}.`,
+    };
+  }
+
+  return { ok: true, verificationType, owner };
+}
+
+// ---------------------------------------------------------------------------
 // Artifact rendering
 // ---------------------------------------------------------------------------
 
-function buildBacklogEntry(id, title, note) {
+function buildBacklogEntry(id, title, note, ownerRole, verificationType) {
   return `\n### ${id} — ${title}
 - **Status:** merged
-- **Owner role:** developer
+- **Owner role:** ${ownerRole}
 - **Repo:** mavericks
-- **Verification type:** runtime
+- **Verification type:** ${verificationType}
 
 **Problem:** ${note}
 `;
 }
 
-function buildTaskStatusEntry(id, title, commitHash, note) {
+function buildTaskStatusEntry(id, title, commitHash, note, ownerRole, verificationType) {
   return `\n### ${id} — ${title}
 - **Status:** merged
-- **Owner role:** developer
-- **Verification type:** runtime
+- **Owner role:** ${ownerRole}
+- **Verification type:** ${verificationType}
 
 - **Evidence:** commit: ${commitHash} branch: main — ${note}
 `;
@@ -336,6 +463,19 @@ async function collectBatch() {
 // ---------------------------------------------------------------------------
 
 async function main() {
+  // Flag validation runs FIRST — before the header, before input collection,
+  // before any file existence check or write. An invalid --verification-type
+  // or --owner refuses the entire run, naming the invalid value and the
+  // allowed set (T-613).
+  const parsedFlags = parseCliArgs(process.argv.slice(2));
+  const flags = validateFlags(parsedFlags);
+  if (!flags.ok) {
+    console.log(`${RED}✗ ${flags.message}${RESET}`);
+    console.log(`${DIM}Entire run refused — no BACKLOG.md/TASK_STATUS.md changes were made.${RESET}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
   printRepoIdentityHeader(ROOT);
 
   const today = new Date().toISOString().slice(0, 10);
@@ -343,6 +483,12 @@ async function main() {
   console.log(`${DIM}XS fast-track: creates task(s) as merged immediately (no lifecycle ceremony).${RESET}`);
   console.log(`${DIM}Use only for XS changes: <=2 files, <=10 lines diff, no new files, no risk.${RESET}`);
   console.log(`${DIM}Each cited commit is checked against the XS guard before anything is written.${RESET}\n`);
+
+  // T-616 — Defect A: always echo the resolved batch-wide flag values BEFORE
+  // input collection begins, so a piped caller sees this at the top of the
+  // transcript and an interactive caller can abort before typing a title.
+  console.log(buildFlagEchoLine(parsedFlags, flags));
+  console.log('');
 
   if (!fs.existsSync(BACKLOG_MD) || !fs.existsSync(TASK_STATUS_MD)) {
     console.error(`${RED}BACKLOG.md or TASK_STATUS.md not found in ${ROOT}${RESET}`);
@@ -386,8 +532,8 @@ async function main() {
     const { title, commitHash, note } = items[idx];
     const effectiveNote = note || title;
 
-    updatedBacklog = insertIntoActiveWave(updatedBacklog, buildBacklogEntry(id, title, effectiveNote));
-    updatedTaskStatus = insertIntoActiveTasks(updatedTaskStatus, buildTaskStatusEntry(id, title, commitHash, effectiveNote));
+    updatedBacklog = insertIntoActiveWave(updatedBacklog, buildBacklogEntry(id, title, effectiveNote, flags.owner, flags.verificationType));
+    updatedTaskStatus = insertIntoActiveTasks(updatedTaskStatus, buildTaskStatusEntry(id, title, commitHash, effectiveNote, flags.owner, flags.verificationType));
 
     registered.push({ id, title, commitHash });
   }
@@ -410,7 +556,7 @@ async function main() {
 
   // Run validator EXACTLY ONCE — print full stdout/stderr, do not swallow output
   console.log(`\n${DIM}Running validator...${RESET}`);
-  const validatorResult = spawnSync('node', [VALIDATOR], {
+  const validatorResult = spawnSync('node', [VALIDATOR, ROOT], {
     stdio: ['inherit', 'pipe', 'pipe'],
     encoding: 'utf8',
   });
@@ -440,6 +586,11 @@ async function main() {
 module.exports = {
   checkXsGuard,
   isSensitivePath,
+  parseCliArgs,
+  validateFlags,
+  buildFlagEchoLine,
+  ALLOWED_VERIFICATION_TYPES,
+  ALLOWED_OWNER_ROLES,
 };
 
 if (require.main === module) {

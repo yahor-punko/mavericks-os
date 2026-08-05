@@ -222,7 +222,7 @@ function buildBacklogEntry(id, task, repoName) {
 }
 
 function runValidator() {
-  const result = spawnSync('node', [VALIDATOR], {
+  const result = spawnSync('node', [VALIDATOR, ROOT], {
     stdio: ['inherit', 'pipe', 'pipe'],
     encoding: 'utf8',
   });

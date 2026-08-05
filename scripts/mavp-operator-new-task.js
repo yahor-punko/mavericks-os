@@ -234,7 +234,7 @@ async function main() {
 
   // Run validator
   try {
-    execSync(`node "${VALIDATOR}"`, { stdio: 'pipe' });
+    execSync(`node "${VALIDATOR}" "${ROOT}"`, { stdio: 'pipe' });
     console.log(`${GREEN}✓ Validator passed${RESET}`);
   } catch (err) {
     const code = err.status;

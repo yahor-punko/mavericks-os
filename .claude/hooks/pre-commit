@@ -36,7 +36,7 @@ if [[ ! -f "$VALIDATOR" ]]; then
 fi
 
 EXIT_CODE=0
-node "$VALIDATOR" || EXIT_CODE=$?
+node "$VALIDATOR" "$(pwd)" || EXIT_CODE=$?
 
 if [[ $EXIT_CODE -eq 2 ]]; then
   echo ""

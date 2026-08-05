@@ -23,6 +23,8 @@ const {
   resolveCommitHash,
   mergeCommitEvidence,
   isValidHashFormat,
+  locateTaskBlock,
+  extractBlockField,
 } = require('./mavp-operator-lib.js');
 
 const SCRIPTS_DIR = __dirname;
@@ -81,6 +83,72 @@ function writeFixture(root, taskId, status, evidence) {
 - **Notes:** —
 
 ## Recently completed tasks
+`);
+}
+
+/**
+ * Read a single field from a specific task's bounded block in a given
+ * artifact file (T-608 regression coverage) — uses locateTaskBlock() /
+ * extractBlockField(), the same canonical bounded reader the fixed
+ * mavp-operator-set-status.js now consumes, so verification here can never
+ * paper over a neighbor-block leak by reusing an equally-unbounded reader.
+ * Returns null when the task/heading is absent, duplicated, or the field
+ * itself is not present.
+ */
+function readBlockField(root, file, taskId, fieldName) {
+  const md = readUtf8(path.join(root, file));
+  const loc = locateTaskBlock(md, taskId);
+  if (loc.count !== 1) return null;
+  return extractBlockField(loc.rawBlock, fieldName);
+}
+
+/**
+ * Read the full raw block text for a specific task (T-608 regression
+ * coverage) — for byte-for-byte "this neighbor block was never touched"
+ * comparisons. Returns null when the task/heading is absent or duplicated.
+ */
+function readRawBlock(root, file, taskId) {
+  const md = readUtf8(path.join(root, file));
+  const loc = locateTaskBlock(md, taskId);
+  return loc.count === 1 ? loc.rawBlock : null;
+}
+
+/**
+ * Fixture shaped like the T-608 problem statement: an active task
+ * (targetId) with NO Evidence line sitting above an ARCHIVED neighbor
+ * (archivedId, in "## Recently completed tasks") that DOES carry real
+ * Evidence text. This is the exact shape that let the pre-T-608 unbounded
+ * matchers read/write past the target block's boundary into the archived
+ * one.
+ */
+function writeFixtureWithArchivedNeighbor(root, targetId, targetStatus, archivedId, archivedEvidence) {
+  writeUtf8(path.join(root, 'BACKLOG.md'), `# BACKLOG
+
+## Active Wave
+
+### ${targetId} — Fixture target task
+- **Status:** ${targetStatus}
+- **Owner role:** developer
+- **Verification type:** runtime
+`);
+  writeUtf8(path.join(root, 'TASK_STATUS.md'), `# TASK_STATUS
+
+## Active tasks
+
+### ${targetId} — Fixture target task
+- **Status:** ${targetStatus}
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** —
+
+## Recently completed tasks
+
+### ${archivedId} — Fixture archived neighbor
+- **Status:** merged
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** qa
+- **Evidence:** ${archivedEvidence}
 `);
 }
 
@@ -288,6 +356,128 @@ const REAL_COMMIT_SHORT = execFileSync('git', ['-C', REPO, 'rev-parse', '--short
   console.log('Test 7 passed: degrades silently (no warning, no crash) when git is unavailable');
 }
 
+// ---------------------------------------------------------------------------
+// Part 8 (T-608 regression) — end-to-end: a target block with NO Evidence
+// line, sitting above an ARCHIVED neighbor block that carries a real
+// Evidence commit. `--set-status <target> merged --commit <hash>` must
+// INSERT an Evidence line into the TARGET's own block and leave the
+// archived block byte-for-byte identical — the defect this task closes
+// wrote the new commit into the archived block's Evidence field instead
+// (and appended needs_fix_rounds onto it), because the pre-fix matchers'
+// `[\s\S]*?` gap did not stop at the intervening "## Recently completed
+// tasks" heading.
+// ---------------------------------------------------------------------------
+{
+  writeFixtureWithArchivedNeighbor(REPO, 'T-950', 'ready_for_qa', 'T-951', 'commit: deadbee1 branch: main');
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: REPO };
+
+  const archivedBefore = readRawBlock(REPO, 'TASK_STATUS.md', 'T-951');
+  assert.ok(archivedBefore, 'Test 8 setup FAIL: T-951 fixture block should be present');
+  assert.strictEqual(
+    readBlockField(REPO, 'TASK_STATUS.md', 'T-950', 'Evidence'),
+    null,
+    'Test 8 setup FAIL: T-950 fixture must start with no Evidence field'
+  );
+
+  writeUtf8(path.join(REPO, 'seed3.txt'), 'third\n');
+  gitQuiet(REPO, ['add', 'seed3.txt']);
+  gitQuiet(REPO, ['commit', '-q', '-m', 'third commit']);
+  const thirdCommit = execFileSync('git', ['-C', REPO, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
+
+  runSetStatus(['T-950', 'merged', '--commit', thirdCommit, '--branch', 'main'], REPO, env);
+
+  const targetEvidence = readBlockField(REPO, 'TASK_STATUS.md', 'T-950', 'Evidence');
+  assert.ok(targetEvidence, 'Test 8 FAIL: expected an Evidence line to be INSERTED into the target block');
+  assert.ok(
+    targetEvidence.includes(`commit: ${thirdCommit} branch: main`),
+    `Test 8 FAIL: expected target Evidence to carry the new commit, got: ${targetEvidence}`
+  );
+  assert.strictEqual(
+    readBlockField(REPO, 'TASK_STATUS.md', 'T-950', 'Status'),
+    'merged',
+    'Test 8 FAIL: target status should transition to merged'
+  );
+
+  const archivedAfter = readRawBlock(REPO, 'TASK_STATUS.md', 'T-951');
+  assert.strictEqual(
+    archivedAfter,
+    archivedBefore,
+    'Test 8 FAIL: archived neighbor block must remain byte-for-byte identical — the pre-fix defect wrote the new commit (and needs_fix_rounds) into this block instead'
+  );
+  assert.strictEqual(
+    readBlockField(REPO, 'TASK_STATUS.md', 'T-951', 'Evidence'),
+    'commit: deadbee1 branch: main',
+    "Test 8 FAIL: archived block must retain its own original commit hash, not the target's"
+  );
+  console.log(`Test 8 passed: Evidence-less target block gets Evidence inserted directly; archived neighbor untouched — target Evidence: "${targetEvidence}"`);
+}
+
+// ---------------------------------------------------------------------------
+// Part 9 (T-608 regression) — end-to-end: the --from guard on a target
+// block with NO Status line must skip with an explicit "currently unknown"
+// warning, never comparing against an archived neighbor's Status. The
+// fixture places the neighbor's Status EQUAL to --from's expected value —
+// under the pre-fix unbounded matcher this made the guard treat a missing
+// target status as a MATCH and proceed to mutate it; the fix must instead
+// skip and leave both blocks untouched.
+// ---------------------------------------------------------------------------
+{
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: REPO };
+
+  // T-952 exists ONLY in TASK_STATUS.md (no BACKLOG.md record at all), so the
+  // guard's backlog-side read is forced to fall through to the TASK_STATUS
+  // read this test targets — the vulnerable path.
+  writeUtf8(path.join(REPO, 'BACKLOG.md'), `# BACKLOG
+
+## Active Wave
+`);
+  writeUtf8(path.join(REPO, 'TASK_STATUS.md'), `# TASK_STATUS
+
+## Active tasks
+
+### T-952 — Fixture missing-status task
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** —
+- **Evidence:** —
+
+## Recently completed tasks
+
+### T-953 — Fixture archived neighbor with matching status
+- **Status:** ready_for_qa
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** qa
+- **Evidence:** commit: cafebabe branch: main
+`);
+
+  const neighborBefore = readRawBlock(REPO, 'TASK_STATUS.md', 'T-953');
+  assert.strictEqual(
+    readBlockField(REPO, 'TASK_STATUS.md', 'T-952', 'Status'),
+    null,
+    'Test 9 setup FAIL: T-952 fixture must start with no Status field'
+  );
+
+  const { output } = runSetStatus(['T-952', 'merged', '--from', 'ready_for_qa'], REPO, env);
+
+  assert.ok(
+    /currently "unknown", not "ready_for_qa" — skipped \(--from guard\)/.test(output),
+    `Test 9 FAIL: expected an explicit "currently unknown" --from-guard warning, got:\n${output}`
+  );
+  assert.strictEqual(
+    readBlockField(REPO, 'TASK_STATUS.md', 'T-952', 'Status'),
+    null,
+    'Test 9 FAIL: target must remain unchanged (still no Status field) after the guard skip'
+  );
+  const neighborAfter = readRawBlock(REPO, 'TASK_STATUS.md', 'T-953');
+  assert.strictEqual(
+    neighborAfter,
+    neighborBefore,
+    "Test 9 FAIL: archived neighbor's block must never be read into or mutated by the --from guard"
+  );
+  console.log('Test 9 passed: --from guard on a Status-less target skips with an explicit "currently unknown" warning, never matching a neighbor\'s status');
+}
+
 fs.rmSync(REPO, { recursive: true, force: true });
 
-console.log('\nAll T-446 assertions passed.');
+console.log('\nAll T-446 / T-608 assertions passed.');

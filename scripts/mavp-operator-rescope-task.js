@@ -62,6 +62,10 @@ const {
   DEFERRED_TASK_STATUS_HEADING,
   writeContextBundle,
   printRepoIdentityHeader,
+  locateTaskBlock,
+  setBlockField,
+  extractBlockField,
+  buildTaskStatusEntry,
 } = require('./mavp-operator-lib.js');
 
 const RESET = '\x1b[0m';
@@ -119,60 +123,6 @@ function printUsage() {
   console.error('');
   console.error('At least one of --status / --owner / --title must be provided.');
   console.error(`${DIM}Valid statuses: ${VALID_STATUSES.join(', ')}${RESET}`);
-}
-
-/**
- * Locate a single `### T-NNN — <title>` heading block anywhere in a markdown
- * document. Block boundaries run from the heading line up to (but not
- * including) the next `### T-...` or `## ...` heading, or end of file.
- *
- * Returns { count, startIndex, endIndex, rawBlock } — count is the number of
- * heading matches found (0 = missing, 1 = found, >1 = duplicate).
- */
-function findTaskBlock(markdown, taskId) {
-  const escaped = taskId.replace('-', '\\-');
-  const headingRe = new RegExp(`^###\\s+${escaped}\\s+—.*$`, 'gm');
-  const matches = [...markdown.matchAll(headingRe)];
-
-  if (matches.length !== 1) {
-    return { count: matches.length };
-  }
-
-  const heading = matches[0];
-  const startIndex = heading.index;
-  const searchStart = startIndex + heading[0].length;
-  const rest = markdown.slice(searchStart);
-  const boundaryMatch = rest.match(/\n(?=###\s+T-\d+\s+—|##\s+[^#])/);
-  const endIndex = boundaryMatch ? searchStart + boundaryMatch.index + 1 : markdown.length;
-
-  return {
-    count: 1,
-    startIndex,
-    endIndex,
-    rawBlock: markdown.slice(startIndex, endIndex),
-  };
-}
-
-/**
- * Update (or insert) a `- **Field:** value` bullet within a task block.
- * Inserts right after the heading line when the field does not yet exist.
- */
-function setBlockField(block, fieldName, value) {
-  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const fieldRe = new RegExp(`^(- \\*\\*${escaped}:\\*\\*)\\s*.*$`, 'm');
-  if (fieldRe.test(block)) {
-    return block.replace(fieldRe, `$1 ${value}`);
-  }
-  const lines = block.split('\n');
-  lines.splice(1, 0, `- **${fieldName}:** ${value}`);
-  return lines.join('\n');
-}
-
-/** Read a `- **Field:** value` bullet from a task block, or null if absent. */
-function getBlockField(block, fieldName) {
-  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const m = block.match(new RegExp(`^- \\*\\*${escaped}:\\*\\*\\s*(.+)$`, 'm'));
-  return m ? m[1].trim() : null;
 }
 
 /** Rewrite the title portion of a `### T-NNN — <title>` heading line. */
@@ -340,7 +290,7 @@ function main() {
   let taskStatus = readUtf8(TASK_STATUS_MD);
 
   // --- Locate + fail fast on duplicate/missing ID in BACKLOG.md ---
-  const backlogLoc = findTaskBlock(backlog, taskId);
+  const backlogLoc = locateTaskBlock(backlog, taskId);
   if (backlogLoc.count === 0) {
     console.error(`${RED}Error: ${taskId} not found in BACKLOG.md.${RESET}`);
     process.exitCode = 1;
@@ -355,7 +305,7 @@ function main() {
   }
 
   // --- Same duplicate check for TASK_STATUS.md (presence is optional) ---
-  const taskStatusLoc = findTaskBlock(taskStatus, taskId);
+  const taskStatusLoc = locateTaskBlock(taskStatus, taskId);
   if (taskStatusLoc.count > 1) {
     console.error(
       `${RED}Error: ${taskId} has ${taskStatusLoc.count} duplicate headings in TASK_STATUS.md — refusing to rescope an ambiguous task.${RESET}`
@@ -512,16 +462,21 @@ function main() {
     taskStatusChanged = true;
   } else if (targetSection === 'active') {
     // Un-deferring (or otherwise activating) a task with no existing
-    // TASK_STATUS.md entry — create one from the updated BACKLOG.md fields.
-    const status = getBlockField(updatedBlock, 'Status') || newStatus || 'planned';
-    const owner = getBlockField(updatedBlock, 'Owner role') || newOwner || 'developer';
-    const verificationType = getBlockField(updatedBlock, 'Verification type');
+    // TASK_STATUS.md entry — create one from the updated BACKLOG.md fields,
+    // via the shared buildTaskStatusEntry() builder (T-606) so the created
+    // entry always carries a "- **Last verified by:**" and
+    // "- **Evidence:**" line, matching every other entry-creation path
+    // (--new-task, sync-status auto-create). The prior hand-rolled version
+    // omitted both — the missing Evidence line is precisely what made the
+    // archived-evidence falsification (see BACKLOG.md problem statement)
+    // reachable via this code path.
+    const status = extractBlockField(updatedBlock, 'Status') || newStatus || 'planned';
+    const owner = extractBlockField(updatedBlock, 'Owner role') || newOwner || 'developer';
+    const verificationType = extractBlockField(updatedBlock, 'Verification type') || 'TBD';
     const titleMatch = updatedBlock.match(/^###\s+T-\d+\s+—\s+(.+)$/m);
     const title = titleMatch ? titleMatch[1].trim() : taskId;
 
-    const lines = [`\n### ${taskId} — ${title}`, `- **Status:** ${status}`, `- **Owner role:** ${owner}`];
-    if (verificationType) lines.push(`- **Verification type:** ${verificationType}`);
-    const entry = lines.join('\n') + '\n';
+    const entry = buildTaskStatusEntry(taskId, title, owner, verificationType, status);
 
     taskStatus = insertIntoActiveTasks(taskStatus, entry);
     taskStatusChanged = true;

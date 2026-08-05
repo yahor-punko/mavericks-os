@@ -19,7 +19,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execSync } = require('node:child_process');
-const { printRepoIdentityHeader } = require('./mavp-operator-lib.js');
+const { printRepoIdentityHeader, locateTaskBlock, updateTaskField } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -62,26 +62,11 @@ function writeUtf8(p, content) {
 
 /**
  * Check whether a task ID exists anywhere in a markdown file.
+ * Returns the locateTaskBlock() result so callers can also detect a
+ * duplicate heading (count > 1) rather than only presence/absence.
  */
-function taskExistsInFile(markdown, taskId) {
-  const escaped = taskId.replace('-', '\\-');
-  return new RegExp(`^###\\s+${escaped}\\s+—`, 'm').test(markdown);
-}
-
-/**
- * Update the Status field for a task block in markdown.
- * Only modifies the first occurrence of the task heading's Status field.
- */
-function updateTaskStatusField(markdown, taskId, newStatus) {
-  const escaped = taskId.replace('-', '\\-');
-  const blockPattern = new RegExp(
-    `(###\\s+${escaped}\\s+—[\\s\\S]*?- \\*\\*Status:\\*\\*)\\s+\\S+`,
-    'm'
-  );
-  if (blockPattern.test(markdown)) {
-    return markdown.replace(blockPattern, `$1 ${newStatus}`);
-  }
-  return markdown;
+function locateTask(markdown, taskId) {
+  return locateTaskBlock(markdown, taskId);
 }
 
 function printUsage() {
@@ -138,34 +123,54 @@ function main() {
   const backlog = readUtf8(BACKLOG_MD);
   const taskStatus = readUtf8(TASK_STATUS_MD);
 
-  // Verify task exists in at least one artifact
-  const inBacklog = taskExistsInFile(backlog, normalisedId);
-  const inTaskStatus = taskExistsInFile(taskStatus, normalisedId);
+  // Verify task exists in at least one artifact, and fail fast (no writes at
+  // all) if either file has a duplicate heading for this task — a duplicate
+  // must never silently degrade into a first-match write (T-609).
+  const backlogLoc = locateTask(backlog, normalisedId);
+  const taskStatusLoc = locateTask(taskStatus, normalisedId);
 
-  if (!inBacklog && !inTaskStatus) {
+  if (backlogLoc.count === 0 && taskStatusLoc.count === 0) {
     console.error(`${RED}Error: task ${normalisedId} not found in BACKLOG.md or TASK_STATUS.md.${RESET}`);
     process.exitCode = 1;
     return;
   }
 
-  // Apply updates
+  if (backlogLoc.count > 1) {
+    console.error(`${RED}Error: ${normalisedId} has ${backlogLoc.count} duplicate headings in BACKLOG.md — refusing to update an ambiguous task. No files were written.${RESET}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (taskStatusLoc.count > 1) {
+    console.error(`${RED}Error: ${normalisedId} has ${taskStatusLoc.count} duplicate headings in TASK_STATUS.md — refusing to update an ambiguous task. No files were written.${RESET}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const inBacklog = backlogLoc.count === 1;
+  const inTaskStatus = taskStatusLoc.count === 1;
+
+  // Apply updates — updateTaskField() is bounded to the target block only
+  // (stops at the next `### T-` or `## ` heading) and inserts the field
+  // when the block lacks it, rather than exporting the write to a
+  // neighboring block.
   let updatedBacklog = backlog;
   let updatedTaskStatus = taskStatus;
   let backlogUpdated = false;
   let taskStatusUpdated = false;
 
   if (inBacklog) {
-    const result = updateTaskStatusField(backlog, normalisedId, newStatus);
-    if (result !== backlog) {
-      updatedBacklog = result;
+    const result = updateTaskField(backlog, normalisedId, 'Status', newStatus);
+    if (result.updated !== backlog) {
+      updatedBacklog = result.updated;
       backlogUpdated = true;
     }
   }
 
   if (inTaskStatus) {
-    const result = updateTaskStatusField(taskStatus, normalisedId, newStatus);
-    if (result !== taskStatus) {
-      updatedTaskStatus = result;
+    const result = updateTaskField(taskStatus, normalisedId, 'Status', newStatus);
+    if (result.updated !== taskStatus) {
+      updatedTaskStatus = result.updated;
       taskStatusUpdated = true;
     }
   }
@@ -175,7 +180,7 @@ function main() {
     writeUtf8(BACKLOG_MD, updatedBacklog);
     console.log(`${GREEN}BACKLOG.md — ${normalisedId} Status set to ${CYAN}${newStatus}${RESET}`);
   } else if (inBacklog) {
-    console.log(`${YELLOW}BACKLOG.md — ${normalisedId} found but Status field not matched (may already be "${newStatus}")${RESET}`);
+    console.log(`${YELLOW}BACKLOG.md — ${normalisedId} found but Status already "${newStatus}" — no change${RESET}`);
   } else {
     console.log(`${DIM}BACKLOG.md — ${normalisedId} not present, skipped${RESET}`);
   }
@@ -184,7 +189,7 @@ function main() {
     writeUtf8(TASK_STATUS_MD, updatedTaskStatus);
     console.log(`${GREEN}TASK_STATUS.md — ${normalisedId} Status set to ${CYAN}${newStatus}${RESET}`);
   } else if (inTaskStatus) {
-    console.log(`${YELLOW}TASK_STATUS.md — ${normalisedId} found but Status field not matched (may already be "${newStatus}")${RESET}`);
+    console.log(`${YELLOW}TASK_STATUS.md — ${normalisedId} found but Status already "${newStatus}" — no change${RESET}`);
   } else {
     console.log(`${DIM}TASK_STATUS.md — ${normalisedId} not present, skipped${RESET}`);
   }

@@ -13,7 +13,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
 const { execSync } = require('node:child_process');
-const { resolveCommitHash, printRepoIdentityHeader } = require('./mavp-operator-lib.js');
+const {
+  resolveCommitHash,
+  printRepoIdentityHeader,
+  locateTaskBlock,
+  updateTaskField,
+} = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -35,8 +40,37 @@ function readUtf8(p) { return fs.readFileSync(p, 'utf8'); }
 function writeUtf8(p, content) { fs.writeFileSync(p, content, 'utf8'); }
 
 /**
+ * Bounded-per-occurrence Status read: given the index/length of a single
+ * `### T-NNN — <title>` heading match, returns that OCCURRENCE's Status
+ * value (or null if absent/placeholder), stopping at the next `### T-` or
+ * `## ` heading — the same boundary rule locateTaskBlock() uses for a
+ * unique match. This is deliberately per-occurrence rather than
+ * per-ID, so a task ID that happens to be duplicated in the file still
+ * has each heading's own Status read correctly (never running past a
+ * section boundary into a different task, T-609) — locateTaskBlock()
+ * itself only supports a unique-match lookup and refuses on a duplicate,
+ * which is the right behavior for a targeted read/write but not for this
+ * listing scan, which must still surface a duplicated ID as a selectable
+ * (later refused, see the fail-fast check in main()) candidate.
+ */
+function statusOfBlockAt(markdown, headingIndex, headingLength) {
+  const searchStart = headingIndex + headingLength;
+  const rest = markdown.slice(searchStart);
+  const boundaryMatch = rest.match(/\n(?=###\s+T-\d+\s+—|##\s+[^#])/);
+  const endIndex = boundaryMatch ? searchStart + boundaryMatch.index + 1 : markdown.length;
+  const block = markdown.slice(headingIndex, endIndex);
+  const m = block.match(/^- \*\*Status:\*\*\s*(.+)$/m);
+  if (!m) return null;
+  const value = m[1].trim();
+  return (!value || value === '—' || value === '-') ? null : value;
+}
+
+/**
  * Parse all tasks with a given status from the markdown file.
- * Searches entire file (active wave + any other sections).
+ * Searches entire file (active wave + any other sections). Each heading
+ * occurrence's Status is read via statusOfBlockAt() above — bounded to
+ * that occurrence's own block, never spilling into a neighboring block
+ * (T-609).
  */
 function parseTasksByStatus(markdown, status) {
   const results = [];
@@ -45,51 +79,12 @@ function parseTasksByStatus(markdown, status) {
   while ((taskMatch = taskPattern.exec(markdown)) !== null) {
     const id = taskMatch[1];
     const title = taskMatch[2].trim();
-    // Find the Status line that follows this heading
-    const fromIdx = taskMatch.index;
-    const nextHeadingMatch = /^###\s+T-/m.exec(markdown.slice(fromIdx + 1));
-    const blockEnd = nextHeadingMatch
-      ? fromIdx + 1 + nextHeadingMatch.index
-      : markdown.length;
-    const block = markdown.slice(fromIdx, blockEnd);
-    const statusMatch = block.match(/- \*\*Status:\*\*\s+(\S+)/);
-    if (statusMatch && statusMatch[1] === status) {
+    const value = statusOfBlockAt(markdown, taskMatch.index, taskMatch[0].length);
+    if (value === status) {
       results.push({ id, title });
     }
   }
   return results;
-}
-
-/**
- * Update the Status field for a task block in markdown.
- * Matches the first occurrence of the task heading and replaces its Status field.
- */
-function updateTaskStatus(markdown, taskId, newStatus) {
-  // Replace the Status field in the task's block only
-  const escapedId = taskId.replace('-', '\\-');
-  const blockPattern = new RegExp(
-    `(###\\s+${escapedId}\\s+—[\\s\\S]*?- \\*\\*Status:\\*\\*)\\s+\\S+`,
-    'm'
-  );
-  if (blockPattern.test(markdown)) {
-    return markdown.replace(blockPattern, `$1 ${newStatus}`);
-  }
-  return markdown;
-}
-
-/**
- * Update the Evidence field for a task block in TASK_STATUS.md.
- */
-function updateTaskEvidence(markdown, taskId, evidence) {
-  const escapedId = taskId.replace('-', '\\-');
-  const blockPattern = new RegExp(
-    `(###\\s+${escapedId}\\s+—[\\s\\S]*?- \\*\\*Evidence:\\*\\*)\\s+[^\\n]+`,
-    'm'
-  );
-  if (blockPattern.test(markdown)) {
-    return markdown.replace(blockPattern, `$1 ${evidence}`);
-  }
-  return markdown;
 }
 
 /**
@@ -177,6 +172,31 @@ async function main() {
     return;
   }
 
+  // T-609: fail fast on a duplicate/missing heading in either artifact,
+  // before any further prompt — refuses to proceed rather than letting a
+  // later write export itself onto a neighboring (e.g. archived) block
+  // sharing the same ID.
+  const backlogLoc = locateTaskBlock(backlog, taskId);
+  if (backlogLoc.count > 1) {
+    console.error(`${RED}Error: ${taskId} has ${backlogLoc.count} duplicate headings in BACKLOG.md — refusing to merge an ambiguous task.${RESET}`);
+    rl.close();
+    process.exitCode = 1;
+    return;
+  }
+  const taskStatusLoc = locateTaskBlock(taskStatus, taskId);
+  if (taskStatusLoc.count === 0) {
+    console.error(`${RED}Error: ${taskId} has no entry in TASK_STATUS.md — cannot merge (run --sync-status first).${RESET}`);
+    rl.close();
+    process.exitCode = 1;
+    return;
+  }
+  if (taskStatusLoc.count > 1) {
+    console.error(`${RED}Error: ${taskId} has ${taskStatusLoc.count} duplicate headings in TASK_STATUS.md — refusing to merge an ambiguous task.${RESET}`);
+    rl.close();
+    process.exitCode = 1;
+    return;
+  }
+
   // Prompt for commit hash
   let commitHash = await prompt(rl, "Commit hash (or 'none')");
 
@@ -218,21 +238,35 @@ async function main() {
     ? `commit: ${commitHash} — ${evidenceSummary}`
     : evidenceSummary;
 
-  // Update BACKLOG.md: change status from qa_passed to merged
-  let updatedBacklog = updateTaskStatus(backlog, taskId, 'merged');
-  writeUtf8(BACKLOG_MD, updatedBacklog);
-  console.log(`\n${GREEN}✓ BACKLOG.md — ${taskId} status → merged${RESET}`);
+  // Update BACKLOG.md: change status from qa_passed to merged. Bounded to
+  // the target block only (T-609) — a write that ultimately changes
+  // nothing does not print an unqualified success line.
+  const backlogResult = updateTaskField(backlog, taskId, 'Status', 'merged');
+  const backlogChanged = backlogResult.updated !== backlog;
+  if (backlogChanged) {
+    writeUtf8(BACKLOG_MD, backlogResult.updated);
+    console.log(`\n${GREEN}✓ BACKLOG.md — ${taskId} status → merged${RESET}`);
+  } else {
+    console.log(`\n${YELLOW}⚠ BACKLOG.md — ${taskId} Status already "merged" — no change, file not written${RESET}`);
+  }
 
-  // Update TASK_STATUS.md: change status, update evidence, move to completed
-  let updatedStatus = updateTaskStatus(taskStatus, taskId, 'merged');
-  updatedStatus = updateTaskEvidence(updatedStatus, taskId, evidence);
-  updatedStatus = moveToCompleted(updatedStatus, taskId);
+  // Update TASK_STATUS.md: change status, update evidence (insert-if-missing
+  // — a block lacking an Evidence line GAINS one, T-609), move to completed.
+  const statusResult = updateTaskField(taskStatus, taskId, 'Status', 'merged');
+  const statusChanged = statusResult.updated !== taskStatus;
+  const evidenceResult = updateTaskField(statusResult.updated, taskId, 'Evidence', evidence);
+  const evidenceChanged = evidenceResult.updated !== statusResult.updated;
+  const updatedStatus = moveToCompleted(evidenceResult.updated, taskId);
   writeUtf8(TASK_STATUS_MD, updatedStatus);
-  console.log(`${GREEN}✓ TASK_STATUS.md — ${taskId} status → merged, evidence recorded${RESET}`);
+  if (statusChanged || evidenceChanged) {
+    console.log(`${GREEN}✓ TASK_STATUS.md — ${taskId} status → merged, evidence recorded${RESET}`);
+  } else {
+    console.log(`${YELLOW}⚠ TASK_STATUS.md — ${taskId} Status/Evidence unchanged (moved to Recently completed tasks)${RESET}`);
+  }
 
   // Run validator
   try {
-    const output = execSync(`node "${VALIDATOR}"`, { stdio: 'pipe', encoding: 'utf8' });
+    const output = execSync(`node "${VALIDATOR}" "${ROOT}"`, { stdio: 'pipe', encoding: 'utf8' });
     if (output && output.trim()) {
       console.log(output.trim());
     }
