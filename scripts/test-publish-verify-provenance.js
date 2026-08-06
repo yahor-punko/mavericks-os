@@ -55,7 +55,7 @@ function git(cwd, args) {
 // given map of { relPath: content } committed at HEAD, and returns its dir.
 function makeFixtureRepo(prefix, files) {
   const dir = mkTempDir(prefix);
-  execFileSync('git', ['init', '-q', dir]);
+  execFileSync('git', ['init', '-q', '-b', 'main', dir]);
   git(dir, ['config', 'user.email', 'fixture@example.invalid']);
   git(dir, ['config', 'user.name', 'Fixture User']);
   for (const [relPath, content] of Object.entries(files)) {
@@ -687,7 +687,7 @@ function makeAssembledTree(prefix, files) {
   writeManifest(manifestPath, { ship: ['scripts/tool'], reset: {} });
 
   const cloneDir = mkTempDir('mavp-verify-t22-clone-');
-  execFileSync('git', ['init', '-q', cloneDir]);
+  execFileSync('git', ['init', '-q', '-b', 'main', cloneDir]);
   git(cloneDir, ['config', 'user.email', 'fixture@example.invalid']);
   git(cloneDir, ['config', 'user.name', 'Fixture User']);
   writeFile(path.join(cloneDir, 'scripts/tool'), '#!/bin/sh\necho hi\n');

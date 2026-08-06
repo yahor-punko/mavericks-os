@@ -20,6 +20,119 @@ const assert = require('node:assert');
 const REPO_ROOT = path.join(__dirname, '..');
 const AGENTS_DIR = path.join(REPO_ROOT, '.claude', 'agents');
 const AGENT_SPEC_PATH = path.join(REPO_ROOT, 'docs', 'AGENT_SPEC.md');
+const CLAUDE_MD_PATH = path.join(REPO_ROOT, 'CLAUDE.md');
+
+const TEMPLATE_HEADING = '## Sub-agent brief template';
+const COMPLETION_TOKEN_MARKER = 'MAVP_REPORT';
+
+// ---------------------------------------------------------------------------
+// Parse the "Sub-agent brief template" fenced block from a given doc, extract
+// its field-name set (line-initial "Name:" prefixes), and check its
+// "Before exiting" line references the completion-token marker.
+//
+// T-623: docs/AGENT_SPEC.md's copy of the brief template had silently
+// drifted from CLAUDE.md's — missing five fields (Adjacent docs read, Read
+// current main, Model, Effort, Turn budget) and a degraded "Before exiting"
+// line with no completion-token wording. Nothing previously asserted the two
+// templates stay in field-name parity; this guards that going forward.
+// Wording differences between the two copies are expected and NOT a
+// failure — only the field-name set and the completion-token marker are
+// checked.
+// ---------------------------------------------------------------------------
+
+function extractTemplateFence(fullText, fileLabel) {
+  const headingIdx = fullText.indexOf(TEMPLATE_HEADING);
+  assert.ok(
+    headingIdx !== -1,
+    `${fileLabel}: no "${TEMPLATE_HEADING}" heading found`
+  );
+  const afterHeading = fullText.slice(headingIdx);
+  const fenceMatch = afterHeading.match(/```\r?\n([\s\S]*?)\r?\n```/);
+  assert.ok(
+    fenceMatch,
+    `${fileLabel}: no fenced code block found after "${TEMPLATE_HEADING}" heading`
+  );
+  return fenceMatch[1];
+}
+
+function extractTemplateFieldNames(fenceBlock) {
+  const fieldNames = [];
+  const lines = fenceBlock.split(/\r?\n/);
+  for (const line of lines) {
+    const m = line.match(/^([A-Za-z][A-Za-z0-9_ ]*?):\s/);
+    if (m) {
+      fieldNames.push(m[1].trim());
+    }
+  }
+  return fieldNames;
+}
+
+function findBeforeExitingLine(fenceBlock) {
+  const lines = fenceBlock.split(/\r?\n/);
+  return lines.find((line) => /^Before exiting:\s/.test(line));
+}
+
+function checkTemplateParity(claudeMdText, agentSpecText) {
+  const failures = [];
+
+  const claudeFence = extractTemplateFence(claudeMdText, 'CLAUDE.md');
+  const specFence = extractTemplateFence(agentSpecText, 'docs/AGENT_SPEC.md');
+
+  const claudeFields = new Set(extractTemplateFieldNames(claudeFence));
+  const specFields = new Set(extractTemplateFieldNames(specFence));
+
+  assert.ok(
+    claudeFields.size > 0,
+    'CLAUDE.md: parsed zero field names from the brief template fence'
+  );
+  assert.ok(
+    specFields.size > 0,
+    'docs/AGENT_SPEC.md: parsed zero field names from the brief template fence'
+  );
+
+  const missingFromSpec = [...claudeFields].filter((f) => !specFields.has(f));
+  const missingFromClaude = [...specFields].filter((f) => !claudeFields.has(f));
+
+  for (const field of missingFromSpec) {
+    failures.push(
+      `[template-parity] field "${field}" is present in CLAUDE.md's brief ` +
+        `template but missing from docs/AGENT_SPEC.md's`
+    );
+  }
+  for (const field of missingFromClaude) {
+    failures.push(
+      `[template-parity] field "${field}" is present in docs/AGENT_SPEC.md's ` +
+        `brief template but missing from CLAUDE.md's`
+    );
+  }
+
+  const claudeBeforeExiting = findBeforeExitingLine(claudeFence);
+  const specBeforeExiting = findBeforeExitingLine(specFence);
+
+  assert.ok(
+    claudeBeforeExiting,
+    'CLAUDE.md: brief template has no "Before exiting:" line'
+  );
+  assert.ok(
+    specBeforeExiting,
+    'docs/AGENT_SPEC.md: brief template has no "Before exiting:" line'
+  );
+
+  if (!claudeBeforeExiting.includes(COMPLETION_TOKEN_MARKER)) {
+    failures.push(
+      `[template-parity] CLAUDE.md's "Before exiting" line does not reference ` +
+        `the completion-token marker ("${COMPLETION_TOKEN_MARKER}")`
+    );
+  }
+  if (!specBeforeExiting.includes(COMPLETION_TOKEN_MARKER)) {
+    failures.push(
+      `[template-parity] docs/AGENT_SPEC.md's "Before exiting" line does not ` +
+        `reference the completion-token marker ("${COMPLETION_TOKEN_MARKER}")`
+    );
+  }
+
+  return failures;
+}
 
 // ---------------------------------------------------------------------------
 // Parse .claude/agents/*.md frontmatter
@@ -131,6 +244,9 @@ function main() {
   assert.ok(agentSpecs.length > 0, 'No .claude/agents/*.md files found');
 
   const failures = [];
+
+  const claudeMdText = fs.readFileSync(CLAUDE_MD_PATH, 'utf8');
+  failures.push(...checkTemplateParity(claudeMdText, specText));
 
   for (const spec of agentSpecs) {
     const role = spec.name;

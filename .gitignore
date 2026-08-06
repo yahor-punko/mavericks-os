@@ -5,6 +5,12 @@ dist/
 coverage/
 .tmp/
 
+# Editor-local VS Code settings (T-577) — this repo's own .vscode/settings.json
+# is never committed. mavp-install.js seeds/merges VS Code worktree-exclusion
+# settings into TARGET projects (a separate, non-mavericks-tracked file), never
+# into this repo's own tree.
+.vscode/
+
 # Claude Code local settings
 .claude/settings.local.json
 .claude/mcp.json

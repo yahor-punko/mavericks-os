@@ -54,7 +54,7 @@ const FAKE_IDENTIFIER = `${FAKE_PREFIX}${FAKE_SEGMENT}`;
 
 function initGitRepo(root) {
   fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
-  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
   fs.copyFileSync(GUARD_SCRIPT_SRC, path.join(root, 'scripts', 'mavp-private-names-guard.js'));

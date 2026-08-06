@@ -37,7 +37,7 @@ function commitAt(repoPath, isoDate, message) {
 const scratch = makeScratchDir();
 
 try {
-  git(scratch, ['init', '--quiet']);
+  git(scratch, ['init', '--quiet', '-b', 'main']);
   git(scratch, ['config', 'user.name', 'Fixture Bot']);
   git(scratch, ['config', 'user.email', 'demo@example.invalid']);
 

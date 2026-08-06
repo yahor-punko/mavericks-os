@@ -61,7 +61,7 @@ function writeFile(filePath, content) {
 
 function initBareMirror() {
   const dir = mkTempDir('mavp-release-bare-');
-  execFileSync('git', ['init', '-q', '--bare'], { cwd: dir });
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main'], { cwd: dir });
   return dir;
 }
 

@@ -63,6 +63,12 @@ if [[ "${1-}" == "--help" ]]; then
   echo "                   Acknowledge a recheck: removes it from rechecks[]"
   echo "                   With --rearm: reschedule due = today + interval instead of removing"
   echo "  --reflect-skill <role>   Run skill reflection loop for a role (SkillOpt)"
+  echo "  --worktree-report  Classify every agent git worktree (dirty / unintegrated /"
+  echo "                   clean-and-integrated) via patch-equivalence (git cherry); read-only"
+  echo "                   Usage: --worktree-report [--main-ref <ref>] [--mtime-threshold <ms>] [--json]"
+  echo "  --prune-worktrees  Remove ONLY clean-and-integrated worktrees past the mtime safety"
+  echo "                   window; defaults to dry-run (prints what would be removed)"
+  echo "                   Usage: --prune-worktrees [--yes] [--main-ref <ref>] [--mtime-threshold <ms>]"
   echo "  --validate       Run the MavP validator (artifact sync check)"
   echo "  --check-sync     Compare agent/skill files in known projects against mavericks source"
   echo "  --install        Bootstrap Mavericks into a target project directory"
@@ -144,6 +150,12 @@ elif [[ "${1-}" == "--arm-recheck" ]]; then
 elif [[ "${1-}" == "--ack-recheck" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-ack-recheck.js" "$@"
+elif [[ "${1-}" == "--worktree-report" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-worktree-report.js" "$@"
+elif [[ "${1-}" == "--prune-worktrees" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-prune-worktrees.js" "$@"
 elif [[ "${1-}" == "--validate" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-validator.js" "$(pwd)" "$@"

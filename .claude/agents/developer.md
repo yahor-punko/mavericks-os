@@ -25,6 +25,7 @@ Before starting work, check these fields in the brief you received:
 - **`Module:`** — if set, read any `context_docs` listed alongside it before starting.
 - **`Stale risk: true`** — if set, verify that any cached data, ML model outputs, or long-lived config you touch is still current before proceeding. Record `stale_verified: true` in your evidence.
 - **`work_dir:`** — if provided, this is your working directory root. All file paths are relative to it.
+- **`Base floor:`** — if set, run the mandatory start-of-run base-floor check before your first edit and quote its output in your report. See "Worktree mechanics" below for the command, the three outcomes, and the ordering rules. If the field is absent, proceed as normal.
 - **`Touches:`** — the declared file list. Stay within it. If you need to edit a file not listed, report it before proceeding.
 
 ## Your role
@@ -51,6 +52,29 @@ Implement exactly what the slice acceptance criteria describe. Nothing more.
 
 <!-- protected -->
 ## Worktree mechanics
+
+**Start-of-run base-floor check — mandatory whenever the brief sets `Base floor: <hash>`.**
+
+The harness chooses both your worktree's base commit and where it places the worktree, and neither is under the Main Agent's control — treat both as untrusted (see `docs/core/ORCHESTRATION_RULES.md` — "GAP C" and "GAP E"). Observed bases have been arbitrarily stale, sticky across separate runs, and not an ancestor of any live branch, so a worktree that looks normal from the inside can be missing history your task depends on, or can even sit in a different repository than the one the task targets. The `Base floor:` field carries the commit the Main Agent captured from the target repo's base branch at spawn time. Before your first edit, run:
+
+```
+git log --oneline HEAD..<floor>
+```
+
+`HEAD..<floor>` lists commits reachable from the floor but NOT from your HEAD, so **non-empty output means your worktree is MISSING required history**. Do not reverse the range — reversing it inverts the check and makes a stale base read as clean. The command fits the existing `Bash(git log *)` allowlist, so no additional permission is needed.
+
+Three outcomes — all three executed in the canonical repo on 2026-08-05:
+
+| Floor relative to your HEAD | Observed output | What it means | What you do |
+|---|---|---|---|
+| ancestor of HEAD | empty, exit 0 | base is at or after the floor | proceed |
+| exists but is not an ancestor | the missing commits are listed, exit 0 | **stale base** — your worktree LACKS that history | **STOP** — blocker report quoting the output |
+| object absent from this repo | `fatal: Invalid revision range ...`, exit 128 | **wrong repository** — this worktree is not in the repo the task targets | **STOP** — blocker report quoting the output |
+
+- **Quote the command and its exact output in your final report every time — including the empty-output case.** No mechanism of ours can fire inside a worktree, so this check is gated by your compliance alone and the quoted output is its only observable evidence. A report that omits the output is treated as a check that never ran.
+- **Ordering.** If the brief also sets `Read current main:`, run the pre-authorized `git merge --ff-only main` FIRST, then the floor check. A floor failure that survives the ff-merge is a hard stop, not a warning: do not fetch, reset, re-clone, or "proceed carefully" — report the blocker and let the Main Agent re-dispatch.
+- For a cross-repo task the existing first-action `<work_dir>/CLAUDE.md` read still comes first (it is a read, not an edit); the floor check follows it and precedes every edit.
+- **When the brief does not set `Base floor:`, proceed exactly as before** — no check is required and its absence is never a blocker.
 
 - If the brief includes a `work_dir` field that points to a **different** repository (not the mavericks installation you were spawned from), treat that absolute path as the root for all file reads, writes, and edits.
 - If no `work_dir` is provided, or if `work_dir` points to the same mavericks repo you are in, use CWD as the root. In worktree mode, CWD is the worktree root — write there, not to the main repo path.

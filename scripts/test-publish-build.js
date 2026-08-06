@@ -121,7 +121,7 @@ function cloneRepoFixture(prefix) {
 
 function initBareMirror(prefix) {
   const dir = mkTempDir(prefix);
-  execFileSync('git', ['init', '-q', '--bare'], { cwd: dir });
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main'], { cwd: dir });
   return dir;
 }
 
@@ -1809,7 +1809,7 @@ function makePrepareCommitMsgHookDir(prefix, appendedLine) {
   // pass vacuously.
   {
     const probeRepo = mkTempDir('mavp-build-t523r2-shim-probe-');
-    execFileSync('git', ['init', '-q', probeRepo]);
+    execFileSync('git', ['init', '-q', '-b', 'main', probeRepo]);
     git(probeRepo, ['config', 'user.email', 'fixture@example.invalid']);
     git(probeRepo, ['config', 'user.name', 'Fixture User']);
     const probeResult = spawnSync('git', ['commit', '--allow-empty', '-q', '-m', 'probe subject'], {
@@ -2045,7 +2045,7 @@ function makePrepareCommitMsgHookDir(prefix, appendedLine) {
   // `-c user.email` are overruled, and the exported dates are recorded too. ---
   {
     const probeRepo = mkTempDir('mavp-build-t523r2-identity-probe-');
-    execFileSync('git', ['init', '-q', probeRepo]);
+    execFileSync('git', ['init', '-q', '-b', 'main', probeRepo]);
     execFileSync(
       'git',
       ['-c', `user.name=${PUBLIC_NAME}`, '-c', `user.email=${PUBLIC_EMAIL}`, 'commit', '-q', '--allow-empty', '-m', 'identity probe'],
@@ -2912,7 +2912,7 @@ function makeMessageAppendingGitWrapper(prefix, appendedLine) {
   // case cannot silently degrade into a second copy of Test 17).
   {
     const probeRepo = mkTempDir('mavp-build-t539-clean-probe-');
-    execFileSync('git', ['init', '-q', probeRepo]);
+    execFileSync('git', ['init', '-q', '-b', 'main', probeRepo]);
     git(probeRepo, ['config', 'user.email', 'fixture@example.invalid']);
     git(probeRepo, ['config', 'user.name', 'Fixture User']);
     const probeResult = spawnSync('git', ['commit', '--allow-empty', '-q', '-m', 'probe subject'], {
@@ -4258,7 +4258,7 @@ console.log('\nAll T-506 (build.js lock wiring) assertions passed.');
   const CRLF_CONTENT = Buffer.from('line one\r\nline two\r\n');
 
   function setupTextAutoRepo(dir) {
-    execFileSync('git', ['init', '-q', dir]);
+    execFileSync('git', ['init', '-q', '-b', 'main', dir]);
     git(dir, ['config', 'user.email', 'fixture@example.invalid']);
     git(dir, ['config', 'user.name', 'Fixture User']);
     writeFile(path.join(dir, '.gitattributes'), ['*', 'text=auto'].join(' ') + '\n');
@@ -4307,7 +4307,7 @@ console.log('\nAll T-506 (build.js lock wiring) assertions passed.');
   const ORIGINAL_CONTENT = Buffer.from('hello world\n');
 
   function setupFilterRepo(dir) {
-    execFileSync('git', ['init', '-q', dir]);
+    execFileSync('git', ['init', '-q', '-b', 'main', dir]);
     git(dir, ['config', 'user.email', 'fixture@example.invalid']);
     git(dir, ['config', 'user.name', 'Fixture User']);
     // A clean filter that visibly rewrites bytes — deterministic, no
@@ -4369,7 +4369,7 @@ console.log('\nAll T-506 (build.js lock wiring) assertions passed.');
   const PRE_EXPANDED_MARKER = Buffer.from('$Id: ' + '0123456789abcdef0123456789abcdef01234567' + ' $\n');
 
   function setupIdentRepo(dir) {
-    execFileSync('git', ['init', '-q', dir]);
+    execFileSync('git', ['init', '-q', '-b', 'main', dir]);
     git(dir, ['config', 'user.email', 'fixture@example.invalid']);
     git(dir, ['config', 'user.name', 'Fixture User']);
     writeFile(path.join(dir, '.gitattributes'), '* ident\n');

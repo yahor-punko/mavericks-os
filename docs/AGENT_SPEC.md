@@ -11,15 +11,21 @@ Role: [developer | product-docs | technical-writer | qa | ux | security-reviewer
 Slice: T-XXX — [title from BACKLOG.md]
 Goal: [one sentence — what this sub-agent must achieve]
 work_dir: [absolute path to target repo]  # cross-repo only — OMIT for same-repo (mavericks) tasks; developer uses CWD (worktree root) by default
+Adjacent docs read: [cross-repo tasks only — list each <repo>/CLAUDE.md read before starting, found or not found. Omit for same-repo tasks.]
 Module: [module id from docs/MODULES.md, if applicable — e.g. web-panel, antispam]
 Repo: [repo name(s) this task touches — e.g. example-service, or example-service, mavericks]
 Stale risk: [true | false — set true if this task touches cached data, ML models, or long-lived config]
+Read current main: [optional — set when the task must READ current-main state; pre-authorizes `git merge --ff-only main` from the worktree root as the sub-agent's first step, run before the Base floor check below when both are set. Omit otherwise.]
+Base floor: [target repo's base-branch head hash at spawn time — REQUIRED for cross-repo and branch-based-repo worktree spawns, recommended otherwise; the developer runs `git log --oneline HEAD..<floor>` before any edit and quotes the output. See "Base floor" below.]
+Model: [opus | sonnet]     # optional — only include when escalating a worker away from its sonnet default; see "Model selection" below
+Effort: [medium | high | xhigh | max]   # optional — only include when deviating from the session default; see "Effort selection" below
+Turn budget: [role's maxTurns from the "Per-role maxTurns table" below]   # optional — fill on a retry after a cap-hit, or any spawn at risk of approaching its cap; see "Turn budget selection" below
 Test scope: [worktree developer only — seed a `node scripts/run-tests.js --filter <fragment>` baseline; the developer extends it with its own test files and grep-derived coverage and reports the delta; never instruct the full suite in a worktree — see docs/core/ORCHESTRATION_RULES.md — "Test-execution scope (worktree developers)"]
 Files to modify: [explicit list]
 What NOT to change: [boundaries — other files, other tasks]
 Definition of done: [acceptance criteria verbatim from BACKLOG.md]
 Report back: changed files + line ranges, confirmation criteria met, any blockers
-Before exiting: commit all changes with a meaningful message.
+Before exiting: commit all changes with a meaningful message, then end the report with the completion token — literal last line, `MAVP_REPORT role=<role> task=<T-NNN|n/a> verdict=<done|blocked|needs_fix|pass|fail>` — see "Report completion token" below.
 ```
 
 ## Field descriptions
@@ -55,6 +61,23 @@ The validator warns when a task in `in_progress` or later lacks a Repo: field.
 Optional. Set to `true` when the task touches data or configuration that might be outdated (e.g. ML model weights, cached feature flags, third-party API contracts). When `stale_risk: true`, the evidence block in TASK_STATUS.md must include `stale_verified: true` before the task can advance without a validator warning.
 
 Declared in BACKLOG.md as: `- **Stale risk:** true`
+
+### Base floor
+Optional field, **required for cross-repo spawns and for branch-based target repos**, recommended otherwise. Brief-only — it has no BACKLOG.md counterpart.
+
+Carries the hash the Main Agent captured from the target repo's base branch immediately before dispatch (`git -C <target-repo> rev-parse --short <base-branch>`). The harness owns both the base commit a worktree is branched from and the repository it is placed under, and constrains neither on request — observed bases have been arbitrarily stale, sticky across separate runs, and not an ancestor of any live branch, and a task targeting one repo has been given a worktree under another. `Base floor:` is what makes that placement measurable instead of assumed.
+
+The developer runs `git log --oneline HEAD..<floor>` before its first edit and quotes the exact output in its report:
+
+| Output | Meaning | Action |
+|---|---|---|
+| empty (exit 0) | base is at or after the floor | proceed |
+| commits listed (exit 0) | stale base — the worktree lacks that history | stop, blocker report |
+| `fatal: Invalid revision range` (exit 128) | wrong repository | stop, blocker report |
+
+The range direction matters: `HEAD..<floor>` lists commits reachable from the floor but not from HEAD, so non-empty output means the worktree is *missing* required history. When `Read current main:` is also set, the pre-authorized `git merge --ff-only main` runs first and this check second; a floor failure surviving the ff-merge is a hard stop. When the field is omitted the developer proceeds exactly as before, so no existing brief flow changes retroactively.
+
+Enforcement is by discipline, not mechanism — no hook of ours can fire inside a worktree. The quoted output is the compensating control: it makes compliance checkable from the report artifact. See `.claude/agents/developer.md` — "Worktree mechanics" for the developer-side contract and `docs/core/ORCHESTRATION_RULES.md` — "GAP C"/"GAP E" for the Main-Agent-side duties and the grounding measurements.
 
 ### commit: in evidence
 All tasks with `merged` status must include `commit: <hash>` in the evidence field in TASK_STATUS.md. The validator will block (exit code 2) on merged tasks without a commit hash in the evidence.

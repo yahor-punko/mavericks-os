@@ -80,7 +80,7 @@ const CLOSE_SESSION_SCRIPT = path.join(__dirname, 'mavp-operator-close-session.j
 function makeFixtureRepo() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-close-session-fixture-'));
 
-  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
   execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
 
@@ -274,7 +274,7 @@ const SYNC_STATUS_SCRIPT = path.join(__dirname, 'mavp-operator-sync-status.js');
 function makeMidWaveFixtureRepo() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t438-fixture-'));
 
-  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
   execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
 
@@ -469,7 +469,7 @@ function readProcessState(dir) {
 function makeOneOpenTaskFixtureRepo(waveNumber) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t445-open-fixture-'));
 
-  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
   execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
 
@@ -543,7 +543,7 @@ function makeOneOpenTaskFixtureRepo(waveNumber) {
 function makeAlreadyMergedFixtureRepo(waveNumber) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t445-merged-fixture-'));
 
-  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
   execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
 
@@ -742,7 +742,7 @@ function makeRemoteFixtureRepo() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t454-remote-fixture-'));
   const bareDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t454-bare-'));
 
-  execFileSync('git', ['init', '-q', '--bare'], { cwd: bareDir });
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main'], { cwd: bareDir });
   execFileSync('git', ['-c', 'init.defaultBranch=main', 'init', '-q'], { cwd: dir });
   execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
@@ -971,7 +971,7 @@ function seedStateFilesT530(dir) {
 // the drift checkVersionBump() reacts to. Returns the repo dir.
 function makeVersionBumpFixtureRepo(version) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 't530-fixture-'));
-  gitT530(dir, ['init', '-q']);
+  gitT530(dir, ['init', '-q', '-b', 'main']);
   gitT530(dir, ['config', 'user.email', 'demo@example.invalid']);
   gitT530(dir, ['config', 'user.name', 'Fixture User']);
 
@@ -996,7 +996,7 @@ function makeVersionBumpFixtureRepo(version) {
 // prefixed).
 function makeMirrorFixtureRepo(taggedVersions) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 't530-mirror-'));
-  gitT530(dir, ['init', '-q']);
+  gitT530(dir, ['init', '-q', '-b', 'main']);
   gitT530(dir, ['config', 'user.email', 'demo@example.invalid']);
   gitT530(dir, ['config', 'user.name', 'Mirror Fixture']);
   gitT530(dir, ['commit', '-q', '--allow-empty', '-m', 'fixture: mirror init']);
@@ -1186,7 +1186,7 @@ console.log('All T-530 assertions passed.');
 {
   const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t542-fixture-'));
 
-  execFileSync('git', ['init', '-q'], { cwd: repoDir });
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repoDir });
   execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: repoDir });
   execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: repoDir });
 

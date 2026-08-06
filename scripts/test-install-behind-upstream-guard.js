@@ -77,7 +77,7 @@ function git(args, cwd) {
  * Build a bare-ish "upstream" repo with one commit at `root`.
  */
 function buildUpstreamRepo(root) {
-  git(['init', '--quiet'], root);
+  git(['init', '--quiet', '-b', 'main'], root);
   git(['config', 'user.email', 'test@example.com'], root);
   git(['config', 'user.name', 'test'], root);
   fs.writeFileSync(path.join(root, 'f.txt'), 'one\n', 'utf8');
@@ -137,7 +137,7 @@ function buildPlainFixtureInstall(root, version) {
  */
 function buildNoUpstreamFixtureInstall(root, version) {
   buildPlainFixtureInstall(root, version);
-  git(['init', '--quiet'], root);
+  git(['init', '--quiet', '-b', 'main'], root);
   git(['config', 'user.email', 'test@example.com'], root);
   git(['config', 'user.name', 'test'], root);
   git(['add', '-A'], root);

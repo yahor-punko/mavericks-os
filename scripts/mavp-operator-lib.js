@@ -3812,6 +3812,309 @@ function getCommitHashesReachableFromHead(root) {
   return getCommitHashesReachable(root, 'HEAD');
 }
 
+/**
+ * Default mtime safety threshold (ms) for worktree prune eligibility (T-559).
+ * A worktree whose directory was touched more recently than this is never
+ * prunable, regardless of classification — this exists specifically to
+ * protect a just-spawned, still-clean agent worktree: `git worktree add`
+ * checks out files at creation time, so a brand-new worktree that hasn't
+ * been edited yet is trivially "clean-and-integrated" (no dirty changes, no
+ * commits ahead of main yet) even though a live agent is about to start
+ * working in it. One hour is chosen because it comfortably outlasts the
+ * setup window between worktree creation and a sub-agent's first commit
+ * (typically seconds to minutes) while still letting a truly abandoned
+ * worktree (hours to days idle) become prunable on the next run. Overridable
+ * per-call via `options.mtimeThresholdMs` in classifyWorktrees() — no env
+ * var, since every caller already goes through that function.
+ */
+const WORKTREE_PRUNE_MTIME_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Resolve a filesystem path to its canonical real path, tolerating a path
+ * that doesn't exist (falls back to path.resolve) so callers never throw
+ * comparing a live worktree path against one that has already been removed.
+ */
+function safeRealpath(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/**
+ * Parse `git worktree list --porcelain` into structured entries. Each block
+ * is separated by a blank line; fields are `worktree <path>`, `HEAD <hash>`,
+ * `branch refs/heads/<name>` (or the bare tokens `detached`/`bare`/`locked`/
+ * `prunable`). Degrades to `[]` (never throws) when `root` is not a git
+ * repository or git is unavailable.
+ *
+ * @param {string} root - Absolute path to any worktree of the repo (worktree
+ *   list is shared across all linked worktrees of the same repo).
+ * @returns {Array<{path:string, head:string|null, branch:string|null, detached:boolean, bare:boolean, locked:boolean, prunable:boolean}>}
+ */
+function listGitWorktrees(root) {
+  try {
+    const output = cp.execFileSync('git', ['worktree', 'list', '--porcelain'], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const blocks = output.split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
+    return blocks
+      .map((block) => {
+        const lines = block.split('\n');
+        const entry = {
+          path: null,
+          head: null,
+          branch: null,
+          detached: false,
+          bare: false,
+          locked: false,
+          prunable: false,
+        };
+        for (const line of lines) {
+          if (line.startsWith('worktree ')) entry.path = line.slice('worktree '.length).trim();
+          else if (line.startsWith('HEAD ')) entry.head = line.slice('HEAD '.length).trim();
+          else if (line.startsWith('branch ')) {
+            entry.branch = line.slice('branch '.length).trim().replace(/^refs\/heads\//, '');
+          } else if (line === 'detached') entry.detached = true;
+          else if (line === 'bare') entry.bare = true;
+          else if (line.startsWith('locked')) entry.locked = true;
+          else if (line.startsWith('prunable')) entry.prunable = true;
+        }
+        return entry;
+      })
+      .filter((e) => e.path);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * True when `worktreePath` has uncommitted changes (working tree or index),
+ * false when clean, null when the check cannot be performed (missing
+ * directory, broken worktree, git failure) — callers must treat null
+ * conservatively (never as "clean").
+ */
+function isWorktreeDirty(worktreePath) {
+  try {
+    const output = cp.execFileSync('git', ['status', '--porcelain'], {
+      cwd: worktreePath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return output.trim().length > 0;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Classify a ref's commits-ahead-of-mainRef by PATCH equivalence (`git
+ * cherry`), not raw reachability. `git cherry <mainRef> <ref>` compares by
+ * patch id: a line prefixed `-` means an equivalent patch is already
+ * reachable from mainRef (e.g. the origin of a cherry-picked commit); a line
+ * prefixed `+` means no equivalent exists yet. Raw reachability
+ * (`merge-base --is-ancestor`, `branch --merged`) is unusable here because
+ * this project integrates by cherry-pick — every worktree tip is unreachable
+ * from mainRef by construction even when its work is fully, correctly
+ * integrated.
+ *
+ * @returns {'integrated'|'unintegrated'|'unknown'} 'integrated' when there are
+ *   no commits ahead of mainRef at all, or every commit ahead has a patch
+ *   equivalent already in mainRef; 'unintegrated' when at least one commit
+ *   ahead has no patch equivalent; 'unknown' when the check itself fails
+ *   (missing ref, git failure) — callers must treat 'unknown' conservatively
+ *   (never as "integrated").
+ */
+function getPatchEquivalenceStatus(root, mainRef, ref) {
+  try {
+    const output = cp.execFileSync('git', ['cherry', mainRef, ref], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const lines = output.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (lines.length === 0) return 'integrated';
+    return lines.some((l) => l.startsWith('+')) ? 'unintegrated' : 'integrated';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * fs.statSync(path).mtimeMs, degrading to null (never throws) when the
+ * directory can't be stat'd (e.g. already removed).
+ */
+function getWorktreeDirectoryMtimeMs(worktreePath) {
+  try {
+    return fs.statSync(worktreePath).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Typed signal for "mainRef does not resolve to a commit in this repo" (T-633)
+ * — a caller-level precondition failure, distinct from the per-worktree
+ * `getPatchEquivalenceStatus` → 'unknown' fallback (a single broken worktree,
+ * preserved as-is). Thrown by classifyWorktrees() BEFORE any per-worktree
+ * work happens, so a caller can never mistake "I could not check at all" for
+ * a normal (even if empty) classified result — see the doc comment on
+ * classifyWorktrees() for the full rationale. Callers distinguish it from
+ * any other thrown error via `instanceof UnresolvableMainRefError` (or the
+ * `code === 'UNRESOLVABLE_MAIN_REF'` property, for callers that can't import
+ * the class directly); `.mainRef` carries the offending ref string.
+ */
+class UnresolvableMainRefError extends Error {
+  constructor(mainRef) {
+    super(`mainRef '${mainRef}' does not resolve to a commit in this repo`);
+    this.name = 'UnresolvableMainRefError';
+    this.code = 'UNRESOLVABLE_MAIN_REF';
+    this.mainRef = mainRef;
+  }
+}
+
+/**
+ * True when `ref` resolves to a commit in `root`'s repo (via `git rev-parse
+ * --verify --quiet <ref>^{commit}`), false otherwise. Never throws — a
+ * resolution failure (bad ref, not a git repo) is exactly what `false`
+ * means.
+ */
+function refResolvesToCommit(root, ref) {
+  try {
+    cp.execFileSync('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], {
+      cwd: root,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Classify every linked (non-primary) worktree of `root`'s repo into exactly
+ * one of three classes (T-559):
+ *   - 'dirty' — uncommitted changes present (working tree or index).
+ *   - 'unintegrated' — clean, but at least one commit ahead of mainRef has no
+ *     patch-equivalent commit reachable from mainRef (see
+ *     getPatchEquivalenceStatus doc comment for why this must be
+ *     patch-equivalence, not raw reachability). Also the conservative
+ *     fallback when a single worktree's own dirty/patch status can't be
+ *     determined (broken worktree, missing object) — that per-entry fallback
+ *     is intentionally preserved and must never be confused with the
+ *     caller-level precondition failure below.
+ *   - 'clean-and-integrated' — clean, and every commit ahead of mainRef (if
+ *     any) is patch-equivalent to a commit already in mainRef.
+ *
+ * `prunable` is additionally gated on the mtime safety condition: a
+ * clean-and-integrated worktree whose directory mtime is within
+ * `mtimeThresholdMs` of `now` is never prunable, protecting a just-spawned
+ * live agent's still-clean worktree (see WORKTREE_PRUNE_MTIME_THRESHOLD_MS).
+ *
+ * The primary/main worktree (the one at `root` itself, or any `bare` entry)
+ * is always excluded from the result.
+ *
+ * T-633: `mainRef` is verified ONCE up front, before any per-worktree work,
+ * via `refResolvesToCommit()`. An unresolvable `mainRef` (e.g. the default
+ * `'main'` on a repo whose default branch is actually `master`) throws
+ * `UnresolvableMainRefError` rather than silently falling every worktree
+ * through to 'unintegrated' — a caller-level precondition failure poisons
+ * every entry identically and must never be confused with the honest,
+ * per-worktree 'unknown' fallback preserved above.
+ *
+ * @param {string} root - Absolute path to the repo (any worktree of it).
+ * @param {object} [options]
+ * @param {string} [options.mainRef='main'] - Ref to compare patch equivalence against.
+ * @param {number} [options.now=Date.now()] - Reference "now" timestamp (ms), for deterministic tests.
+ * @param {number} [options.mtimeThresholdMs=WORKTREE_PRUNE_MTIME_THRESHOLD_MS] - mtime safety threshold (ms).
+ * @returns {Array<{path:string, branch:string|null, head:string|null, classification:string, dirty:boolean|null, patchStatus:string, mtimeMs:number|null, ageMs:number|null, recentMtime:boolean, prunable:boolean}>}
+ * @throws {UnresolvableMainRefError} when `mainRef` does not resolve to a commit.
+ */
+function classifyWorktrees(root, options = {}) {
+  const mainRef = options.mainRef || 'main';
+  const now = options.now != null ? options.now : Date.now();
+  const mtimeThresholdMs =
+    options.mtimeThresholdMs != null ? options.mtimeThresholdMs : WORKTREE_PRUNE_MTIME_THRESHOLD_MS;
+
+  if (!refResolvesToCommit(root, mainRef)) {
+    throw new UnresolvableMainRefError(mainRef);
+  }
+
+  const worktrees = listGitWorktrees(root);
+  if (worktrees.length === 0) return [];
+
+  const rootReal = safeRealpath(root);
+  const linked = worktrees.filter((wt) => !wt.bare && safeRealpath(wt.path) !== rootReal);
+
+  return linked.map((wt) => {
+    const ref = wt.branch || wt.head;
+    const dirty = isWorktreeDirty(wt.path);
+    const patchStatus = ref ? getPatchEquivalenceStatus(root, mainRef, ref) : 'unknown';
+
+    let classification;
+    if (dirty === true) {
+      classification = 'dirty';
+    } else if (dirty === null || patchStatus === 'unintegrated' || patchStatus === 'unknown') {
+      classification = 'unintegrated';
+    } else {
+      classification = 'clean-and-integrated';
+    }
+
+    const mtimeMs = getWorktreeDirectoryMtimeMs(wt.path);
+    const ageMs = mtimeMs != null ? now - mtimeMs : null;
+    // Unknown mtime (directory unreadable) is treated as "recent" — the safe
+    // default is to withhold pruning, not to assume it's safely stale.
+    const recentMtime = ageMs != null ? ageMs < mtimeThresholdMs : true;
+
+    const prunable = classification === 'clean-and-integrated' && !recentMtime;
+
+    return {
+      path: wt.path,
+      branch: wt.branch,
+      head: wt.head,
+      classification,
+      dirty,
+      patchStatus,
+      mtimeMs,
+      ageMs,
+      recentMtime,
+      prunable,
+    };
+  });
+}
+
+/**
+ * Roll a classifyWorktrees() result up into total + per-class counts. Shared
+ * by the `--worktree-report` flag and the `--close-session` one-line
+ * advisory so there is exactly one summarization implementation (T-559).
+ */
+function summarizeWorktreeClassification(entries) {
+  const counts = { dirty: 0, unintegrated: 0, 'clean-and-integrated': 0 };
+  for (const e of entries) {
+    if (Object.prototype.hasOwnProperty.call(counts, e.classification)) counts[e.classification] += 1;
+  }
+  return { total: entries.length, counts };
+}
+
+/**
+ * Render the one-line worktree-hygiene advisory string consumed by
+ * `--close-session` (both interactive and non-interactive modes). Also
+ * reused verbatim as the summary line at the top of `--worktree-report`'s
+ * fuller per-worktree output, so the two surfaces never drift apart.
+ */
+function formatWorktreeHygieneAdvisory(entries) {
+  const { total, counts } = summarizeWorktreeClassification(entries);
+  const prunableCount = entries.filter((e) => e.prunable).length;
+  return (
+    `Worktree hygiene: ${total} agent worktree(s) — ${counts.dirty} dirty, ` +
+    `${counts.unintegrated} unintegrated, ${counts['clean-and-integrated']} clean-and-integrated ` +
+    `(${prunableCount} prunable)`
+  );
+}
+
 module.exports = {
   ROOT,
   ackRecheck,
@@ -3825,6 +4128,7 @@ module.exports = {
   buildDeployQueue,
   buildTaskStatusEntry,
   classifyNextAction,
+  classifyWorktrees,
   clip,
   collectOperatorData,
   computeDueRechecks,
@@ -3837,12 +4141,15 @@ module.exports = {
   findPreviousCloseSessionCommit,
   findTaskBlockById,
   formatIsoTime,
+  formatWorktreeHygieneAdvisory,
   generateProcessStateMd,
   getCommitHashesReachable,
   getCommitHashesReachableFromHead,
   getDeployPendingForRepo,
   getFilesChangedSincePreviousCloseSession,
   getNextTaskId,
+  getPatchEquivalenceStatus,
+  getWorktreeDirectoryMtimeMs,
   headingLeadingTaskId,
   IN_FLIGHT_STATUSES,
   insertIntoActiveTasks,
@@ -3853,6 +4160,8 @@ module.exports = {
   isShallowRepository,
   isTaskHeadingFor,
   isValidHashFormat,
+  isWorktreeDirty,
+  listGitWorktrees,
   locateTaskBlock,
   lookupTaskTitle,
   mergeCommitEvidence,
@@ -3889,14 +4198,18 @@ module.exports = {
   resolveModuleRegistryPath,
   resolveRepoMapPath,
   resolveTaskOrigin,
+  safeRealpath,
   scoreTrajectory,
   setBlockField,
   shortenSessionKey,
   summarizeTrajectories,
+  summarizeWorktreeClassification,
   TERMINAL_SKIP_STATUSES,
   truncateTaskBlockAtLevel2Heading,
+  UnresolvableMainRefError,
   updateLastTaskId,
   updateTaskField,
+  WORKTREE_PRUNE_MTIME_THRESHOLD_MS,
   writeContextBundle,
   writeTrajectories,
   writeUtf8,

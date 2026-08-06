@@ -742,6 +742,111 @@ function mergeManagedHooks(targetDir, opts = {}) {
   return changeCount;
 }
 
+// --- VS Code worktree-exclusion settings (T-577) ---
+//
+// Field report 2026-08-02: the harness creates a `.claude/worktrees/agent-*`
+// directory per background sub-agent and never removes it. Left unexcluded,
+// VS Code's file explorer, search index, and file watcher all surface these
+// accumulated checkouts, and its Git extension has repeatedly been observed
+// treating the pile as part of (or alongside) the real repository state —
+// down to an operator asking why ~10K lines of changes were queued.
+//
+// Pattern used for the two "hide from listing" surfaces (files.exclude,
+// search.exclude) is the bare directory glob; files.watcherExclude uses the
+// same pattern with a trailing /** — this mirrors VS Code's own shipped
+// defaults (e.g. "**/.git": true for files.exclude/search.exclude vs.
+// "**/.git/objects/**": true for files.watcherExclude), where the watcher
+// key needs the deep-glob suffix to stop recursive watching of the
+// directory's contents.
+const VSCODE_WORKTREES_EXCLUDE_PATTERN = '**/.claude/worktrees';
+const VSCODE_WORKTREES_WATCHER_EXCLUDE_PATTERN = '**/.claude/worktrees/**';
+
+// key -> the exact glob pattern seeded under that key. Order matters only for
+// the printed console lines (deterministic, easier to read in evidence).
+const VSCODE_EXCLUDE_KEY_PATTERNS = [
+  { key: 'files.exclude', pattern: VSCODE_WORKTREES_EXCLUDE_PATTERN },
+  { key: 'search.exclude', pattern: VSCODE_WORKTREES_EXCLUDE_PATTERN },
+  { key: 'files.watcherExclude', pattern: VSCODE_WORKTREES_WATCHER_EXCLUDE_PATTERN },
+];
+
+/**
+ * Idempotent, additive merge of the three VS Code settings that hide
+ * `.claude/worktrees/` from VS Code's file explorer, search, and file
+ * watcher. Mirrors the mergeManagedHooks() precedent above:
+ *   (a) reads (or seeds) the target project's .vscode/settings.json;
+ *   (b) for each of the three managed keys, creates the key as an object if
+ *       absent, then adds ONLY the single managed glob->true sub-entry —
+ *       every other existing key (managed or not) and every other sub-entry
+ *       already present under a managed key survives byte-identical;
+ *   (c) never overwrites a pre-existing value for the managed glob sub-entry
+ *       — if it's already present with any value other than `true`, that is
+ *       treated as a deliberate user override and left untouched, with a
+ *       printed notice rather than a silent overwrite or a silent skip;
+ *   (d) if already present with value `true` (i.e. a prior run of this same
+ *       merge), it's a no-op for that key — this is what makes a second run
+ *       produce zero file changes;
+ *   (e) prints one console line per change made, and a visible warning
+ *       (never a silent skip) when .vscode/settings.json exists but is
+ *       malformed JSON, or when a managed key itself holds a non-object
+ *       value (e.g. a boolean) that can't be merged into.
+ *
+ * Deliberately does NOT seed `git.openRepositoryInParentFolders` — see
+ * docs/core/BOOTSTRAP_GUIDE.md, "VS Code worktree exclusion" for why: it is
+ * repo-global (affects every parent-folder repo the workspace might sit
+ * inside, not just this one) with legitimate-use collateral, AND it is the
+ * wrong lever for this specific problem — it governs discovery of repos in
+ * PARENT folders, not the SUBFOLDER nested-repo case `.claude/worktrees/`
+ * actually is.
+ *
+ * Returns the number of individual glob-key additions made (0 if none — all
+ * three already present as `true`, or malformed JSON caused an early return).
+ */
+function mergeVscodeWorktreeExclusions(targetDir) {
+  const vscodeDir = path.join(targetDir, '.vscode');
+  const settingsPath = path.join(vscodeDir, 'settings.json');
+  let settings = {};
+  if (fs.existsSync(settingsPath)) {
+    const raw = fs.readFileSync(settingsPath, 'utf8');
+    try {
+      settings = JSON.parse(raw);
+    } catch (e) {
+      console.log(`  ${RED}${BOLD}WARNING:${RESET} ${RED}.vscode/settings.json is malformed JSON — VS Code worktree-exclusion merge skipped (${e.message})${RESET}`);
+      return 0;
+    }
+  }
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    console.log(`  ${RED}${BOLD}WARNING:${RESET} ${RED}.vscode/settings.json is not a JSON object — VS Code worktree-exclusion merge skipped${RESET}`);
+    return 0;
+  }
+
+  let changeCount = 0;
+  for (const { key, pattern } of VSCODE_EXCLUDE_KEY_PATTERNS) {
+    if (!(key in settings)) {
+      settings[key] = {};
+    }
+    if (settings[key] === null || typeof settings[key] !== 'object' || Array.isArray(settings[key])) {
+      console.log(`  ${YELLOW}notice${RESET}   .vscode/settings.json ${DIM}(${key} has a non-object value — left untouched, ${pattern} not added)${RESET}`);
+      continue;
+    }
+    if (pattern in settings[key]) {
+      if (settings[key][pattern] !== true) {
+        console.log(`  ${YELLOW}notice${RESET}   .vscode/settings.json ${DIM}(${key}["${pattern}"] already set to ${JSON.stringify(settings[key][pattern])} — left untouched, not overwritten)${RESET}`);
+      }
+      continue; // already present (true, i.e. our own prior run, or a conflicting value) — never touched
+    }
+    settings[key][pattern] = true;
+    changeCount++;
+    console.log(`  ${GREEN}new${RESET}     .vscode/settings.json ${DIM}(${key}["${pattern}"] added)${RESET}`);
+  }
+
+  if (changeCount > 0) {
+    if (!fs.existsSync(vscodeDir)) fs.mkdirSync(vscodeDir, { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+  }
+
+  return changeCount;
+}
+
 /**
  * Ensure a single entry is present in the target project's .gitignore. Idempotent.
  * Returns 'created' | 'added' | 'exists'.
@@ -1398,6 +1503,13 @@ async function main() {
       updatedCount += hookChanges;
     }
 
+    // Merge VS Code worktree-exclusion settings (T-577) — idempotent, additive:
+    // see mergeVscodeWorktreeExclusions() above for the full contract. Independent
+    // of --no-hooks (that flag scopes Claude Code hooks specifically, not editor
+    // settings), so it always runs on --update.
+    const vscodeChanges = mergeVscodeWorktreeExclusions(targetDir);
+    updatedCount += vscodeChanges;
+
     // Backfill/migrate permissions.defaultMode into shared .claude/settings.json.
     // Three-way logic (T-319):
     //   (a) key absent               → seed 'bypassPermissions'
@@ -1793,6 +1905,13 @@ async function main() {
     }
   }
 
+  // Merge VS Code worktree-exclusion settings (T-577) — unconditional on fresh
+  // install (unlike the settings.local.json block above, not gated behind "only
+  // if missing"): additive/idempotent, so it's safe to run whether or not
+  // .vscode/settings.json already exists. See mergeVscodeWorktreeExclusions().
+  const vscodeChangesFresh = mergeVscodeWorktreeExclusions(targetDir);
+  if (vscodeChangesFresh > 0) artifactsCreated += vscodeChangesFresh;
+
   // Append mavericks patterns to .npmignore and .dockerignore
   for (const ignoreFile of ['.npmignore', '.dockerignore']) {
     const ignorePath = path.join(targetDir, ignoreFile);
@@ -1874,4 +1993,7 @@ module.exports = {
   composePostToolUseHookCommand,
   isManagedPostToolUseCommand,
   isLegacySeededValidateHookCommand,
+  mergeVscodeWorktreeExclusions,
+  VSCODE_WORKTREES_EXCLUDE_PATTERN,
+  VSCODE_WORKTREES_WATCHER_EXCLUDE_PATTERN,
 };

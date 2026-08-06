@@ -102,7 +102,7 @@ function commit(cwd, message) {
 function buildFixtureRepo() {
   const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 't450-xsguard-'));
 
-  git(TMP, ['init', '-q']);
+  git(TMP, ['init', '-q', '-b', 'main']);
   git(TMP, ['config', 'user.email', 'demo@example.invalid']);
   git(TMP, ['config', 'user.name', 'Test User']);
   git(TMP, ['config', 'commit.gpgsign', 'false']);
@@ -614,7 +614,7 @@ for (const badType of ['visual', 'manual']) {
 function buildDefectBFixture() {
   const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 't616-rootarg-'));
 
-  git(TMP, ['init', '-q']);
+  git(TMP, ['init', '-q', '-b', 'main']);
   git(TMP, ['config', 'user.email', 'demo@example.invalid']);
   git(TMP, ['config', 'user.name', 'Test User']);
   git(TMP, ['config', 'commit.gpgsign', 'false']);

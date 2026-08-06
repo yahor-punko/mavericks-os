@@ -71,7 +71,7 @@ const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 't401-manifest-guard-'));
 
 function initGitRepo(root) {
   fs.mkdirSync(root, { recursive: true });
-  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
 }
 
 function gitAdd(root, args) {

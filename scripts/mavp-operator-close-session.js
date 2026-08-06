@@ -46,7 +46,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode, printRepoIdentityHeader, getCommitHashesReachable, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode, printRepoIdentityHeader, getCommitHashesReachable, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 // T-530: checkVersionBump()'s release-awareness reads the public mirror's
 // tags EXCLUSIVELY through these check-changelog-frozen.js exports — never
@@ -1238,6 +1238,41 @@ function buildWaveCompletionAnnouncement(waveComplete, sessionWave, remainingTas
   return `Wave ${sessionWave} stays open — ${reasons}`;
 }
 
+/**
+ * T-559: build the one-line worktree-hygiene advisory printed by both
+ * --close-session modes — total worktree count and per-class counts, from
+ * the SAME classifyWorktrees()/formatWorktreeHygieneAdvisory() implementation
+ * the `--worktree-report` and `--prune-worktrees` flags use, so all three
+ * surfaces can never disagree. Fires only when `<root>/.claude/worktrees`
+ * exists and is non-empty — never prunes anything itself, purely advisory.
+ * Degrades to null (no line printed) when the directory is absent/empty or
+ * classification fails for any reason (e.g. `root` isn't a git repo) — EXCEPT
+ * an unresolvable `mainRef` (T-633), which degrades to a single line naming
+ * the unresolved ref instead of silently going quiet: close-session must
+ * complete either way (never throw here), but "nothing to report" and "the
+ * classifier couldn't check" are different facts and must read differently.
+ *
+ * @param {string} root - project root (ROOT — may differ from the mavericks
+ *   installation for bootstrapped projects).
+ * @returns {string|null}
+ */
+function buildWorktreeHygieneAdvisory(root) {
+  try {
+    const worktreesDir = path.join(root, '.claude', 'worktrees');
+    if (!fs.existsSync(worktreesDir)) return null;
+    const contents = fs.readdirSync(worktreesDir);
+    if (contents.length === 0) return null;
+    const entries = classifyWorktrees(root);
+    if (entries.length === 0) return null;
+    return formatWorktreeHygieneAdvisory(entries);
+  } catch (err) {
+    if (err instanceof UnresolvableMainRefError) {
+      return `Worktree hygiene: unable to classify — mainRef '${err.mainRef}' does not resolve to a commit (see --worktree-report --main-ref)`;
+    }
+    return null;
+  }
+}
+
 async function runNonInteractive(args) {
   const today = new Date().toISOString().slice(0, 10);
 
@@ -1259,6 +1294,15 @@ async function runNonInteractive(args) {
       console.log(`${YELLOW}WARN: ${t.id} (${t.status}) — no evidence recorded${RESET}`);
     }
     console.log('');
+  }
+
+  // T-559: worktree-hygiene advisory — informational only, never prunes.
+  {
+    const worktreeAdvisory = buildWorktreeHygieneAdvisory(ROOT);
+    if (worktreeAdvisory) {
+      console.log(`${DIM}${worktreeAdvisory}${RESET}`);
+      console.log('');
+    }
   }
 
   let updatedContent = taskStatusContent;
@@ -1594,6 +1638,15 @@ async function runInteractive() {
     console.log('');
   }
 
+  // T-559: worktree-hygiene advisory — informational only, never prunes.
+  {
+    const worktreeAdvisory = buildWorktreeHygieneAdvisory(ROOT);
+    if (worktreeAdvisory) {
+      console.log(`${DIM}${worktreeAdvisory}${RESET}`);
+      console.log('');
+    }
+  }
+
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
   // Read current wave/wave_session up front — needed for the wave-completion
@@ -1904,4 +1957,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, buildAutoSummary };
+module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, buildAutoSummary };

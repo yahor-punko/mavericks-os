@@ -173,7 +173,7 @@ console.log(`Passed: ${CHECKER_ONLY_CASES.length} checker-only exclude/preserve 
 // ---------------------------------------------------------------------------
 {
   const root = makeScriptsFixture('mavp-t550-tolerated-', { forChecker: true, forAssembler: true });
-  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
   execFileSync('git', ['config', 'user.email', 'fixture@example.invalid'], { cwd: root });
   execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: root });
 

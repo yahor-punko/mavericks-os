@@ -87,6 +87,7 @@ The installer creates or copies (skipping files that already exist):
 | `docs/ARCHITECTURE.md` | architecture document template (fill in at project start) | copied from mavericks |
 | `.claude/settings.local.json` | seeds `effortLevel: "high"`, `alwaysThinkingEnabled: true`, and `fallbackModel: ["opus"]` (default-ceiling reasoning + opus safety net) | generated |
 | `.claude/settings.json` | shared, committed project settings — seeds `permissions.defaultMode: "bypassPermissions"` | generated |
+| `.vscode/settings.json` | seeds/merges `files.exclude`, `search.exclude`, `files.watcherExclude` entries for `.claude/worktrees` (see "VS Code worktree exclusion" below) | generated/merged |
 
 Core framework scripts (`mavp-operator-lib.js`, `mavp-operator-dashboard.js`, validator) are **not copied** — they are used directly from the mavericks installation via the bash wrapper.
 
@@ -218,6 +219,22 @@ node scripts/mavp-install.js --hooks-only .
 This is the recommended, narrowest command: it touches only `.claude/settings.local.json` (gitignored) and the `.mavp-hook-ts` gitignore entry, producing **no repo diff**, and turns on the hardened validator hook plus the doc-sync and manifest-guard fragments locally. Run it once after cloning, and again any time you want to pick up new fragment additions.
 
 Running the broader `node scripts/mavp-install.js --update .` against the framework root is **also safe** (self-install detection makes `--update` skip the wrapper/`.claude/{agents,skills,rules}` sync when the target IS the mavericks framework's own root — see the installer's header comment and DR-003 in `docs/core/DECISIONS.md`), but it does more work than needed for hook activation alone; `--hooks-only` is the recommended command.
+
+## VS Code worktree exclusion
+
+Field report 2026-08-02: the harness creates a `.claude/worktrees/agent-*` checkout per background sub-agent and never removes it. Left unexcluded, these accumulate (71 at the time of the report, well over 100 since) and VS Code's file explorer, search index, and file watcher all surface the pile — the operator has repeatedly misdiagnosed real repository state as a result, down to asking why ~10K lines of changes were queued.
+
+**Default-on, additive, idempotent.** Both a fresh install and `--update` merge three keys into the target project's `.vscode/settings.json` (`mergeVscodeWorktreeExclusions()` in `scripts/mavp-install.js`, following the same merge contract as `mergeManagedHooks()` above): `files.exclude`, `search.exclude`, and `files.watcherExclude`, each carrying a `.claude/worktrees` glob set to `true`. Only the single managed glob sub-entry is ever added under each key — any other key, and any other sub-entry already present under a managed key, survives byte-identical. A pre-existing conflicting value for the managed glob sub-entry (anything other than `true`) is left untouched, with a printed notice rather than a silent overwrite. A second run makes no further change.
+
+**What is and isn't covered.** `files.exclude`/`search.exclude` hide `.claude/worktrees` from the file explorer and search results; `files.watcherExclude` stops VS Code from deep-watching its contents for changes. Based on documented VS Code configuration semantics — not confirmed against a live VS Code session, since driving a GUI is outside what an agent can execute — the git extension's own nested-repository auto-detection scan is understood to reuse the same `files.exclude`-driven skip logic, so these three keys are expected to also address the SCM phantom-diff symptom from the field report, not just the explorer/search/watcher noise. If that assumption doesn't hold in practice, the fallback lever is `git.autoRepositoryDetection: "openEditors"` (scope nested-repo detection to open-editor files only) — not `git.openRepositoryInParentFolders` (see below), which governs the opposite direction (parent-folder discovery) and would not have addressed a subfolder case like `.claude/worktrees` regardless of the collateral concern.
+
+**Deliberately not seeded: `git.openRepositoryInParentFolders`.** This setting is repo-global (affects every parent-folder repo the workspace might sit inside, not just this one) with legitimate-use collateral, and — independently of that — it is the wrong lever for this specific problem: it governs whether VS Code opens a repo found in a PARENT folder of the workspace, not whether it opens nested repos found in a SUBFOLDER, which is what `.claude/worktrees/agent-*` checkouts are. If you want to suppress it project-wide anyway, add it manually to your own `.vscode/settings.json`:
+
+```json
+{
+  "git.openRepositoryInParentFolders": "never"
+}
+```
 
 ## Transcript archive
 
