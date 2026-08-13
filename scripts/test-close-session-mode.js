@@ -10,7 +10,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync, spawnSync } = require('node:child_process');
+const { execFileSync, spawnSync, spawn: spawnChildProcess } = require('node:child_process');
 
 const { resolveMode, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, classifyVersionBumpAdvisory, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE } = require('./mavp-operator-close-session.js');
 
@@ -152,6 +152,60 @@ function cleanup(...dirs) {
   for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 }
 
+/**
+ * T-648: interactive runs that must resolve MORE THAN ONE `rl.question()`
+ * cannot use runCloseSessionCli()'s static spawnSync `input` buffer —
+ * readline delivers every already-buffered line to the FIRST question in
+ * one synchronous burst (no listener is attached yet for the second), so a
+ * second pending question never receives its answer and the process simply
+ * exits once the event loop drains (an unresolved Promise does not keep
+ * Node alive on its own). Verified directly against a two-question readline
+ * harness while building this helper.
+ *
+ * This spawns the process live and writes each answer only once its
+ * matching prompt text has actually appeared in the accumulated output, in
+ * order — which is how real interactive input behaves (each line arrives as
+ * its own stream event).
+ *
+ * @param {string} repoDir
+ * @param {string} fakeScriptsDir
+ * @param {string[]} argv
+ * @param {Array<{match: string, answer: string}>} steps
+ * @returns {Promise<{status: number|null, stdout: string, stderr: string}>}
+ */
+function runCloseSessionCliSequential(repoDir, fakeScriptsDir, argv, steps) {
+  return new Promise((resolve, reject) => {
+    const child = spawnChildProcess(process.execPath, [CLOSE_SESSION_SCRIPT, ...argv], {
+      cwd: repoDir,
+      env: { ...process.env, MAVERICKS_PROJECT_ROOT: repoDir, MAVERICKS_SCRIPTS: fakeScriptsDir },
+    });
+    let stdout = '';
+    let stderr = '';
+    let stepIndex = 0;
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`runCloseSessionCliSequential timed out waiting on step ${stepIndex} (${steps[stepIndex] && steps[stepIndex].match}). stdout so far:\n${stdout}`));
+    }, 15000);
+    function maybeAdvance() {
+      while (stepIndex < steps.length && stdout.includes(steps[stepIndex].match)) {
+        child.stdin.write(steps[stepIndex].answer + '\n');
+        stepIndex++;
+      }
+    }
+    child.stdout.on('data', (d) => { stdout += d.toString(); maybeAdvance(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.on('exit', (status) => { clearTimeout(timer); resolve({ status, stdout, stderr }); });
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+  });
+}
+
+// Cases 8+ run inside an async main() — T-648's fix requires the interactive
+// Cases (10, 11, 15, 18) to resolve a real SECOND `rl.question()` (the
+// wave-goal prompt now firing on every wave-complete close, not just when no
+// goal was preset yet), which needs the live-sequential spawn helper above
+// (a Promise), so the surrounding cases must run under await.
+async function main() {
+
 // Case 8: non-interactive, validator exits 1 (drifting) — commit IS created,
 // no SKIPPED message.
 {
@@ -212,13 +266,20 @@ function cleanup(...dirs) {
 
 // Case 10: interactive path, validator exits 1 — same commit behavior as
 // non-interactive. wave_goal is already set in the fixture and there are no
-// active tasks, so the only prompt reached is "Next action" — answered with
-// a bare newline (accept the default).
+// active tasks, so the wave is trivially complete: T-648 means the
+// wave-goal prompt now ALSO fires unconditionally on wave-complete (not just
+// when unset), so this needs two sequential answers ("Next action", then
+// "Enter wave goal") plus the trailing "Run git push?" prompt so the process
+// runs to completion.
 {
   const repoDir = makeFixtureRepo();
   const fakeScriptsDir = makeFakeValidatorDir(1);
   const before = headCommitCount(repoDir);
-  const result = runCloseSessionCli(repoDir, fakeScriptsDir, ['--interactive'], '\n');
+  const result = await runCloseSessionCliSequential(repoDir, fakeScriptsDir, ['--interactive'], [
+    { match: 'Next action [', answer: '' },
+    { match: 'Enter wave goal', answer: '' },
+    { match: 'Run git push?', answer: 'n' },
+  ]);
   const after = headCommitCount(repoDir);
 
   assert.strictEqual(
@@ -235,12 +296,18 @@ function cleanup(...dirs) {
 }
 
 // Case 11: interactive path, validator exits 2 — NO commit, explicit SKIPPED
-// line naming exit 2.
+// line naming exit 2. Same wave-complete fixture as Case 10, so the
+// wave-goal prompt fires here too (before the validator result is even
+// known) — same three sequential answers.
 {
   const repoDir = makeFixtureRepo();
   const fakeScriptsDir = makeFakeValidatorDir(2);
   const before = headCommitCount(repoDir);
-  const result = runCloseSessionCli(repoDir, fakeScriptsDir, ['--interactive'], '\n');
+  const result = await runCloseSessionCliSequential(repoDir, fakeScriptsDir, ['--interactive'], [
+    { match: 'Next action [', answer: '' },
+    { match: 'Enter wave goal', answer: '' },
+    { match: 'Run git push?', answer: 'n' },
+  ]);
   const after = headCommitCount(repoDir);
 
   assert.strictEqual(after, before, 'Case 11 FAIL: no commit should be created when validator exits 2 (interactive)');
@@ -640,9 +707,11 @@ function makeAlreadyMergedFixtureRepo(waveNumber) {
 }
 
 // Case 15: identical empty-Active-tasks fixture, interactive mode — same
-// wave-complete decision and same announcement as Case 14. Only prompt
-// reached is "Next action" (wave_goal already set, no active tasks to
-// answer) — a single blank line accepts the default.
+// wave-complete decision and same announcement as Case 14. The wave is
+// trivially complete (no active tasks), so T-648's fix means the wave-goal
+// prompt now ALSO fires despite the preset "fixture wave goal" — sequential
+// answers for "Next action", "Enter wave goal", and the trailing push
+// prompt.
 {
   const repoDir = makeFixtureRepo();
   const ps = readProcessState(repoDir);
@@ -650,7 +719,11 @@ function makeAlreadyMergedFixtureRepo(waveNumber) {
   fs.writeFileSync(path.join(repoDir, 'PROCESS_STATE.json'), JSON.stringify(ps, null, 2) + '\n');
   execFileSync('git', ['commit', '-aqm', 'fixture: set wave 3'], { cwd: repoDir });
 
-  const result = runCloseSessionCli(repoDir, __dirname, ['--interactive'], '\n\n');
+  const result = await runCloseSessionCliSequential(repoDir, __dirname, ['--interactive'], [
+    { match: 'Next action [', answer: '' },
+    { match: 'Enter wave goal', answer: '' },
+    { match: 'Run git push?', answer: 'n' },
+  ]);
 
   assert.ok(
     /Wave 3 complete — archiving \+ incrementing/.test(result.stdout),
@@ -705,11 +778,17 @@ function makeAlreadyMergedFixtureRepo(waveNumber) {
 // Case 18: an already-merged task sitting in TASK_STATUS's Active tasks
 // section (not yet archived) — interactive mode must NOT prompt
 // [m]/[n]/[k]/[enter] for it, must auto-archive it, and must complete the
-// wave without requiring the operator to answer for it. Only the "Next
-// action" prompt is reached (blank-line accepts the default).
+// wave without requiring the operator to answer for it. Auto-archiving it
+// leaves zero remaining tasks, so the wave is complete and (T-648) the
+// wave-goal prompt also fires — sequential answers for "Next action",
+// "Enter wave goal", and the trailing push prompt.
 {
   const repoDir = makeAlreadyMergedFixtureRepo(7);
-  const result = runCloseSessionCli(repoDir, __dirname, ['--interactive'], '\n');
+  const result = await runCloseSessionCliSequential(repoDir, __dirname, ['--interactive'], [
+    { match: 'Next action [', answer: '' },
+    { match: 'Enter wave goal', answer: '' },
+    { match: 'Run git push?', answer: 'n' },
+  ]);
 
   assert.ok(
     /T-300 → moved to completed \(was already merged\)/.test(result.stdout),
@@ -1164,6 +1243,192 @@ function runCloseSessionCliWithEnv(repoDir, extraEnv) {
 console.log('All T-530 assertions passed.');
 
 // ---------------------------------------------------------------------------
+// T-649 — checkVersionBump()'s two git calls must exempt exactly
+// scripts/publish-manifest.json (a classification-only DR-002 ledger entry,
+// not framework behavior) from the version-bump advisory, on BOTH the
+// same-commit shortcut call and the drift-range call — while still firing,
+// and naming the changed path, for a commit that touches any OTHER scripts/
+// file, including scripts/publish-shape-contract.json (never widened to
+// `scripts/*.json`).
+// ---------------------------------------------------------------------------
+
+// Builds a throwaway "project" git repo whose scripts/mavp-version.js
+// declares `version`, then commits ONE drift commit per entry in
+// `driftCommits` (each entry an array of scripts/-relative paths written
+// with placeholder content) — reuses T-530's seedStateFilesT530()/
+// gitT530()/commitAllT530() fixture plumbing above. Returns the repo dir.
+function makeScopedVersionBumpFixtureRepo(version, driftCommits) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 't649-fixture-'));
+  gitT530(dir, ['init', '-q', '-b', 'main']);
+  gitT530(dir, ['config', 'user.email', 'demo@example.invalid']);
+  gitT530(dir, ['config', 'user.name', 'Fixture User']);
+
+  seedStateFilesT530(dir);
+  const scriptsDir = path.join(dir, 'scripts');
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(scriptsDir, 'mavp-version.js'),
+    `module.exports = { MAVERICKS_VERSION: '${version}' };\n`
+  );
+  commitAllT530(dir, `fixture: initial state, version ${version}`);
+
+  driftCommits.forEach((relPaths, i) => {
+    for (const relPath of relPaths) {
+      const abs = path.join(dir, relPath);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, `// fixture drift file: ${relPath} (commit ${i})\n`);
+    }
+    commitAllT530(dir, `fixture: drift commit ${i} touching ${relPaths.join(', ')}`);
+  });
+
+  return dir;
+}
+
+// Calls checkVersionBump() DIRECTLY (in a fresh child process, so ROOT —
+// resolved once at module load from MAVERICKS_PROJECT_ROOT — picks up the
+// fixture repo) and returns its parsed return value. extraEnv lets callers
+// pin MAVERICKS_HOME deterministically (same reason T-530's CLI-level tests
+// always pass it) instead of falling through to resolveMirrorHome()'s
+// ~/.mavericks default, which would make the 'bump' vs 'unreleased' branch
+// depend on the machine running the test.
+function callCheckVersionBumpDirectly(repoDir, extraEnv) {
+  const script = `const { checkVersionBump } = require(${JSON.stringify(CLOSE_SESSION_SCRIPT)}); console.log(JSON.stringify(checkVersionBump()));`;
+  const result = spawnSync(process.execPath, ['-e', script], {
+    cwd: repoDir,
+    env: { ...process.env, MAVERICKS_PROJECT_ROOT: repoDir, ...extraEnv },
+    encoding: 'utf8',
+  });
+  assert.strictEqual(result.status, 0, `T-649 fixture FAIL: checkVersionBump() child process errored: ${result.stderr}`);
+  const raw = result.stdout.trim();
+  return raw ? JSON.parse(raw) : null;
+}
+
+// Assertion 1: the ONLY commit touching scripts/ since the last
+// scripts/mavp-version.js commit touches ONLY scripts/publish-manifest.json
+// -> checkVersionBump() returns null AND VERSION_BUMP_LINE (and the
+// informational VERSION_UNRELEASED_LINE) are absent from close-session
+// output. Kills: the exclusion missing entirely from checkVersionBump(),
+// or a typo'd pathspec that fails to match scripts/publish-manifest.json.
+{
+  const repoDir = makeScopedVersionBumpFixtureRepo('5.0.0', [
+    ['scripts/publish-manifest.json'],
+  ]);
+  const mirrorDir = makeMirrorFixtureRepo(['5.0.0']); // tagged -> would force 'bump' kind if drift were (wrongly) detected
+
+  const direct = callCheckVersionBumpDirectly(repoDir, { MAVERICKS_HOME: mirrorDir });
+  assert.strictEqual(
+    direct,
+    null,
+    `T-649 Assertion 1 FAIL: checkVersionBump() must return null when the only scripts/ drift is publish-manifest.json, got: ${JSON.stringify(direct)}`
+  );
+
+  const result = runCloseSessionCliWithEnv(repoDir, { MAVERICKS_HOME: mirrorDir });
+  const lines = (result.stdout || '').split('\n');
+  assert.ok(
+    !lines.includes(VERSION_BUMP_LINE),
+    `T-649 Assertion 1 FAIL: bump-advisory line must be ABSENT for a manifest-only drift, got:\n${result.stdout}\nstderr: ${result.stderr}`
+  );
+  assert.ok(
+    !lines.includes(VERSION_UNRELEASED_LINE),
+    `T-649 Assertion 1 FAIL: informational unreleased line must also be ABSENT for a manifest-only drift, got:\n${result.stdout}`
+  );
+
+  console.log('T-649 Assertion 1 passed: manifest-only scripts/ drift -> checkVersionBump() null, both advisory lines absent');
+  cleanup(repoDir, mirrorDir);
+}
+
+// Assertion 2: a commit in that same range touches scripts/mavp-operator-lib.js
+// (a real framework file, standing in for genuine scripts/ drift) -> the
+// advisory still prints AND its text names that path. Kills: an over-broad
+// exclusion that suppresses real drift, and a paths line that is missing,
+// blank, or fails to include the actual changed file.
+{
+  const repoDir = makeScopedVersionBumpFixtureRepo('6.0.0', [
+    ['scripts/mavp-operator-lib.js'],
+  ]);
+  const mirrorDir = makeMirrorFixtureRepo(['6.0.0']); // tagged -> deterministic 'bump' kind
+
+  const direct = callCheckVersionBumpDirectly(repoDir, { MAVERICKS_HOME: mirrorDir });
+  assert.ok(
+    direct && direct.kind === 'bump' && Array.isArray(direct.paths) && direct.paths.includes('scripts/mavp-operator-lib.js'),
+    `T-649 Assertion 2 FAIL: checkVersionBump() must classify real scripts/ drift as 'bump' and name the changed path, got: ${JSON.stringify(direct)}`
+  );
+
+  const result = runCloseSessionCliWithEnv(repoDir, { MAVERICKS_HOME: mirrorDir });
+  const lines = (result.stdout || '').split('\n');
+  assert.ok(
+    lines.includes(VERSION_BUMP_LINE),
+    `T-649 Assertion 2 FAIL: expected the bump-advisory line for real scripts/ drift, got:\n${result.stdout}\nstderr: ${result.stderr}`
+  );
+  assert.ok(
+    lines.some((l) => l.includes('scripts/mavp-operator-lib.js')),
+    `T-649 Assertion 2 FAIL: advisory output must name the changed path scripts/mavp-operator-lib.js, got:\n${result.stdout}`
+  );
+
+  console.log('T-649 Assertion 2 passed: real scripts/ drift still advises a bump and names the changed path');
+  cleanup(repoDir, mirrorDir);
+}
+
+// Assertion 3 (own addition, per brief): scripts/publish-shape-contract.json
+// must STILL trigger the advisory, unchanged — proves the exclusion is
+// scoped to exactly scripts/publish-manifest.json, never widened to
+// `scripts/*.json`. Kills: a later change that widens the exclusion to a
+// glob covering all scripts/ JSON files (which would wrongly exempt this
+// file too, even though its floors change shipped behavior).
+{
+  const repoDir = makeScopedVersionBumpFixtureRepo('7.0.0', [
+    ['scripts/publish-shape-contract.json'],
+  ]);
+  const mirrorDir = makeMirrorFixtureRepo(['7.0.0']);
+
+  const direct = callCheckVersionBumpDirectly(repoDir, { MAVERICKS_HOME: mirrorDir });
+  assert.ok(
+    direct && direct.kind === 'bump' && Array.isArray(direct.paths) && direct.paths.includes('scripts/publish-shape-contract.json'),
+    `T-649 Assertion 3 FAIL: checkVersionBump() must still classify scripts/publish-shape-contract.json drift as 'bump', got: ${JSON.stringify(direct)}`
+  );
+
+  const result = runCloseSessionCliWithEnv(repoDir, { MAVERICKS_HOME: mirrorDir });
+  const lines = (result.stdout || '').split('\n');
+  assert.ok(
+    lines.includes(VERSION_BUMP_LINE),
+    `T-649 Assertion 3 FAIL: scripts/publish-shape-contract.json drift must still trigger the bump advisory (never exempted), got:\n${result.stdout}\nstderr: ${result.stderr}`
+  );
+
+  console.log('T-649 Assertion 3 passed: scripts/publish-shape-contract.json is NOT exempted — exclusion stays scoped to publish-manifest.json only');
+  cleanup(repoDir, mirrorDir);
+}
+
+// Assertion 4 (cheap extra coverage, per coordinator note): the classifier's
+// 'unreleased' branch (mirror does not carry the current version's tag) —
+// the branch the LIVE repo currently takes at 0.44.1-untagged — must also
+// exempt a manifest-only drift.
+{
+  const repoDir = makeScopedVersionBumpFixtureRepo('8.0.0', [
+    ['scripts/publish-manifest.json'],
+  ]);
+  const mirrorDir = makeMirrorFixtureRepo(['7.9.0']); // never 8.0.0 -> untagged/unreleased branch
+
+  const direct = callCheckVersionBumpDirectly(repoDir, { MAVERICKS_HOME: mirrorDir });
+  assert.strictEqual(
+    direct,
+    null,
+    `T-649 Assertion 4 FAIL: manifest-only drift must return null even on the classifier's 'unreleased' branch, got: ${JSON.stringify(direct)}`
+  );
+
+  const result = runCloseSessionCliWithEnv(repoDir, { MAVERICKS_HOME: mirrorDir });
+  const lines = (result.stdout || '').split('\n');
+  assert.ok(
+    !lines.includes(VERSION_BUMP_LINE) && !lines.includes(VERSION_UNRELEASED_LINE),
+    `T-649 Assertion 4 FAIL: no advisory (bump or unreleased) must print for manifest-only drift, got:\n${result.stdout}\nstderr: ${result.stderr}`
+  );
+
+  console.log("T-649 Assertion 4 passed: manifest-only drift returns null on the classifier's unreleased branch too");
+  cleanup(repoDir, mirrorDir);
+}
+
+console.log('All T-649 assertions passed.');
+
+// ---------------------------------------------------------------------------
 // T-542 — end-to-end reproduction of the 2026-07-26 close-session incident:
 // a task heading that merely MENTIONS another task's ID (e.g. "### T-541 —
 // Close the four T-540 security residuals — ...") must never be treated as
@@ -1315,3 +1580,10 @@ console.log('All T-530 assertions passed.');
 }
 
 console.log('All T-542 assertions passed.');
+
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});

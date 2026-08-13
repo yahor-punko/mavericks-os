@@ -220,3 +220,37 @@ Together: the id is cheap to attach and never required for the DR to be understo
 **Anti-instruction, for whoever writes a developer brief:** a developer brief must never forbid the manifest self-registration line when the task creates a new tracked file, and must never route a developer's registration through the `MANIFEST_REGISTRATION_NEEDED` token — that token names a completely different constraint (a role that cannot touch `scripts/` at all), not a parallel-dispatch precaution. See `CLAUDE.md`'s "Publish-manifest registration" convention and `.claude/rules/docs.md` / `.claude/rules/scripts.md` for the codified instruction.
 
 **Documented in:** `docs/core/DECISIONS.md` (this record); `CLAUDE.md`'s "Publish-manifest registration" convention; `.claude/rules/docs.md`; `.claude/rules/scripts.md`.
+
+---
+
+## DR-008 — Gate lifecycle: every blocking gate records origin, preconditions, and every real fire; zero-fire gates get a review at stable promotion
+
+**Date:** 2026-08-13
+
+**Informed by:** the gate-accumulation audit (architect, 2026-08-06) — `git log --diff-filter=D` over `scripts/check-*`, `scripts/mavp-*guard*`, `scripts/mavp-publish-*` returns nothing, and 2,193 `CHANGELOG.md` lines contain zero "Removed" sections; "has this gate ever fired on something real" was unanswerable from any single artifact and had to be reconstructed across four files for the audit.
+
+**Tasks:** T-643 (this record and the seed ledger)
+
+**Problem:** Adding a blocking gate costs one review; removing one costs an incident (someone has to prove nothing depends on it). That asymmetry guarantees monotone gate growth regardless of merit, independent of whether any individual gate is still earning its keep. The audit additionally surfaced a second, compounding failure already named three times in this repo's own history (T-540, T-565, DR-005): a check that reddens on the routine direction — flagging its own component's ordinary operation as a violation — trains its operator to stop reading it. Without a place to record, at birth, what a gate assumes about its environment, that discovery keeps happening by incident instead of by design.
+
+**What was considered:**
+1. A periodic manual gate-inventory audit, run ad hoc whenever gate count "feels" too high, with no fixed cadence or recorded criteria.
+2. Adding a runtime instrumentation layer that counts and logs every gate invocation and outcome automatically, then reviewing the counts.
+3. The adopted design: a birth-time ledger entry per gate (origin incident, environmental preconditions, fire history) reviewed at a fixed, already-existing cadence (stable promotion), with an explicit real-fire/self-inflicted-fire distinction.
+
+**Why rejected (1, 2):**
+- **Ad hoc audits (1):** this is exactly what produced the current gap — the fire-history inventory that seeded this ledger exists only because one audit happened to reconstruct it by hand across four files, on 2026-08-06, with no guarantee the next one happens before the next round of monotone growth. An audit with no fixed trigger is a audit that doesn't happen until the pain is already large.
+- **Runtime instrumentation (2):** this repo's own gates already run across several independent surfaces — pre-commit hooks, PostToolUse hooks, publish-time scripts, and canonical/mirror CI — with no shared logging substrate between them. Building and maintaining one is itself new infrastructure with its own bugs and its own maintenance cost, for a question (has this gate ever caught something real) that a human reviewer can answer more cheaply and more reliably by reading commit history and incident records at a fixed checkpoint. It would also conflate "the gate ran" with "the gate caught something real" — the audit's own finding is that this distinction is the load-bearing one, and a naive invocation counter cannot make it (see "Real fire" below).
+
+**What was adopted instead:**
+
+Every blocking gate records, at birth, its **origin incident** and its **environmental preconditions**, plus **every real fire**, in `docs/core/GATE_LEDGER.md`. At each stable promotion (`scripts/mavp-publish-release.js`, §3b), any blocking gate with **zero real fires since the previous stable release** gets an explicit demote/merge/retire review, with the outcome recorded in the ledger. This does not mean automatic retirement — the review can conclude "keep, no fire yet expected" — but the review itself, and its outcome, must happen and must be recorded; silent, uninspected zero-fire persistence is what this decision closes off.
+
+Two definitions this decision pins down, because the mechanism is unenforceable without them:
+
+- **"Real fire"** means a catch on a genuine condition arising from ordinary work. A finding produced by a review deliberately attacking the gate to test it does **not** count as a real fire, and neither does a fire caused by the gate's own bug (a false positive is not evidence the gate is earning its keep — it is evidence the gate needs a fix). The audit found this distinction load-bearing in practice: one entire gate family's every recorded finding was a review-planted attack on itself, which would have looked like a healthy fire history under a naive count.
+- **"Environmental precondition"** means an invariant about the environment a gate asserts, which another component's *normal operation* may legitimately violate — e.g. "assumes a clean working tree," "assumes full git history," "assumes `main` exists," "assumes an identity is configured." Recording these at birth is what turns "this gate reddened on someone else's routine operation" from a discovery made under incident pressure into a predictable, already-documented outcome.
+
+**Scope limit, stated plainly:** this decision introduces **no runtime check, no hook, and no validator change**. It is a documentation and review-cadence decision only — the ledger is a human-maintained record, reviewed at an existing checkpoint (stable promotion) that already requires human attention. No mechanical enforcement is proposed by this record; if one is ever wanted, it is a separate task with its own review.
+
+**Documented in:** `docs/core/DECISIONS.md` (this record); `docs/core/GATE_LEDGER.md` (the ledger itself, seeded from the 2026-08-06 audit inventory); `docs/PUBLIC_RELEASE_STRATEGY.md` §3b, "Gate-ledger review (DR-008)" (the stable-promotion checkpoint where the zero-fire review happens, shipped by T-646).

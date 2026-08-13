@@ -259,8 +259,8 @@ never from a hand-kept list:
   can't quietly go stale.
 - **One next action** — a single line telling you what to do next.
 - **What changed while you were away** — files touched since the last
-  time a session was formally closed, computed from the project's own
-  git history, not a guess.
+  time a session was formally closed, including anything you haven't
+  committed yet, drawn from the repository itself, not a guess.
 - **A handoff note, when one was left** — mid-thought context, written
   to `HANDOFF.md`, handed back immediately.
 

@@ -26,7 +26,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const assert = require('node:assert');
-const { spawnSync } = require('node:child_process');
+const { spawnSync, spawn } = require('node:child_process');
 
 const { assertMergedRecordsUncontaminated } = require('./mavp-operator-close-session.js');
 
@@ -568,19 +568,62 @@ assert.ok(
 
 console.log('Part 4 (runtime_verified counts as completed) passed.');
 
+// T-648: this fixture sweeps every task out of Active tasks, so the wave is
+// complete — the wave-goal prompt now fires unconditionally on wave-complete
+// (not only when unset), which needs a SECOND resolved `rl.question()`.
+// Readline over a piped, already-EOF'd stdin only delivers the first
+// buffered line to the first pending question (no listener is attached yet
+// for the second when both lines land in the same data chunk), so a second
+// static-input answer never resolves and the process exits early once the
+// event loop drains. This spawns the process live and writes each answer
+// only once its matching prompt text has appeared in the accumulated
+// output, in order — matching how real interactive input actually arrives.
+function runCloseSessionInteractiveSequential(dir, argv, steps) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('node', [CLOSE_SESSION_PATH, ...argv], {
+      cwd: dir,
+      env: { ...process.env, MAVERICKS_PROJECT_ROOT: dir, MAVERICKS_SCRIPTS: SCRIPTS_DIR },
+    });
+    let out = '';
+    let stepIndex = 0;
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`runCloseSessionInteractiveSequential timed out waiting on step ${stepIndex} (${steps[stepIndex] && steps[stepIndex].match}). Output so far:\n${out}`));
+    }, 15000);
+    function maybeAdvance() {
+      while (stepIndex < steps.length && out.includes(steps[stepIndex].match)) {
+        child.stdin.write(steps[stepIndex].answer + '\n');
+        stepIndex++;
+      }
+    }
+    child.stdout.on('data', (d) => { out += d.toString(); maybeAdvance(); });
+    child.stderr.on('data', (d) => { out += d.toString(); });
+    child.on('exit', (code) => { clearTimeout(timer); resolve({ status: code, out }); });
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+  });
+}
+
+// Part 5+ run inside an async main() so runCloseSessionInteractiveSequential()
+// (a Promise) can be awaited before Part 6/7 continue.
+async function main() {
+
 // ---------------------------------------------------------------------------
 // Part 5 — the INTERACTIVE path must sweep identically. Before T-573 this
 // path was strictly worse than the non-interactive one: each terminal entry
 // got the same [m]/[n]/[k]/[enter] prompt as real work, and an Enter-skip left
-// it counted as remaining. `wave_goal` is preset so the run needs exactly one
-// answered prompt (the "Next action" line) — readline over a piped, EOF'd
-// stdin only delivers the first buffered line, so a fixture requiring more
-// input would hang instead of asserting.
+// it counted as remaining. `wave_goal` is preset, but the wave is complete
+// (every task swept out of Active tasks), so T-648 means the goal prompt
+// fires anyway — three sequential answers: "Next action", "Enter wave
+// goal", and the trailing "Run git push?" prompt.
 // ---------------------------------------------------------------------------
 const interactiveDir = newFixtureDir('interactive');
-buildIncidentFixture(interactiveDir, { processState: { wave_goal: 'preset so no goal prompt fires' } });
+buildIncidentFixture(interactiveDir, { processState: { wave_goal: 'preset — must still be replaced by the prompt on wave-complete' } });
 
-const interactiveOut = runCloseSession(interactiveDir, ['--interactive'], '\n').out;
+const { out: interactiveOut } = await runCloseSessionInteractiveSequential(interactiveDir, ['--interactive'], [
+  { match: 'Next action [', answer: '' },
+  { match: 'Enter wave goal', answer: '' },
+  { match: 'Run git push?', answer: 'n' },
+]);
 
 assert.ok(
   interactiveOut.includes('Wave 70 complete'),
@@ -779,3 +822,10 @@ console.log('Part 7 (guard is wired into the production path) passed.');
 fs.rmSync(TMP_ROOT, { recursive: true, force: true });
 
 console.log('All T-573 assertions passed.');
+
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});

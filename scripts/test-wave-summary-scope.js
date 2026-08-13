@@ -696,24 +696,29 @@ function driveInteractive(dir, steps, timeoutMs = 10000) {
 // --- Part 5a: wave-complete interactive close. Fixture mirrors Part 2's
 //     wave-2 shape (BACKLOG Active Wave + TASK_STATUS Active tasks both show
 //     T-201 already merged; a real operator run would be finalizing/
-//     confirming it). wave_goal is pre-seeded so runInteractive's
-//     "!currentWaveGoal" prompt is skipped, keeping the scripted stdin small
-//     and isolating this test to the wave_summary behavior under test.
+//     confirming it). wave_goal is pre-seeded, but T-648 means a
+//     wave-complete close prompts for (and clears) it regardless of the
+//     preset value — see the wave_goal assertion below, which pins that
+//     contract rather than the pre-T-648 "must survive unchanged" behavior
+//     (that behavior was itself the T-648 defect: a stale goal silently
+//     carried forward into the next wave).
 //
 //     T-445: a task already at a terminal status (merged/deployed_dev/
 //     deployed_prod) when the interactive loop starts is now auto-archived
 //     without prompting — the [m]/[n]/[k]/[enter] question and its notes
-//     follow-up are never shown for T-201, so this fixture's only prompts
-//     are "Next action" and "Run git push?".
+//     follow-up are never shown for T-201, so this fixture's prompts are
+//     "Next action", "Enter wave goal" (T-648), and "Run git push?".
 //
 //     Scripted stdin, one answer per prompt in order:
 //       ""   -> "Next action [...]:" prompt: skip (wave is complete anyway)
+//       ""   -> "Enter wave goal ...:" prompt: skip (leave wave_goal null,
+//               not the preset value — this IS the T-648 fix under test)
 //       "n"  -> "Run git push? [Y/n]:" prompt: decline (fixture isn't a real
 //               git remote; declining keeps the test hermetic)
 const INTERACTIVE_DIR = path.join(os.tmpdir(), 't367-interactive-test-' + Date.now());
 fs.mkdirSync(INTERACTIVE_DIR, { recursive: true });
 
-const PRESERVED_WAVE_GOAL = 'Wave 2 goal — pre-existing, must survive unchanged.';
+const PRESET_WAVE_GOAL = 'Wave 2 goal — pre-existing, must be cleared by a wave-complete close (T-648).';
 
 fs.writeFileSync(
   path.join(INTERACTIVE_DIR, 'BACKLOG.md'),
@@ -765,7 +770,7 @@ fs.writeFileSync(
       wave: 2,
       wave_session: 1,
       wave_status: 'execution',
-      wave_goal: PRESERVED_WAVE_GOAL,
+      wave_goal: PRESET_WAVE_GOAL,
       parked_waves: [],
       active_slices: ['T-201'],
       next_action: 'T-201 → developer → wave 2 task',
@@ -785,6 +790,7 @@ fs.writeFileSync(
 
 await driveInteractive(INTERACTIVE_DIR, [
   { waitFor: 'Next action', send: '\n' },
+  { waitFor: 'Enter wave goal', send: '\n' },
   { waitFor: 'Run git push?', send: 'n\n' },
 ]);
 
@@ -794,10 +800,13 @@ assert.strictEqual(
   'Wave 2: 1 task(s) completed — Wave 2 task.',
   `Part 5a FAIL: interactive wave-complete close should write the scoped wave_summary, got: ${interactiveState.wave_summary}`
 );
+// T-648: a wave-complete close must clear wave_goal — the preset value
+// describes the wave that just closed, and an empty prompt answer must
+// leave null rather than falling back to the stale preset.
 assert.strictEqual(
   interactiveState.wave_goal,
-  PRESERVED_WAVE_GOAL,
-  `Part 5a FAIL: pre-existing wave_goal must survive an interactive close unchanged, got: ${interactiveState.wave_goal}`
+  null,
+  `Part 5a FAIL: expected wave_goal cleared to null on a wave-complete close (T-648), got: ${JSON.stringify(interactiveState.wave_goal)}`
 );
 assert.strictEqual(interactiveState.wave, 3, `Part 5a FAIL: expected wave to advance to 3, got ${interactiveState.wave}`);
 

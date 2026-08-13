@@ -91,6 +91,17 @@ const CYAN = '\x1b[36m';
 const VERSION_BUMP_LINE = `${YELLOW}⚠ scripts/ changed since last version bump — consider bumping scripts/mavp-version.js before git push${RESET}`;
 const VERSION_UNRELEASED_LINE = `${CYAN}ℹ scripts/ changed but the current version is unreleased (untagged on the mirror) and still accumulating — no bump advised yet${RESET}`;
 
+// T-649: a following, separate line naming the changed path(s) — printed
+// immediately after VERSION_BUMP_LINE/VERSION_UNRELEASED_LINE, never merged
+// into them, so existing whole-line assertions against those two constants
+// stay unaffected by this addition. Returns null when there are no paths to
+// name (e.g. the classification predates T-649's `paths` field, or the
+// drift range genuinely produced none).
+function formatVersionBumpPathsLine(paths) {
+  if (!paths || !paths.length) return null;
+  return `${DIM}  changed: ${paths.join(', ')}${RESET}`;
+}
+
 function readUtf8(p) { return fs.readFileSync(p, 'utf8'); }
 function writeUtf8(p, content) { fs.writeFileSync(p, content, 'utf8'); }
 
@@ -1017,11 +1028,27 @@ function classifyVersionBumpAdvisory({ changes, currentVersion, tags }) {
   return tags.has(tagName) ? { kind: 'bump', changes } : { kind: 'unreleased', changes };
 }
 
+// T-649: scripts/publish-manifest.json is a classification-only ledger entry
+// (DR-002 — state-adjacent, not framework behavior) and must never itself
+// trigger the version-bump advisory. Excluded from BOTH git calls below —
+// excluding it from only the drift-range call would leave the same-commit
+// shortcut wrong when publish-manifest.json is the ONLY scripts/ file that
+// changed since the last version bump. Deliberately narrow to this one
+// path: do not widen to `scripts/*.json` — scripts/publish-shape-contract.json
+// (and any other scripts/*.json) must keep triggering the advisory, since
+// its floors genuinely change shipped behavior. "Changes no framework
+// behavior" is not mechanically decidable in general; a single named
+// exemption is the whole fix.
+const VERSION_BUMP_EXEMPT_PATHSPEC = ':(exclude)scripts/publish-manifest.json';
+
 /**
  * Check whether scripts/ changed after the last version bump in mavp-version.js.
  * Returns null when there's no drift at all, otherwise a release-aware
- * classification object from classifyVersionBumpAdvisory() (T-530) — see
- * that function's doc comment for the three possible shapes.
+ * classification object from classifyVersionBumpAdvisory() (T-530), with an
+ * additive `paths` array (T-649) listing the distinct non-exempt scripts/
+ * files touched in the drift range — used to name the changed path(s) in
+ * the printed advisory. See that function's doc comment for the three
+ * possible `kind` shapes.
  */
 function checkVersionBump() {
   try {
@@ -1034,7 +1061,7 @@ function checkVersionBump() {
     const versionCommit = versionResult.stdout.trim();
 
     const scriptsResult = spawnSync(
-      'git', ['log', '-1', '--format=%H', '--', 'scripts/'],
+      'git', ['log', '-1', '--format=%H', '--', 'scripts/', VERSION_BUMP_EXEMPT_PATHSPEC],
       { encoding: 'utf8', cwd: ROOT }
     );
     if (scriptsResult.status !== 0 || !scriptsResult.stdout.trim()) return null;
@@ -1045,7 +1072,7 @@ function checkVersionBump() {
 
     // Check if any scripts/ files changed after the last version bump
     const changesResult = spawnSync(
-      'git', ['log', '--oneline', `${versionCommit}..HEAD`, '--', 'scripts/'],
+      'git', ['log', '--oneline', `${versionCommit}..HEAD`, '--', 'scripts/', VERSION_BUMP_EXEMPT_PATHSPEC],
       { encoding: 'utf8', cwd: ROOT }
     );
     if (changesResult.status !== 0) return null;
@@ -1056,7 +1083,21 @@ function checkVersionBump() {
     // before deciding whether to advise a bump.
     const currentVersion = readCurrentMavericksVersion();
     const tags = resolveMirrorTagsForVersionBump();
-    return classifyVersionBumpAdvisory({ changes, currentVersion, tags });
+    const classification = classifyVersionBumpAdvisory({ changes, currentVersion, tags });
+    if (!classification) return null;
+
+    // T-649: name the changed path(s) for the printed advisory. Additive —
+    // classifyVersionBumpAdvisory()'s own return shape/unit tests stay
+    // exactly {kind, changes}; `paths` is appended here only.
+    const pathsResult = spawnSync(
+      'git', ['log', '--name-only', '--format=', `${versionCommit}..HEAD`, '--', 'scripts/', VERSION_BUMP_EXEMPT_PATHSPEC],
+      { encoding: 'utf8', cwd: ROOT }
+    );
+    const paths = pathsResult.status === 0
+      ? Array.from(new Set(pathsResult.stdout.split('\n').map((l) => l.trim()).filter(Boolean))).sort()
+      : [];
+
+    return { ...classification, paths };
   } catch {
     return null; // git unavailable or error — skip silently
   }
@@ -1127,8 +1168,19 @@ function updateProcessStateJson(nextAction, waveComplete, summaryValue, { summar
     wave: newWave,
     wave_session: newWaveSession,
     stage: waveComplete ? 'planning' : (current.stage || 'execution'),
-    wave_strategy_note: null,
   };
+
+  // T-648: wave_goal and wave_strategy_note both describe the wave that is
+  // ending — clear them ONLY on wave advance (waveComplete), the same
+  // discriminator wave_session already uses above. A mid-wave close leaves
+  // both untouched (already preserved verbatim by the ...current spread),
+  // since the wave they describe is still open and its goal/note are still
+  // live context. This is a scoping fix, not a staleness detector — nothing
+  // is inspected for staleness; waveComplete alone decides.
+  if (waveComplete) {
+    updated.wave_goal = null;
+    updated.wave_strategy_note = null;
+  }
 
   if (summaryValue !== undefined && summaryValue !== null) {
     updated[summaryKey] = summaryValue;
@@ -1785,11 +1837,16 @@ async function runNonInteractive(args) {
   }
 
   // Version bump warning — T-530: release-aware (see classifyVersionBumpAdvisory()).
+  // T-649: a following line names the changed path(s) when available.
   const versionDrift = checkVersionBump();
   if (versionDrift && versionDrift.kind === 'bump') {
     console.log(`\n${VERSION_BUMP_LINE}`);
+    const pathsLine = formatVersionBumpPathsLine(versionDrift.paths);
+    if (pathsLine) console.log(pathsLine);
   } else if (versionDrift && versionDrift.kind === 'unreleased') {
     console.log(`\n${VERSION_UNRELEASED_LINE}`);
+    const pathsLine = formatVersionBumpPathsLine(versionDrift.paths);
+    if (pathsLine) console.log(pathsLine);
   }
 
   // Deploy queue warning — informational only, does not block session close
@@ -1951,9 +2008,16 @@ async function runInteractive() {
   const operatorExplicit = nextAnswer.trim().length > 0;
   if (operatorExplicit) nextAction = nextAnswer.trim();
 
-  // Prompt for wave_goal if not already set
+  // Prompt for wave_goal when it's not already set OR the wave is
+  // completing (T-648): a wave-complete close clears the stale goal in
+  // updateProcessStateJson() regardless of the answer here, so the prompt
+  // must fire unconditionally on completion to offer a replacement — a
+  // non-empty currentWaveGoal must never suppress its own replacement
+  // prompt. Mid-wave, the prior gating (offer only when unset) still
+  // applies so an existing goal survives untouched unless the operator
+  // explicitly types a new one.
   let waveGoalToSave = undefined;
-  if (!currentWaveGoal) {
+  if (waveComplete || !currentWaveGoal) {
     const goalAnswer = await prompt(rl, `Enter wave goal (or press Enter to skip): `);
     const trimmed = goalAnswer.trim();
     if (trimmed) waveGoalToSave = trimmed;
@@ -2064,11 +2128,16 @@ async function runInteractive() {
   }
 
   // Version bump warning — T-530: release-aware (see classifyVersionBumpAdvisory()).
+  // T-649: a following line names the changed path(s) when available.
   const versionDrift = checkVersionBump();
   if (versionDrift && versionDrift.kind === 'bump') {
     console.log(`\n${VERSION_BUMP_LINE}`);
+    const pathsLine = formatVersionBumpPathsLine(versionDrift.paths);
+    if (pathsLine) console.log(pathsLine);
   } else if (versionDrift && versionDrift.kind === 'unreleased') {
     console.log(`\n${VERSION_UNRELEASED_LINE}`);
+    const pathsLine = formatVersionBumpPathsLine(versionDrift.paths);
+    if (pathsLine) console.log(pathsLine);
   }
 
   // Deploy queue warning — informational only, does not block session close
@@ -2162,4 +2231,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE };
+module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE };

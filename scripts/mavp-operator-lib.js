@@ -3559,29 +3559,71 @@ function findPreviousCloseSessionCommit(root) {
 }
 
 /**
- * List files changed (committed) since the previous `--close-session` commit
- * (see findPreviousCloseSessionCommit()), relative to `root`. Part of the
- * T-391 must-read set.
+ * List files changed since the previous `--close-session` commit (see
+ * findPreviousCloseSessionCommit()), relative to `root`. Part of the T-391
+ * must-read set, extended by T-644 to also cover the current working tree —
+ * not just committed history — so an abruptly-dead session's uncommitted
+ * tracked edits and untracked files still surface next session:
+ *   1. committed changes: `git diff --name-only <commit> HEAD`
+ *   2. uncommitted tracked edits (staged + unstaged): `git diff --name-only HEAD`
+ *   3. untracked files, respecting .gitignore: `git ls-files --others --exclude-standard`
+ * Results are deduplicated. Order is not guaranteed to be stable across the
+ * three sources beyond first-seen-wins de-duplication.
+ *
+ * T-644 fix round 1: each of the three calls is guarded independently so a
+ * throw in one (e.g. call 3 exceeding `maxBuffer` on a very large untracked
+ * file list) never discards another call's already-successful result — a
+ * shared try/catch around all three previously zeroed the whole set on any
+ * single failure. An explicit, generous `maxBuffer` is also set on all three
+ * calls to push that failure mode further out (default Node maxBuffer is
+ * 1 MiB; the git commands here can legitimately exceed it on a large repo
+ * or a large untracked-file list, which is exactly the abruptly-dead-session
+ * scenario this function exists to cover).
  *
  * Degrades silently (returns [], never throws) when git is unavailable, the
- * marker commit can't be found, or the diff itself fails for any reason.
+ * marker commit can't be found, or any of the three git calls fails for any
+ * reason — a failing call now simply contributes nothing, rather than
+ * discarding the other calls' results.
  *
  * @param {string} root - Absolute path to the git working tree.
  * @returns {string[]} Relative file paths, possibly empty.
  */
 function getFilesChangedSincePreviousCloseSession(root) {
+  const commit = findPreviousCloseSessionCommit(root);
+  if (!commit) return [];
+
+  const execOpts = {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    maxBuffer: 32 * 1024 * 1024, // 32 MiB — generous headroom over Node's 1 MiB default
+  };
+
+  const all = [];
+
   try {
-    const commit = findPreviousCloseSessionCommit(root);
-    if (!commit) return [];
-    const output = cp.execSync(`git diff --name-only ${commit} HEAD`, {
-      cwd: root,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    return output.split('\n').map((s) => s.trim()).filter(Boolean);
+    const committedOutput = cp.execSync(`git diff --name-only ${commit} HEAD`, execOpts);
+    all.push(...committedOutput.split('\n'));
   } catch {
-    return [];
+    // Degrade silently — this source contributes nothing, others are unaffected.
   }
+
+  try {
+    const workingTreeOutput = cp.execSync('git diff --name-only HEAD', execOpts);
+    all.push(...workingTreeOutput.split('\n'));
+  } catch {
+    // Degrade silently — this source contributes nothing, others are unaffected.
+  }
+
+  try {
+    const untrackedOutput = cp.execSync('git ls-files --others --exclude-standard', execOpts);
+    all.push(...untrackedOutput.split('\n'));
+  } catch {
+    // Degrade silently — this source contributes nothing, others are unaffected.
+  }
+
+  const cleaned = all.map((s) => s.trim()).filter(Boolean);
+  return Array.from(new Set(cleaned));
 }
 
 /**
