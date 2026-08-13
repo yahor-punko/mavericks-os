@@ -5,6 +5,22 @@ inspired by [Keep a Changelog](https://keepachangelog.com/). For how the
 framework actually works, see [README.md](README.md) and the core process
 docs in [`docs/core/`](docs/core/).
 
+## [0.44.0] — 2026-08-13
+
+### Added
+
+- **Non-interactive `--close-session` now proposes booking for shipped-but-unbooked work** (T-637) — when a task sits at `qa_passed` and the `commit:` hash in its `TASK_STATUS.md` Evidence is already reachable from `HEAD`, the non-interactive close prints one advisory line naming the task and the exact command to book it (`./scripts/mavp-operator --set-status <id> merged`). This is propose-only by design: it never writes state itself, and it complements — never replaces — the existing "Wave N stays open" line, so wave-hold semantics are unchanged. On a shallow clone, where commit reachability cannot be answered, the advisory stands down by name and deliberately carries no `--set-status` suggestion; when git is unavailable it stays silent. The commit-reachability helpers (`extractCommitHashesFromEvidence`, `buildReachableHashIndex`, `isHashReachable`) moved from `mavp-validator.js` into the shared `mavp-operator-lib.js`, with the validator keeping re-exports so no consumer changes.
+
+### Fixed
+
+- **`--worktree-report` / `--prune-worktrees` now refuse an unresolvable main ref instead of silently classifying every worktree `unintegrated` with an inert prune** (T-633) — on a repo whose default branch is `master`, or with a mistyped `--main-ref`, the report previously asserted falsehoods about every worktree's integration state. A classifier that gates `git branch -D` must refuse when it cannot check.
+- **The shipped test suite no longer depends on git's `init.defaultBranch`** (T-632, T-634) — every fixture `git init` call is now pinned to an explicit initial branch, plus a new static guard test that fails naming the file and line for any future unpinned fixture init.
+- **`test-close-session-mode.js` teardown `ENOTEMPTY` race on Node 22** (T-636) — fixed by converging fixture cleanup on the file's shared helper, with `maxRetries`/`retryDelay`.
+
+### Docs
+
+- **The shipped-but-unbooked advisory is documented in `docs/core/TASK_LIFECYCLE.md` and `CLAUDE.md`** (T-638).
+
 ## [0.43.0] — 2026-08-05
 
 ### Added

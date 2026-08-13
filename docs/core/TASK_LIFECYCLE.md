@@ -150,9 +150,11 @@ If unsure: check `git diff main --name-only` for files under `scripts/` — any 
 
 **`--archive-merged` mid-wave role:** runs that same archival step on demand, without the rest of the close-session ritual (no validator-gated commit, no wave-increment logic, no session-completed table). Use it to keep BACKLOG.md's Active Wave section lean mid-session when several tasks have merged but the wave itself is far from done. `--close-session` still surfaces titles archived this way in `wave_summary` and its results table once the wave eventually closes (`parseMidWaveArchivedTasks()`).
 
-**Wave-completion announcements (T-445):** every close-session run prints one of two lines, built by the same function in both modes so identical state always produces identical messaging:
+**Wave-completion announcements (T-445):** every close-session run prints one of two lines from a shared core, built by the same function in both modes so identical state always produces identical messaging (non-interactive mode also prints an additional advisory — see below):
 - `Wave N complete — archiving + incrementing` — the Active tasks section emptied this run; the wave counter advances and the Active Wave heading is archived.
 - `Wave N stays open — T-NNN still <status>, ...` — names each task still remaining in Active tasks, so a non-advancing close is never a silent, unexplained no-op.
+
+**Shipped-but-unbooked advisory (T-637):** in non-interactive mode only, close-session additionally prints one advisory line per task that sits at `qa_passed` whose Evidence `commit:` hash is already reachable from HEAD — shipped, but not yet booked into the ritual. The status guard is checked before any reachability check, so `dev_done` and `ready_for_qa` never qualify even when their hash is reachable — firing on them would route around QA. The advisory is propose-only: it prints and never writes `TASK_STATUS.md`, `BACKLOG.md`, or `PROCESS_STATE.*`; the operator books the task by hand via `./scripts/mavp-operator --set-status <id> merged`. Two stand-downs: a shallow clone prints a named stand-down line that deliberately carries no `--set-status` text (so it can never be misread as a proposal), and when git is unavailable the check is silent — no line at all. It complements, never replaces, the `Wave N stays open` line above, which still prints unchanged directly above it. The propose-only and stand-down-is-not-a-proposal properties are test-enforced by `scripts/test-close-session-shipped-unbooked.js`.
 
 ## Task types
 

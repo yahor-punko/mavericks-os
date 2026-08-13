@@ -46,7 +46,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode, printRepoIdentityHeader, getCommitHashesReachable, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode, printRepoIdentityHeader, getCommitHashesReachable, isShallowRepository, extractCommitHashesFromEvidence, buildReachableHashIndex, isHashReachable, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 // T-530: checkVersionBump()'s release-awareness reads the public mirror's
 // tags EXCLUSIVELY through these check-changelog-frozen.js exports — never
@@ -1273,6 +1273,204 @@ function buildWorktreeHygieneAdvisory(root) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// T-637: shipped-but-unbooked advisory — derive-and-propose, never auto-apply.
+//
+// A task can be physically integrated on HEAD (the cherry-pick landed, its
+// evidence commit is reachable) while still booked `qa_passed`. The terminal-
+// status sweep is deliberately fail-closed, so the wave correctly stays open
+// and buildWaveCompletionAnnouncement() prints "Wave N stays open — T-NNN
+// still qa_passed" — but that line cannot distinguish a task that merely owes
+// its merge ritual from one that still needs real work. This advisory adds
+// exactly that distinction and nothing else.
+//
+// PROPOSE-ONLY, structurally: every function below reads a markdown STRING and
+// queries git. None of them touches the filesystem, so no input of any shape
+// can make this path write TASK_STATUS.md, BACKLOG.md, or PROCESS_STATE.*.
+// The operator applies the proposal by hand via the named ritual command.
+// ---------------------------------------------------------------------------
+
+/**
+ * The single status this advisory fires on. Deliberately NOT derived from
+ * IN_FLIGHT_STATUSES or ALREADY_TERMINAL_STATUSES (mirroring
+ * findTasksWithNoEvidence()'s narrower explicit set): `qa_passed` is the one
+ * status that means "reviewed, awaiting the Main-Agent merge ritual". A
+ * `dev_done` or `ready_for_qa` task with a reachable commit is NOT shipped-
+ * but-unbooked — it has real process left to run, and proposing a merge for
+ * it would route around QA.
+ */
+const SHIPPED_UNBOOKED_ADVISORY_STATUS = 'qa_passed';
+
+/**
+ * T-565's shallow-clone stand-down, narrowed to this advisory's single tier.
+ * Hoisted as a constant so the print call site and the test suite reference
+ * the SAME literal (the T-530 convention) — and deliberately free of the
+ * `--set-status` suggestion text, so "stood down" can never be mistaken for
+ * a proposal by a reader or by an assertion.
+ */
+const SHIPPED_UNBOOKED_STANDDOWN_LINE =
+  'Shipped-but-unbooked check stood down — shallow git clone (git rev-parse --is-shallow-repository): ' +
+  'a truncated history cannot support proposing a merge booking. Re-run in a full clone for a sound read.';
+
+/**
+ * Collect TASK_STATUS.md "## Active tasks" entries at
+ * SHIPPED_UNBOOKED_ADVISORY_STATUS that carry at least one `commit:` hash in
+ * their Evidence field. Pure — takes a markdown string, returns
+ * [{ id, hashes }] — and scoped to the Active tasks section only (the
+ * "Recently completed tasks" section is by definition already booked).
+ *
+ * Line-based on purpose: it collects a multi-line Evidence field (terminated
+ * by the next field bullet, the next task heading, or the end of the section)
+ * without a heading-anchored non-greedy block matcher — the reserved shape
+ * scripts/test-no-unbounded-block-matchers.js scans this file for. Field order
+ * within a block is not assumed: Evidence may precede or follow Status.
+ *
+ * @param {string} markdown - raw TASK_STATUS.md content
+ * @returns {Array<{id: string, hashes: string[]}>}
+ */
+function findShippedUnbookedCandidates(markdown) {
+  const lines = markdown.split(/\r?\n/);
+  const start = lines.findIndex(l => /^##\s+Active tasks/.test(l));
+  if (start === -1) return [];
+
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) { end = i; break; }
+  }
+
+  const candidates = [];
+  let currentId = null;
+  let currentStatus = null;
+  let evidenceParts = [];
+  let collectingEvidence = false;
+
+  function finalizeBlock() {
+    if (!currentId) return;
+    if (currentStatus !== SHIPPED_UNBOOKED_ADVISORY_STATUS) return;
+    const hashes = extractCommitHashesFromEvidence(evidenceParts.join('\n'));
+    if (hashes.length === 0) return;
+    candidates.push({ id: currentId, hashes });
+  }
+
+  for (let i = start + 1; i < end; i++) {
+    const line = lines[i];
+
+    const headingId = headingLeadingTaskId(line);
+    if (headingId) {
+      finalizeBlock();
+      currentId = headingId;
+      currentStatus = null;
+      evidenceParts = [];
+      collectingEvidence = false;
+      continue;
+    }
+    if (!currentId) continue;
+
+    // Any field bullet ends an in-progress Evidence collection; the Evidence
+    // bullet itself starts a new one.
+    if (/^[-*]\s+\*\*/.test(line)) {
+      collectingEvidence = false;
+      const statusMatch = line.match(/^[-*]\s+\*\*Status:\*\*\s*(.*)$/);
+      if (statusMatch) {
+        currentStatus = statusMatch[1].trim();
+        continue;
+      }
+      const evidenceMatch = line.match(/^[-*]\s+\*\*Evidence:\*\*\s*(.*)$/);
+      if (evidenceMatch) {
+        evidenceParts.push(evidenceMatch[1]);
+        collectingEvidence = true;
+      }
+      continue;
+    }
+
+    if (collectingEvidence) evidenceParts.push(line);
+  }
+  finalizeBlock();
+
+  return candidates;
+}
+
+/**
+ * Decide which candidates are shipped-but-unbooked, using ONE batched
+ * `git rev-list HEAD` call for the whole run regardless of how many tasks or
+ * hashes are in play (the checkCommitReachable() pattern in mavp-validator.js:
+ * extract hashes, build a prefix index once, then test every hash against the
+ * index in memory — never a subprocess per hash).
+ *
+ * Degrades silently — returns no proposals and never throws — when there are
+ * no candidates, when git is unavailable / this is not a git repo (rev-list
+ * returns null), or on any unexpected error. `--close-session` is the ritual
+ * every adopter project runs; an exception here would break their wave close.
+ *
+ * Shallow clone: stands down instead of proposing. Unlike the validator's
+ * negative tier, only ONE tier matters here — reachable-from-HEAD — but the
+ * proposal it feeds is a state-transition suggestion, and a deliberately
+ * truncated history is not a sound basis for advising that a task has fully
+ * landed. The stand-down is signalled (one line), never silent, and never
+ * carries the `--set-status` suggestion.
+ *
+ * @param {string} markdown - raw TASK_STATUS.md content
+ * @param {string} root - absolute path to the git working tree
+ * @returns {{proposals: Array<{id: string, hash: string}>, standDown: string|null}}
+ */
+function computeShippedUnbookedAdvisory(markdown, root) {
+  try {
+    const candidates = findShippedUnbookedCandidates(markdown);
+    if (candidates.length === 0) return { proposals: [], standDown: null };
+
+    if (isShallowRepository(root)) {
+      return { proposals: [], standDown: SHIPPED_UNBOOKED_STANDDOWN_LINE };
+    }
+
+    const reachableHashes = getCommitHashesReachable(root, 'HEAD');
+    if (reachableHashes === null) return { proposals: [], standDown: null }; // git unavailable — silent
+
+    const reachableIndex = buildReachableHashIndex(reachableHashes);
+    const proposals = [];
+    for (const candidate of candidates) {
+      const hit = candidate.hashes.find(hash => isHashReachable(hash, reachableIndex));
+      if (hit) proposals.push({ id: candidate.id, hash: hit });
+    }
+    return { proposals, standDown: null };
+  } catch {
+    return { proposals: [], standDown: null };
+  }
+}
+
+/**
+ * Format one proposal line. Pure, no color codes — the caller wraps it, the
+ * same convention buildWaveCompletionAnnouncement() follows. Names the task
+ * id, the reachable evidence hash (so the operator can verify the claim
+ * rather than trust it), and the exact ritual command that books it.
+ *
+ * @param {{id: string, hash: string}} proposal
+ * @returns {string}
+ */
+function formatShippedUnbookedProposal({ id, hash }) {
+  return `${id} is ${SHIPPED_UNBOOKED_ADVISORY_STATUS} but its evidence commit ${hash} is already reachable from HEAD ` +
+    `— shipped, not yet booked. Book it with: ./scripts/mavp-operator --set-status ${id} merged`;
+}
+
+/**
+ * Print the advisory (proposal lines, or the shallow stand-down line) for a
+ * non-interactive close. No-op when there is nothing to say. Complements — never
+ * replaces or suppresses — buildWaveCompletionAnnouncement()'s "Wave N stays
+ * open — T-NNN still qa_passed" line, which continues to print as before.
+ *
+ * @param {string} markdown - TASK_STATUS.md content to derive from
+ * @param {string} root - absolute path to the git working tree
+ */
+function printShippedUnbookedAdvisory(markdown, root) {
+  const { proposals, standDown } = computeShippedUnbookedAdvisory(markdown, root);
+  if (standDown) {
+    console.log(`${DIM}${standDown}${RESET}`);
+    return;
+  }
+  for (const proposal of proposals) {
+    console.log(`${CYAN}${formatShippedUnbookedProposal(proposal)}${RESET}`);
+  }
+}
+
 async function runNonInteractive(args) {
   const today = new Date().toISOString().slice(0, 10);
 
@@ -1386,6 +1584,13 @@ async function runNonInteractive(args) {
     const announcement = buildWaveCompletionAnnouncement(allMerged, sessionWave, remainingTasks);
     console.log(`${allMerged ? `${CYAN}${BOLD}` : YELLOW}${announcement}${RESET}`);
   }
+
+  // T-637: shipped-but-unbooked advisory — COMPLEMENTS the announcement above
+  // (which names every task holding the wave open) by naming the subset that
+  // merely owes its merge ritual. Derived from the post-sweep content so a task
+  // booked merged by THIS run is never advised to be booked again. Propose-only:
+  // prints, never writes.
+  printShippedUnbookedAdvisory(updatedContent, ROOT);
 
   // Resolved next_action: preserve existing Main Agent value when wave is still open
   const resolvedNextAction = allMerged
@@ -1957,4 +2162,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, buildAutoSummary };
+module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE };

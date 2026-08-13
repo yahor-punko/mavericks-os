@@ -3813,6 +3813,74 @@ function getCommitHashesReachableFromHead(root) {
 }
 
 /**
+ * Extract candidate `commit:` hashes from an evidence block (T-448). Cross-repo
+ * evidence may carry multiple `commit:` lines (one per repo), so this returns
+ * an array. Each match is re-validated against the anchored hex pattern before
+ * being returned — defensive, since the extraction regex already constrains
+ * the character class but a literal validation step is required per T-448's
+ * acceptance criteria ("hashes are validated against /^[0-9a-f]{7,40}$/ before
+ * any git invocation").
+ *
+ * T-637: promoted here from mavp-validator.js (where it lived since T-448) so
+ * the validator's commit_unreachable check and --close-session's
+ * shipped-but-unbooked advisory share ONE implementation of the
+ * extract-then-batch-reachability pattern instead of two copies that can
+ * drift. The validator imports it from this lib and re-exports it unchanged,
+ * so every existing caller (including scripts/test-commit-reachable.js) is
+ * unaffected.
+ *
+ * @param {string|null} evidence - Raw evidence text (may be null/empty).
+ * @returns {string[]} Zero or more validated hex hashes.
+ */
+function extractCommitHashesFromEvidence(evidence) {
+  if (!evidence) return [];
+  const HASH_PATTERN = /^[0-9a-f]{7,40}$/;
+  const matches = evidence.match(/commit:\s*[0-9a-f]{7,40}\b/gi) || [];
+  return matches
+    .map((m) => m.replace(/^commit:\s*/i, '').trim())
+    .filter((hash) => HASH_PATTERN.test(hash));
+}
+
+/**
+ * Build a lookup index from a flat list of full commit hashes, bucketed by
+ * their first 7 characters (git's default short-hash length). Lets
+ * isHashReachable() prefix-match a short evidence hash against only the
+ * handful of candidates sharing its prefix, instead of scanning every
+ * reachable hash for every evidence hash. Pairs with a SINGLE batched
+ * getCommitHashesReachable() call — never a subprocess per hash.
+ *
+ * T-637: promoted here from mavp-validator.js alongside
+ * extractCommitHashesFromEvidence() above (see its note).
+ *
+ * @param {string[]} hashes - Full hashes (e.g. from getCommitHashesReachable).
+ * @returns {Map<string, string[]>} prefix bucket -> full hashes
+ */
+function buildReachableHashIndex(hashes) {
+  const index = new Map();
+  for (const hash of hashes) {
+    const key = hash.slice(0, 7);
+    if (!index.has(key)) index.set(key, []);
+    index.get(key).push(hash);
+  }
+  return index;
+}
+
+/**
+ * True when `hash` (7-40 hex chars) is a prefix of some hash in the index
+ * built by buildReachableHashIndex() — i.e. reachable from whatever revspec
+ * that index was built from.
+ *
+ * @param {string} hash
+ * @param {Map<string, string[]>} reachableIndex
+ * @returns {boolean}
+ */
+function isHashReachable(hash, reachableIndex) {
+  const candidates = reachableIndex.get(hash.slice(0, 7));
+  if (!candidates) return false;
+  return candidates.some((full) => full.startsWith(hash));
+}
+
+/**
  * Default mtime safety threshold (ms) for worktree prune eligibility (T-559).
  * A worktree whose directory was touched more recently than this is never
  * prunable, regardless of classification — this exists specifically to
@@ -4126,6 +4194,7 @@ module.exports = {
   armRecheck,
   buildContextBundle,
   buildDeployQueue,
+  buildReachableHashIndex,
   buildTaskStatusEntry,
   classifyNextAction,
   classifyWorktrees,
@@ -4136,6 +4205,7 @@ module.exports = {
   DEFERRED_TASK_STATUS_HEADING,
   ensureSectionHeading,
   extractBlockField,
+  extractCommitHashesFromEvidence,
   extractHeadingIds,
   extractTrajectories,
   findPreviousCloseSessionCommit,
@@ -4155,6 +4225,7 @@ module.exports = {
   insertIntoActiveTasks,
   insertIntoActiveWave,
   isBlockedByEmpty,
+  isHashReachable,
   isHoldEmpty,
   isInsideGitRepo,
   isShallowRepository,

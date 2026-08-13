@@ -149,7 +149,7 @@ function runCloseSessionCli(repoDir, fakeScriptsDir, argv, input) {
 }
 
 function cleanup(...dirs) {
-  for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 }
 
 // Case 8: non-interactive, validator exits 1 (drifting) — commit IS created,
@@ -796,8 +796,7 @@ function makeNoRemoteFixtureRepo() {
 
   console.log('Case 19 passed: deploy_contours=1 + reachable commit renders auto-deploy label');
 
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.rmSync(bareDir, { recursive: true, force: true });
+  cleanup(dir, bareDir);
 }
 
 // Case 20: deploy_contours=1, merged task, evidence commit NOT reachable
@@ -819,8 +818,7 @@ function makeNoRemoteFixtureRepo() {
 
   console.log('Case 20 passed: deploy_contours=1 + unreachable commit renders a held/not-pushed label, not auto-deploy');
 
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.rmSync(bareDir, { recursive: true, force: true });
+  cleanup(dir, bareDir);
 }
 
 // Case 21: deploy_contours=0 mirrors the same reachable/unreachable behavior
@@ -841,8 +839,7 @@ function makeNoRemoteFixtureRepo() {
 
   console.log('Case 21 passed: deploy_contours=0 renders terminal label only when the commit is actually pushed');
 
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.rmSync(bareDir, { recursive: true, force: true });
+  cleanup(dir, bareDir);
 }
 
 // Case 22: deploy_contours=2 — deployed_dev/deployed_prod/merged/other each
@@ -858,7 +855,7 @@ function makeNoRemoteFixtureRepo() {
 
   console.log('Case 22 passed: deploy_contours=2 maps deployed_dev/deployed_prod/merged to distinct labels — no fallthrough bug');
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  cleanup(dir);
 }
 
 // Case 23: no remote configured degrades to a status-only label without
@@ -876,7 +873,7 @@ function makeNoRemoteFixtureRepo() {
 
   console.log('Case 23 passed: no remote configured degrades to a status-only label without throwing');
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  cleanup(dir);
 }
 
 console.log('All T-445 assertions passed.');

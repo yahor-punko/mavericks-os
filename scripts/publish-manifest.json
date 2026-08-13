@@ -129,6 +129,7 @@
     "scripts/test-check-sync-home-drift.js",
     "scripts/test-check-sync-hook-drift.js",
     "scripts/test-close-session-mode.js",
+    "scripts/test-close-session-shipped-unbooked.js",
     "scripts/test-close-session-terminal-sweep.js",
     "scripts/test-commit-reachable.js",
     "scripts/test-conflicting-evidence-fields.js",
@@ -249,6 +250,7 @@
     "SKILL_PROPOSALS/developer-2026-05-29.md": "internal skill-reflection proposal — private review artifact, not framework code",
     "SKILL_PROPOSALS/architect-2026-07-24.md": "internal skill-reflection proposal (T-471) — private review artifact, not framework code",
     "SKILL_PROPOSALS/architect-qa-2026-07-28.md": "internal skill-reflection proposal (T-555) — private review artifact, not framework code",
+    "SKILL_PROPOSALS/architect-2026-08-13.md": "internal skill-reflection proposal (wave-78 close gate, finding D) — private review artifact, not framework code",
     "docs/PUBLIC_RELEASE_STRATEGY.md": "internal maintainer process — how THIS repo syncs private→public (T-326); not adopter-facing",
     "docs/rca/2026-07-publish-manifest-registration.md": "per-incident RCA record (T-399), not framework content shipped to adopters",
     "docs/rca/2026-07-subagent-truncation-cap-hits.md": "per-incident RCA record (T-551), not framework content shipped to adopters"

@@ -39,6 +39,16 @@ const {
   getCommitHashesReachableFromHead,
   getCommitHashesReachable,
   isShallowRepository,
+  // T-637: extractCommitHashesFromEvidence/buildReachableHashIndex/
+  // isHashReachable moved into the shared lib so --close-session's
+  // shipped-but-unbooked advisory reuses the same batched-reachability
+  // implementation this file's checkCommitReachable() uses, instead of a
+  // second copy. They are re-exported unchanged from this module's exports
+  // below, so existing require()rs (scripts/test-commit-reachable.js) are
+  // unaffected.
+  extractCommitHashesFromEvidence,
+  buildReachableHashIndex,
+  isHashReachable,
 } = require('./mavp-operator-lib');
 
 /**
@@ -1713,24 +1723,6 @@ function checkMissingBacklogRecordAnywhere(allBacklogRecords, allTaskStatusRecor
 }
 
 /**
- * Extract candidate `commit:` hashes from an evidence block (T-448). Cross-repo
- * evidence may carry multiple `commit:` lines (one per repo), so this returns
- * an array. Each match is re-validated against the anchored hex pattern before
- * being returned — defensive, since the extraction regex already constrains
- * the character class but a literal validation step is required per the
- * acceptance criteria ("hashes are validated against /^[0-9a-f]{7,40}$/ before
- * any git invocation").
- */
-function extractCommitHashesFromEvidence(evidence) {
-  if (!evidence) return [];
-  const HASH_PATTERN = /^[0-9a-f]{7,40}$/;
-  const matches = evidence.match(/commit:\s*[0-9a-f]{7,40}\b/gi) || [];
-  return matches
-    .map((m) => m.replace(/^commit:\s*/i, '').trim())
-    .filter((hash) => HASH_PATTERN.test(hash));
-}
-
-/**
  * Extract `commit:` entries from an evidence block, each carrying its
  * optional parenthesized cross-repo annotation (T-489) — the documented
  * "Cross-repo evidence format" convention: `commit: <hash> (repo-a)`.
@@ -1758,30 +1750,6 @@ function extractCommitEntriesFromEvidence(evidence) {
     entries.push({ hash, repoAnnotation: repoAnnotation || null });
   }
   return entries;
-}
-
-/**
- * Build a lookup index from a flat list of full commit hashes, bucketed by
- * their first 7 characters (git's default short-hash length). Lets
- * isHashReachable() prefix-match a short evidence hash against only the
- * handful of candidates sharing its prefix, instead of scanning every
- * reachable hash for every evidence hash.
- */
-function buildReachableHashIndex(hashes) {
-  const index = new Map();
-  for (const hash of hashes) {
-    const key = hash.slice(0, 7);
-    if (!index.has(key)) index.set(key, []);
-    index.get(key).push(hash);
-  }
-  return index;
-}
-
-/** True when `hash` (7-40 hex chars) is a prefix of some hash reachable from HEAD. */
-function isHashReachable(hash, reachableIndex) {
-  const candidates = reachableIndex.get(hash.slice(0, 7));
-  if (!candidates) return false;
-  return candidates.some((full) => full.startsWith(hash));
 }
 
 /**
