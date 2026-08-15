@@ -3,9 +3,16 @@
 // Usage: node mavp-operator-ack-recheck.js RC-N [--rearm]
 
 const path = require('node:path');
-const { ackRecheck, ROOT } = require('./mavp-operator-lib.js');
+const { ackRecheck, ROOT, printRepoIdentityHeader, guardMutatingRoot } = require('./mavp-operator-lib.js');
 
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
+
+printRepoIdentityHeader(ROOT, { mutating: true });
+
+const rootGuard = guardMutatingRoot(ROOT, '--ack-recheck');
+if (rootGuard.blocked) {
+  process.exit(1);
+}
 
 function printUsage() {
   console.error('Usage: mavp-operator --ack-recheck RC-N [--rearm]');

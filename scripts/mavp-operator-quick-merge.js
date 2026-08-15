@@ -62,6 +62,7 @@ const {
   insertIntoActiveTasks,
   updateLastTaskId,
   printRepoIdentityHeader,
+  guardMutatingRoot,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -476,7 +477,13 @@ async function main() {
     return;
   }
 
-  printRepoIdentityHeader(ROOT);
+  printRepoIdentityHeader(ROOT, { mutating: true });
+
+  const rootGuard = guardMutatingRoot(ROOT, '--quick-merge');
+  if (rootGuard.blocked) {
+    process.exitCode = 1;
+    return;
+  }
 
   const today = new Date().toISOString().slice(0, 10);
   console.log(`\n${BOLD}MavP Quick Merge${RESET} ${DIM}${today}${RESET}`);

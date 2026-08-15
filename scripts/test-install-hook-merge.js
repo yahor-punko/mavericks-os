@@ -33,7 +33,10 @@
 //      (c) a genuine validator exit-1 (drifting/warning-only) fixture
 //          produces NO stderr; (d) a genuine validator exit-2 (repair
 //          required/failure) fixture prints the full validator report on
-//          stderr.
+//          stderr; (e) (T-628) the same exit-2 fixture, edited via a
+//          PROCESS_STATE.json payload instead of BACKLOG.md, also prints the
+//          full validator report — proving the file-path filter now fires on
+//          PROCESS_STATE.json too.
 //   7. (T-430) buildPostToolUseHookCommand() self-preference: a self-hosting
 //      checkout (own scripts/mavp-validator.js) resolves MAVERICKS to its own
 //      scripts/, never a stale MAVERICKS_HOME.
@@ -425,6 +428,23 @@ try {
     'FAIL: managed hook stderr for the exit-2 fixture does not contain the validator\'s full repair-required report'
   );
   console.log('Assertion 6d passed: validator exit-2 (repair required) fixture prints full validator output on stderr, hook exits 0');
+
+  // (e) T-628: the file-path filter must additionally fire on PROCESS_STATE.json
+  // edits (previously BACKLOG.md/TASK_STATUS.md only), so the same exit-2 gate
+  // proven in 6d also fires when the edited file is PROCESS_STATE.json.
+  const processStatePayload = JSON.stringify({ tool_input: { file_path: path.join(failScratch, 'PROCESS_STATE.json') } });
+  const processStateRun = spawnSync('bash', ['-c', failCmd], {
+    input: processStatePayload,
+    encoding: 'utf8',
+    env: execEnv,
+    timeout: 15000,
+  });
+  assert.strictEqual(processStateRun.status, 0, 'FAIL: managed hook did not exit 0 on a PROCESS_STATE.json edit (must always exit 0)');
+  assert.ok(
+    processStateRun.stderr && processStateRun.stderr.includes('duplicate_task_id'),
+    'FAIL: managed hook did not print full validator output on stderr for a PROCESS_STATE.json edit against a validator exit-2 (repair required) fixture'
+  );
+  console.log('Assertion 6e passed: PROCESS_STATE.json payload against a validator exit-2 fixture prints full validator output on stderr, hook exits 0 (T-628 filter extension)');
 
   // ============================================================
   // Assertion 7 (T-430): self-preference — a target project that IS a full

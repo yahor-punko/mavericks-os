@@ -26,9 +26,28 @@ function writeUtf8(filePath, content) {
  * initiative from <root>/PROCESS_STATE.json; degrades to a path-only line when
  * that file is absent or unparsable. Never throws.
  *
+ * T-624: when `options.mutating` is true (mutating ritual commands only), the
+ * identity line is ALSO written to stderr, duplicating stdout byte-for-byte,
+ * so a stdout-only pipe (e.g. `tail`) cannot cut the one line that names the
+ * resolved repo. Read-only reporting surfaces never pass this option and keep
+ * stdout-only output, unchanged.
+ *
  * @param {string} root - Absolute path to the project root being operated on.
+ * @param {{mutating?: boolean}} [options] - Set mutating:true from mutating
+ *   ritual scripts only.
  */
-function printRepoIdentityHeader(root) {
+function printRepoIdentityHeader(root, options = {}) {
+  const mutating = !!(options && options.mutating);
+  const emit = (line) => {
+    console.log(line);
+    if (mutating) {
+      try {
+        console.error(line);
+      } catch {
+        // swallow - never throw from a diagnostic header
+      }
+    }
+  };
   try {
     const processStateJsonPath = path.join(root, 'PROCESS_STATE.json');
     let state = null;
@@ -42,17 +61,137 @@ function printRepoIdentityHeader(root) {
     if (state && (state.wave !== undefined || state.initiative !== undefined)) {
       const wave = state.wave !== undefined ? state.wave : 'unknown';
       const initiative = state.initiative !== undefined ? state.initiative : 'unknown';
-      console.log(`repo: ${root} | wave: ${wave} | initiative: ${initiative}`);
+      emit(`repo: ${root} | wave: ${wave} | initiative: ${initiative}`);
     } else {
-      console.log(`repo: ${root}`);
+      emit(`repo: ${root}`);
     }
   } catch {
     try {
-      console.log(`repo: ${root}`);
+      emit(`repo: ${root}`);
     } catch {
       // swallow - never throw from a diagnostic header
     }
   }
+}
+
+/**
+ * T-624: literal shipped version placeholder written into
+ * templates/PROCESS_STATE_TEMPLATE.json's `mavericks_version` field. A fresh
+ * install (mavp-install.js, "Bootstrap PROCESS_STATE.json if missing") always
+ * overwrites this with a real MAVERICKS_VERSION string at seed time — so a
+ * tree whose PROCESS_STATE.json still carries this exact literal has never
+ * been installed or adopted by mavp-install.js.
+ */
+const NEVER_PROJECT_VERSION_PLACEHOLDER = '__MAVERICKS_VERSION__';
+
+/**
+ * T-624: documented override env var. Setting it to any truthy string (e.g.
+ * "1") permits a mutating ritual command to proceed against a root that would
+ * otherwise be refused by guardMutatingRoot() — for the rare sanctioned case
+ * (e.g. deliberately operating on a template/fixture tree by hand).
+ */
+const NEVER_PROJECT_ROOT_OVERRIDE_ENV = 'MAVERICKS_ALLOW_NEVER_PROJECT_ROOT';
+
+/**
+ * T-624: determine whether `root` is a "never-a-project" tree — one that has
+ * never been installed/adopted, or is the machine-shared adopter-resolved
+ * framework-source clone ($HOME/.mavericks) — so mutating ritual commands can
+ * refuse before writing to it.
+ *
+ * Two independent discriminators, either one is sufficient:
+ *   (a) <root>/PROCESS_STATE.json EXISTS and its `mavericks_version` field is
+ *       exactly the literal shipped placeholder (NEVER_PROJECT_VERSION_PLACEHOLDER).
+ *       A MISSING or unparsable PROCESS_STATE.json never triggers (a) — only
+ *       an on-disk file carrying the literal placeholder does.
+ *   (b) realpath(root) === realpath(<homeDir>/.mavericks).
+ *
+ * Both the home directory and the resolved root are injectable via `options`
+ * so tests never need a real ~/.mavericks or a real never-installed tree
+ * outside a temp fixture.
+ *
+ * @param {string} root - Absolute path to the project root being checked.
+ * @param {{homeDir?: string}} [options] - homeDir override for tests (defaults
+ *   to os.homedir()).
+ * @returns {{blocked: boolean, discriminator: ('placeholder'|'dot_mavericks'|null), resolvedRoot: string}}
+ */
+function checkNeverAProjectRoot(root, options = {}) {
+  const homeDir = options && options.homeDir !== undefined ? options.homeDir : os.homedir();
+  const resolvedRoot = safeRealpath(root);
+
+  // Discriminator (b): root resolves to $HOME/.mavericks (or injected homeDir).
+  try {
+    const dotMavericksPath = path.join(homeDir, '.mavericks');
+    const resolvedDotMavericks = safeRealpath(dotMavericksPath);
+    if (resolvedRoot === resolvedDotMavericks) {
+      return { blocked: true, discriminator: 'dot_mavericks', resolvedRoot };
+    }
+  } catch {
+    // degrade silently - never let the guard itself throw
+  }
+
+  // Discriminator (a): PROCESS_STATE.json exists and carries the literal
+  // shipped placeholder. A missing file never triggers this branch.
+  try {
+    const processStateJsonPath = path.join(root, 'PROCESS_STATE.json');
+    if (fs.existsSync(processStateJsonPath)) {
+      const parsed = JSON.parse(fs.readFileSync(processStateJsonPath, 'utf8'));
+      if (parsed && parsed.mavericks_version === NEVER_PROJECT_VERSION_PLACEHOLDER) {
+        return { blocked: true, discriminator: 'placeholder', resolvedRoot };
+      }
+    }
+  } catch {
+    // unparsable PROCESS_STATE.json never triggers (a) either
+  }
+
+  return { blocked: false, discriminator: null, resolvedRoot };
+}
+
+/**
+ * T-624: guard entry point for every mutating ritual command. Refuses BEFORE
+ * any file write when checkNeverAProjectRoot() finds a match, unless the
+ * override env var (NEVER_PROJECT_ROOT_OVERRIDE_ENV) is set to a truthy
+ * string. On refusal, prints the refusal message to BOTH stdout and stderr
+ * (a stdout-only pipe must not be able to cut it) naming the resolved path,
+ * the matched discriminator, and the override env var.
+ *
+ * @param {string} root - Absolute path to the project root being operated on.
+ * @param {string} commandName - The mutating command's flag name (e.g. "--set-status"),
+ *   used only in the refusal message.
+ * @param {{homeDir?: string, env?: Record<string,string>}} [options] - injectable
+ *   homeDir (see checkNeverAProjectRoot) and env (defaults to process.env) for tests.
+ * @returns {{blocked: boolean, overridden?: boolean, discriminator?: string, resolvedRoot?: string}}
+ */
+function guardMutatingRoot(root, commandName, options = {}) {
+  const env = (options && options.env) || process.env;
+  const overrideValue = env[NEVER_PROJECT_ROOT_OVERRIDE_ENV];
+  if (overrideValue) {
+    return { blocked: false, overridden: true };
+  }
+
+  const check = checkNeverAProjectRoot(root, options);
+  if (!check.blocked) {
+    return { blocked: false };
+  }
+
+  const discriminatorText = check.discriminator === 'dot_mavericks'
+    ? `root resolves to $HOME/.mavericks (the adopter-resolved framework-source clone)`
+    : `PROCESS_STATE.json's mavericks_version is the shipped placeholder "${NEVER_PROJECT_VERSION_PLACEHOLDER}" (never installed/adopted)`;
+
+  const message = [
+    `REFUSED: ${commandName} refuses to run against a never-a-project repo root.`,
+    `  resolved path: ${check.resolvedRoot}`,
+    `  matched discriminator: ${discriminatorText}`,
+    `  override: set ${NEVER_PROJECT_ROOT_OVERRIDE_ENV}=1 to permit this write for the rare sanctioned case.`,
+  ].join('\n');
+
+  console.log(message);
+  try {
+    console.error(message);
+  } catch {
+    // swallow - refusal must still report via stdout even if stderr fails
+  }
+
+  return { blocked: true, discriminator: check.discriminator, resolvedRoot: check.resolvedRoot };
 }
 
 /**
@@ -2822,21 +2961,119 @@ function readPermissionMode(root) {
 
 /**
  * Read the persisted runtime permission_mode written by the SessionStart hook
- * (see mavp-operator-agent.js — readStdinPermissionModeOverride / persistence).
- * Read-only — performs no writes.
+ * (see mavp-operator-agent.js — persistRuntimePermissionMode). Read-only —
+ * performs no writes.
+ *
+ * Shape (T-663): the state file is session-scoped JSON
+ * `{mode, session_id?, written_at}`, not a bare string. A legacy bare-string
+ * file (written before T-663) is still accepted for one release's worth of
+ * backward compatibility — it degrades to the trimmed raw text when JSON
+ * parsing fails.
  *
  * @param {string} root - Absolute path to the project root.
- * @returns {string|null} The trimmed persisted mode, or null when the state
- *   file is absent, empty, or unreadable.
+ * @returns {string|null} The persisted mode, or null when the state file is
+ *   absent, empty, unreadable, or has no usable `mode`.
  */
 function readPersistedPermissionMode(root) {
   try {
     const raw = fs.readFileSync(path.join(root, '.mavp', 'permission-mode'), 'utf8');
     const trimmed = raw.trim();
-    return trimmed.length > 0 ? trimmed : null;
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      const mode = parsed && parsed.mode;
+      return typeof mode === 'string' && mode.length > 0 ? mode : null;
+    } catch {
+      // Legacy bare-string format (pre T-663) — accept the trimmed text as-is.
+      return trimmed;
+    }
   } catch {
     return null;
   }
+}
+
+/**
+ * Resolve the effective permission mode using ONE shared fallback order,
+ * used by both --agent and --close-session (T-663 closes the prior
+ * asymmetry where --agent skipped the persisted file and --close-session
+ * skipped the hook payload):
+ *
+ *   1. hookPayloadMode  — a permission_mode observed on THIS session's
+ *      SessionStart hook stdin payload (only --agent can ever supply this;
+ *      --close-session never reads stdin, so it always omits this option).
+ *   2. persisted runtime — .mavp/permission-mode written by an earlier
+ *      session's hook payload (readPersistedPermissionMode).
+ *   3. settings file — readPermissionMode(root) (.claude/settings.local.json
+ *      / .claude/settings.json precedence, defaulting to "default").
+ *
+ * Read-only — performs no writes.
+ *
+ * @param {string} root - Absolute path to the project root.
+ * @param {{hookPayloadMode?: string|null}} [opts]
+ * @returns {{mode: string, source: 'hook_payload'|'persisted_runtime'|'settings_file'}}
+ */
+function resolvePermissionMode(root, opts = {}) {
+  const hookPayloadMode = opts && opts.hookPayloadMode;
+  if (typeof hookPayloadMode === 'string' && hookPayloadMode.length > 0) {
+    return { mode: hookPayloadMode, source: 'hook_payload' };
+  }
+  const persisted = readPersistedPermissionMode(root);
+  if (persisted) {
+    return { mode: persisted, source: 'persisted_runtime' };
+  }
+  return { mode: readPermissionMode(root), source: 'settings_file' };
+}
+
+/**
+ * Read ONLY `permissions.defaultMode` from a user-global Claude Code settings
+ * file. Read-only — performs no writes. Never echoes any other key from the
+ * file (it holds approval history and is large) — degrades silently
+ * (returns null) when the file is absent, unreadable, or malformed.
+ *
+ * @param {string} userGlobalPath - Absolute path to the user-global settings.json.
+ * @returns {string|null} The declared defaultMode, or null when absent/unset/unreadable.
+ */
+function readUserGlobalPermissionMode(userGlobalPath) {
+  try {
+    const content = fs.readFileSync(userGlobalPath, 'utf8');
+    const parsed = JSON.parse(content);
+    const mode = parsed && parsed.permissions && parsed.permissions.defaultMode;
+    return typeof mode === 'string' && mode.length > 0 ? mode : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Detect (never resolve) a divergence between the project-file permission
+ * mode resolution and a readable user-global ~/.claude/settings.json
+ * defaultMode. This is a FACT REPORT only: it reports both values and never
+ * claims a winner — precedence between the two is harness-owned and has
+ * been observed to diverge from what this project's own docs assert, so a
+ * winner computed here could itself be confidently wrong.
+ *
+ * Degrades silently (returns null) when the user-global file is unreadable,
+ * malformed, or unset, or when its value matches the project resolution.
+ *
+ * The user-global path defaults to `~/.claude/settings.json` but is
+ * injectable via the `userGlobalPath` argument (unit tests) or the
+ * MAVERICKS_USER_GLOBAL_SETTINGS_PATH env var (integration tests that spawn
+ * mavp-operator-agent.js as a subprocess) — neither test path needs a real
+ * `~/.claude/settings.json` to exist.
+ *
+ * @param {string} root - Absolute path to the project root.
+ * @param {string} [userGlobalPath] - Override path to the user-global settings file.
+ * @returns {{project: string, user_global: string}|null}
+ */
+function detectPermissionModeConflict(root, userGlobalPath) {
+  const resolvedUserGlobalPath = userGlobalPath
+    || process.env.MAVERICKS_USER_GLOBAL_SETTINGS_PATH
+    || path.join(os.homedir(), '.claude', 'settings.json');
+  const userGlobalMode = readUserGlobalPermissionMode(resolvedUserGlobalPath);
+  if (!userGlobalMode) return null;
+  const projectMode = readPermissionMode(root);
+  if (userGlobalMode === projectMode) return null;
+  return { project: projectMode, user_global: userGlobalMode };
 }
 
 /**
@@ -2851,6 +3088,42 @@ function readPersistedPermissionMode(root) {
  *   (`v1.2.3`/`1.2.3`) and commit-count phrases (`14 commits`, `14 unpushed commits`,
  *   `ahead 14`). Deduplicated. Empty array when nothing matches.
  *
+ * T-628 (RC-1, docs/rca/2026-08-operator-channel-state-artifacts.md): semver
+ * matching is POSITION-sensitive, not a plain substring scan. A version literal
+ * that names the ACTION-TARGET of a mutation directive ("bump to 0.43.0",
+ * "amend the 0.42.1 section", "0.42.1 bump") is exactly the fact the next
+ * developer/writer needs to complete the directive — it is not a stale claim
+ * about current state, so it must NOT be flagged. A version literal that
+ * ASSERTS current state ("the repo is at 0.42.1", "currently on v1.2.3") has no
+ * invalidation trigger once written and must still be flagged. The boundary
+ * inspects the immediate left/right context around each literal — it is not a
+ * list of the specific historical strings that motivated it:
+ *   - preceded by a state-assertion word (is/are/at/on/now/currently/already/
+ *     still) -> state assertion, always flagged. Checked FIRST, so it wins
+ *     over the action-target check below for any input that could match both.
+ *   - otherwise preceded by "to" (the "<verb> to X" construction, e.g. "bump
+ *     to X") or followed by a target noun (bump/release/section/version, e.g.
+ *     "X bump"/"the X section") -> action-target position, not flagged.
+ *   - otherwise (no cue on either side) -> flagged, preserving the prior
+ *     conservative default for ambiguous/bare version literals.
+ * Commit-count and ahead-N patterns are NOT position-sensitive — they are
+ * always a claim about current repo state, never a directive's target, so
+ * they are matched exactly as before this change.
+ *
+ * KNOWN BOUNDARY CASE, documented rather than "fixed" (widening the matcher
+ * to cover it would trade a false positive for a false negative on the
+ * state-assertion form, which this task's re-scope explicitly rejects):
+ * "cut the release at 0.45.0" still FLAGS, because "at" is a
+ * STATE_ASSERTION_PRECEDER and that check runs first, even though the
+ * literal here is actually the directive's target. The state-assertion-wins
+ * ordering is deliberate and correct for the genuine state-assertion case
+ * ("confirm the repo is at 0.45.0") and is not narrowed further just to
+ * admit this one phrasing. The COMPLIANT REWRITE is to lead with the target
+ * noun instead of "at": "cut the 0.45.0 release" classifies clean, because
+ * the ACTION_TARGET_FOLLOWER ("release") matches before any state-assertion
+ * preceder is in play. The validator finding's suggestedAction names this
+ * rewrite directly so a blocked operator has the fix in front of them.
+ *
  * @param {string|null|undefined} str - The next_action value to classify.
  * @returns {{ directive: boolean, volatile_facts: string[] }}
  */
@@ -2862,15 +3135,34 @@ function classifyNextAction(str) {
 
   const directive = /^T-\d+/.test(trimmed);
 
-  const patterns = [
-    /\bv?\d+\.\d+\.\d+\b/g,
+  const seen = new Set();
+  const volatile_facts = [];
+
+  // Semver — position-sensitive (see the doc comment above for the boundary).
+  const STATE_ASSERTION_PRECEDER = /\b(?:is|are|at|on|now|currently|already|still)\s*$/i;
+  const ACTION_TARGET_PRECEDER = /\bto\s*$/i;
+  const ACTION_TARGET_FOLLOWER = /^\s*(?:bump|release|section|version)\b/i;
+  const versionPattern = /\bv?\d+\.\d+\.\d+\b/g;
+  let m;
+  while ((m = versionPattern.exec(trimmed)) !== null) {
+    const before = trimmed.slice(0, m.index);
+    const after = trimmed.slice(m.index + m[0].length);
+    const isStateAssertion = STATE_ASSERTION_PRECEDER.test(before);
+    const isActionTarget = !isStateAssertion &&
+      (ACTION_TARGET_PRECEDER.test(before) || ACTION_TARGET_FOLLOWER.test(after));
+    if (isActionTarget) continue;
+    if (!seen.has(m[0])) {
+      seen.add(m[0]);
+      volatile_facts.push(m[0]);
+    }
+  }
+
+  // Commit-count / ahead-N — unchanged, not position-sensitive.
+  const otherPatterns = [
     /\b\d+\s+(?:unpushed\s+)?commits?\b/gi,
     /\bahead\s+\d+\b/gi,
   ];
-
-  const seen = new Set();
-  const volatile_facts = [];
-  for (const pattern of patterns) {
+  for (const pattern of otherPatterns) {
     const matches = trimmed.match(pattern) || [];
     for (const match of matches) {
       if (!seen.has(match)) {
@@ -3953,6 +4245,34 @@ function safeRealpath(p) {
 }
 
 /**
+ * T-660: is `projectRoot` the framework's OWN installation (self-mode), as
+ * opposed to an adopter project that merely resolves the framework's shared
+ * scripts/ directory via MAVERICKS_SCRIPTS? `mavp-version.js` (like
+ * `mavp-operator-lib.js`) is never synced into an adopter project — it is
+ * always resolved from `mavericksScriptsDir`, the directory a caller already
+ * had to resolve to require this very library (see
+ * resolveMavericksScriptsDir() in mavp-operator-close-session.js /
+ * mavp-operator-agent.js) — so "self-mode" reduces to one comparison: does
+ * the project root the caller is operating on realpath-equal the parent of
+ * that scripts directory (i.e. the framework checkout mavp-version.js lives
+ * under)?
+ *
+ * Deliberately realpath-, not string-, equal: the two paths can differ by a
+ * symlink hop (e.g. macOS's /tmp -> /private/tmp) or a trailing separator
+ * and still name the same tree — a string comparison would misclassify that
+ * case as adopter-mode and silently skip the self-mode stamp.
+ *
+ * @param {string} projectRoot - the resolved project root under test (e.g.
+ *   `ROOT` in mavp-operator-close-session.js).
+ * @param {string} mavericksScriptsDir - the resolved scripts/ directory that
+ *   mavp-version.js lives in (e.g. `MAVERICKS_SCRIPTS_DIR`).
+ * @returns {boolean}
+ */
+function isSelfHostedRoot(projectRoot, mavericksScriptsDir) {
+  return safeRealpath(projectRoot) === safeRealpath(path.dirname(mavericksScriptsDir));
+}
+
+/**
  * Parse `git worktree list --porcelain` into structured entries. Each block
  * is separated by a blank line; fields are `worktree <path>`, `HEAD <hash>`,
  * `branch refs/heads/<name>` (or the bare tokens `detached`/`bare`/`locked`/
@@ -4238,6 +4558,7 @@ module.exports = {
   buildDeployQueue,
   buildReachableHashIndex,
   buildTaskStatusEntry,
+  checkNeverAProjectRoot,
   classifyNextAction,
   classifyWorktrees,
   clip,
@@ -4245,6 +4566,10 @@ module.exports = {
   computeDueRechecks,
   computeMustRead,
   DEFERRED_TASK_STATUS_HEADING,
+  detectPermissionModeConflict,
+  guardMutatingRoot,
+  NEVER_PROJECT_ROOT_OVERRIDE_ENV,
+  NEVER_PROJECT_VERSION_PLACEHOLDER,
   ensureSectionHeading,
   extractBlockField,
   extractCommitHashesFromEvidence,
@@ -4270,6 +4595,7 @@ module.exports = {
   isHashReachable,
   isHoldEmpty,
   isInsideGitRepo,
+  isSelfHostedRoot,
   isShallowRepository,
   isTaskHeadingFor,
   isValidHashFormat,
@@ -4300,6 +4626,7 @@ module.exports = {
   printRepoIdentityHeader,
   readPermissionMode,
   readPersistedPermissionMode,
+  readUserGlobalPermissionMode,
   readTaskField,
   relativeTime,
   renameTask,
@@ -4309,6 +4636,7 @@ module.exports = {
   resolveCommitHash,
   resolveContextBundlePath,
   resolveModuleRegistryPath,
+  resolvePermissionMode,
   resolveRepoMapPath,
   resolveTaskOrigin,
   safeRealpath,

@@ -1,9 +1,17 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { printRepoIdentityHeader, guardMutatingRoot } = require('./mavp-operator-lib.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
+
+printRepoIdentityHeader(ROOT, { mutating: true });
+
+const rootGuard = guardMutatingRoot(ROOT, '--set-strategy-note');
+if (rootGuard.blocked) {
+  process.exit(1);
+}
 
 const note = process.argv[2] !== undefined ? process.argv[2] : null;
 

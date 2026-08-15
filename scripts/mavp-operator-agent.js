@@ -41,7 +41,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { buildDeployQueue, classifyNextAction, computeDueRechecks, computeMustRead, generateProcessStateMd, getDeployPendingForRepo, IN_FLIGHT_STATUSES, parseBlockedBy, parseHold, parseTasksWithRepo, readPermissionMode, resolveContextBundlePath } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { buildDeployQueue, classifyNextAction, computeDueRechecks, computeMustRead, detectPermissionModeConflict, generateProcessStateMd, getDeployPendingForRepo, IN_FLIGHT_STATUSES, parseBlockedBy, parseHold, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
@@ -505,22 +505,23 @@ function runValidatorCheck() {
 }
 
 /**
- * Attempt to read a SessionStart hook stdin payload for a runtime
- * permission_mode override, without ever blocking.
+ * Attempt to read a SessionStart hook stdin JSON payload, without ever
+ * blocking.
  *
  * When Claude Code invokes this script as a SessionStart hook, it pipes a
- * JSON payload on stdin that includes the live `permission_mode` (which can
- * differ from the settings-file default, e.g. after `claude --permission-mode
- * plan`). When invoked another way (e.g. the session-start skill's `!`
- * command path), no payload is piped: stdin is either an interactive TTY or
- * an already-closed/empty pipe. This function must never block waiting on
- * stdin in either of those cases.
+ * JSON payload on stdin. That payload MAY include the live `permission_mode`
+ * (which can differ from the settings-file default, e.g. after
+ * `claude --permission-mode plan`) and a `session_id` — but a hook-context
+ * payload that omits `permission_mode` is still a real, valid payload, and
+ * is distinguished below (T-663) from "no payload at all" (e.g. the
+ * session-start skill's `!` command path, where stdin is either an
+ * interactive TTY or an already-closed/empty pipe). This function must
+ * never block waiting on stdin in either case.
  *
- * @returns {string|null} The runtime permission_mode from the hook payload,
- *   or null when no usable payload is present — caller should fall back to
- *   readPermissionMode(root).
+ * @returns {object|null} The parsed JSON payload object, or null when no
+ *   usable payload is present (TTY, empty stdin, or malformed JSON).
  */
-function readStdinPermissionModeOverride() {
+function readStdinHookPayload() {
   // An interactive TTY has no piped payload — reading from it would block
   // waiting on keyboard input, so skip the read entirely in that case.
   if (process.stdin.isTTY) return null;
@@ -530,8 +531,7 @@ function readStdinPermissionModeOverride() {
     const raw = fs.readFileSync(0, 'utf8');
     if (!raw || !raw.trim()) return null;
     const payload = JSON.parse(raw);
-    const mode = payload && payload.permission_mode;
-    return typeof mode === 'string' && mode.length > 0 ? mode : null;
+    return payload && typeof payload === 'object' ? payload : null;
   } catch {
     // No payload, empty stdin, or malformed JSON — fall back silently.
     return null;
@@ -539,24 +539,74 @@ function readStdinPermissionModeOverride() {
 }
 
 /**
- * Persist a runtime permission_mode override (from the SessionStart hook
- * stdin payload) to a gitignored state file so other tools invoked later in
- * the session (e.g. --close-session) can honor a live override even when
- * the settings files on disk say otherwise.
+ * Extract a usable `permission_mode` string from a parsed hook payload.
+ *
+ * @param {object|null} payload - Result of readStdinHookPayload().
+ * @returns {string|null}
+ */
+function extractHookPayloadPermissionMode(payload) {
+  const mode = payload && payload.permission_mode;
+  return typeof mode === 'string' && mode.length > 0 ? mode : null;
+}
+
+/**
+ * Extract a usable `session_id` string from a parsed hook payload, when
+ * present — purely diagnostic, stored alongside the persisted mode.
+ *
+ * @param {object|null} payload - Result of readStdinHookPayload().
+ * @returns {string|null}
+ */
+function extractHookPayloadSessionId(payload) {
+  const sessionId = payload && payload.session_id;
+  return typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : null;
+}
+
+/**
+ * Persist a runtime permission_mode override (from a SessionStart hook
+ * stdin payload observed THIS session) to a gitignored state file so other
+ * tools invoked later in the session (e.g. --close-session) can honor a
+ * live override even when the settings files on disk say otherwise.
+ *
+ * Shape (T-663): session-scoped JSON `{mode, session_id?, written_at}` —
+ * not a bare string. A `session_id` is included only when the hook payload
+ * carried one.
  *
  * Best-effort and silent: any failure (unwritable filesystem, missing
  * permissions, etc.) is swallowed so this never breaks the --agent path.
  *
  * @param {string} root - Absolute path to the project root.
- * @param {string} mode - The runtime permission_mode to persist.
+ * @param {{mode: string, sessionId?: string|null}} args
  */
-function persistRuntimePermissionMode(root, mode) {
+function persistRuntimePermissionMode(root, { mode, sessionId } = {}) {
   try {
     const dir = path.join(root, '.mavp');
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'permission-mode'), `${mode}\n`, 'utf8');
+    const record = { mode, written_at: new Date().toISOString() };
+    if (sessionId) record.session_id = sessionId;
+    fs.writeFileSync(path.join(dir, 'permission-mode'), `${JSON.stringify(record)}\n`, 'utf8');
   } catch {
     // Best-effort only — never break the --agent path on a write failure.
+  }
+}
+
+/**
+ * Delete a stale persisted runtime permission_mode. Called when THIS
+ * session's SessionStart hook payload is present (valid JSON, hook context)
+ * but omits `permission_mode` — an earlier session's persisted value can no
+ * longer be trusted as "this session's" state, so it is removed rather than
+ * left to serve a stale value. A manual (no-payload) invocation must NEVER
+ * call this — see the call site in main() for the payload-presence gate.
+ *
+ * Best-effort and silent: any failure (already absent, unwritable
+ * filesystem, etc.) is swallowed so this never breaks the --agent path.
+ *
+ * @param {string} root - Absolute path to the project root.
+ */
+function deletePersistedPermissionMode(root) {
+  try {
+    fs.rmSync(path.join(root, '.mavp', 'permission-mode'), { force: true });
+  } catch {
+    // Best-effort only — never break the --agent path on a delete failure.
   }
 }
 
@@ -731,15 +781,49 @@ function main() {
   // below when the combined set is empty.
   const mustRead = computeMustRead(ROOT, activeSlices);
 
-  const stdinPermissionMode = readStdinPermissionModeOverride();
-  if (stdinPermissionMode) persistRuntimePermissionMode(ROOT, stdinPermissionMode);
-  const permissionMode = stdinPermissionMode || readPermissionMode(ROOT);
+  // T-663: split effective-vs-declared permission-mode reporting.
+  //
+  // hookPayload is the raw parsed stdin JSON (or null when no payload was
+  // piped at all — TTY, empty stdin, or malformed JSON). Its PRESENCE (not
+  // just its permission_mode field) is what distinguishes a hook-context
+  // invocation from a manual one:
+  //   - hook payload present, permission_mode set  -> persist it (fresh, this session).
+  //   - hook payload present, permission_mode ABSENT -> hook-context invocation
+  //     whose payload lacks the field; any earlier-session persisted value is
+  //     now stale for THIS session and is deleted, never left to serve a
+  //     confidently-wrong value.
+  //   - hook payload absent (manual/no-payload invocation) -> leave any
+  //     persisted file untouched; it may still be valid from an earlier
+  //     session's hook context.
+  const hookPayload = readStdinHookPayload();
+  const hookPayloadMode = extractHookPayloadPermissionMode(hookPayload);
+  if (hookPayloadMode) {
+    persistRuntimePermissionMode(ROOT, { mode: hookPayloadMode, sessionId: extractHookPayloadSessionId(hookPayload) });
+  } else if (hookPayload !== null) {
+    deletePersistedPermissionMode(ROOT);
+  }
+
+  // Shared fallback order (payload > persisted > settings) — the SAME order
+  // --close-session now uses (see mavp-operator-close-session.js), closing
+  // the prior asymmetry where --agent skipped the persisted file entirely.
+  const { mode: permissionMode, source: permissionModeSource } = resolvePermissionMode(ROOT, { hookPayloadMode });
+  // verified is true ONLY when the value came from a harness payload observed
+  // THIS session — reading more files (persisted, settings) can never make
+  // this true, because a mode resolved once at session start can be stale
+  // even when every settings file agrees.
+  const permissionModeVerified = permissionModeSource === 'hook_payload';
+  // Fact report only, never a resolution — see detectPermissionModeConflict()
+  // in mavp-operator-lib.js for why no winner is picked here.
+  const permissionModeConflict = detectPermissionModeConflict(ROOT);
 
   const output = {
     initiative,
     stage,
     stage_owner: stageOwner,
     permission_mode: permissionMode,
+    permission_mode_source: permissionModeSource,
+    permission_mode_verified: permissionModeVerified,
+    ...(permissionModeConflict ? { permission_mode_conflict: permissionModeConflict } : {}),
     ...(wave ? { wave } : {}),
     ...(wave_session != null ? { wave_session } : {}),
     ...(wave_goal != null ? { wave_goal } : {}),

@@ -19,6 +19,15 @@
 //            despite a preset goal, and an empty answer leaves null (never
 //            restores the stale value).
 //
+// T-653 — same waveComplete discriminator, same block: `wave_status` must
+// reset to "planning" on wave advance (Part 1) and stay byte-unchanged on a
+// mid-wave close (Part 2). Without this, the ending wave's gate state (e.g.
+// "architect_reviewed") survives the `...current` spread verbatim onto the
+// freshly opened wave, letting it falsely read as already past its own
+// architect-review gate. Fixture default below is "architect_reviewed" so
+// Part 1 has a real leaked-value regression to detect (not just a fresh
+// "planning" that happened to already be correct).
+//
 // Node built-ins only — no npm dependencies (see .claude/rules/scripts.md).
 
 const fs = require('node:fs');
@@ -107,7 +116,7 @@ function writeProcessState(dir, overrides) {
     stage: 'execution',
     wave: 5,
     wave_session: 3,
-    wave_status: 'execution',
+    wave_status: 'architect_reviewed',
     wave_goal: 'old goal',
     wave_strategy_note: 'old note',
     parked_waves: [],
@@ -190,8 +199,13 @@ assert.strictEqual(
   null,
   `Part 1 FAIL: expected wave_strategy_note cleared to null on wave-complete close, got ${JSON.stringify(completeState.wave_strategy_note)}`
 );
+assert.strictEqual(
+  completeState.wave_status,
+  'planning',
+  `Part 1 FAIL: expected wave_status reset to "planning" on wave-complete close, got ${JSON.stringify(completeState.wave_status)}`
+);
 
-console.log('Part 1 (wave-complete close clears wave_goal AND wave_strategy_note) passed.');
+console.log('Part 1 (wave-complete close clears wave_goal, wave_strategy_note AND resets wave_status) passed.');
 
 // ---------------------------------------------------------------------------
 // Part 2 — the SAME fixture shape but mid-wave (one task still in_progress)
@@ -221,8 +235,13 @@ assert.strictEqual(
   'old note',
   `Part 2 FAIL: expected wave_strategy_note preserved verbatim on a mid-wave close, got ${JSON.stringify(midWaveState.wave_strategy_note)}`
 );
+assert.strictEqual(
+  midWaveState.wave_status,
+  'architect_reviewed',
+  `Part 2 FAIL: expected wave_status preserved byte-unchanged on a mid-wave close, got ${JSON.stringify(midWaveState.wave_status)}`
+);
 
-console.log('Part 2 (mid-wave close preserves wave_goal AND wave_strategy_note byte-for-byte) passed.');
+console.log('Part 2 (mid-wave close preserves wave_goal, wave_strategy_note AND wave_status byte-for-byte) passed.');
 
 // ---------------------------------------------------------------------------
 // Part 3 — interactive mode, wave-complete close, with a preset (non-empty)
@@ -270,8 +289,13 @@ async function runPart3() {
     null,
     `Part 3 FAIL: expected wave_strategy_note cleared on the interactive wave-complete close, got ${JSON.stringify(interactiveState.wave_strategy_note)}`
   );
+  assert.strictEqual(
+    interactiveState.wave_status,
+    'planning',
+    `Part 3 FAIL: expected wave_status reset to "planning" on the interactive wave-complete close, got ${JSON.stringify(interactiveState.wave_status)}`
+  );
 
-  console.log('Part 3 (interactive wave-complete close: prompt fires despite preset goal; empty answer leaves null) passed.');
+  console.log('Part 3 (interactive wave-complete close: prompt fires despite preset goal; empty answer leaves null; wave_status resets to planning) passed.');
   console.log('\nAll T-648 wave_goal/wave_strategy_note scoping assertions passed.');
 }
 

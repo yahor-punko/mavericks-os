@@ -118,9 +118,9 @@ function addMinimalState(root, { initiative = 'fixture-init' } = {}) {
 
 const AGENT_SCRIPT = path.join(__dirname, 'mavp-operator-agent.js');
 
-function runAgent(projectRoot, { input, timeout } = {}) {
+function runAgent(projectRoot, { input, timeout, env } = {}) {
   const options = {
-    env: { ...process.env, MAVERICKS_PROJECT_ROOT: projectRoot },
+    env: { ...process.env, MAVERICKS_PROJECT_ROOT: projectRoot, ...(env || {}) },
     encoding: 'utf8',
   };
   if (input !== undefined) options.input = input;
@@ -229,9 +229,11 @@ function runCloseSessionPush(root) {
 }
 
 // Test 10: hook payload with permission_mode "bypassPermissions" is persisted to
-// .mavp/permission-mode even when settings files say "acceptEdits", and a
-// subsequent non-interactive close-session --push suppresses the push with the
-// gate message (persisted value takes precedence over settings-file resolution).
+// .mavp/permission-mode (T-663: session-scoped JSON {mode, session_id?, written_at},
+// not a bare string) even when settings files say "acceptEdits", and a subsequent
+// non-interactive close-session --push suppresses the push with the gate message
+// (persisted value takes precedence over settings-file resolution via the shared
+// resolvePermissionMode() fallback order).
 {
   const root = makeCloseSessionFixture('close-session-persisted-bypass', {
     shared: { permissions: { defaultMode: 'acceptEdits' } },
@@ -240,16 +242,27 @@ function runCloseSessionPush(root) {
   const hookPayload = JSON.stringify({
     hook_event_name: 'SessionStart',
     source: 'startup',
+    session_id: 'sess-abc123',
     permission_mode: 'bypassPermissions',
   });
   runAgent(root, { input: hookPayload, timeout: 5000 });
 
   const stateFilePath = path.join(root, '.mavp', 'permission-mode');
   assert.ok(fs.existsSync(stateFilePath), 'Test 10 FAIL: expected .mavp/permission-mode to be written by agent.js');
+  const persistedRecord = JSON.parse(fs.readFileSync(stateFilePath, 'utf8').trim());
   assert.strictEqual(
-    fs.readFileSync(stateFilePath, 'utf8').trim(),
+    persistedRecord.mode,
     'bypassPermissions',
-    'Test 10 FAIL: expected persisted state file to contain "bypassPermissions"'
+    `Test 10 FAIL: expected persisted state file's "mode" to be "bypassPermissions", got ${JSON.stringify(persistedRecord)}`
+  );
+  assert.strictEqual(
+    persistedRecord.session_id,
+    'sess-abc123',
+    `Test 10 FAIL: expected persisted state file's "session_id" to carry the hook payload's session_id, got ${JSON.stringify(persistedRecord)}`
+  );
+  assert.ok(
+    typeof persistedRecord.written_at === 'string' && persistedRecord.written_at.length > 0,
+    `Test 10 FAIL: expected persisted state file to carry a "written_at" timestamp, got ${JSON.stringify(persistedRecord)}`
   );
 
   const output = runCloseSessionPush(root);
@@ -258,7 +271,7 @@ function runCloseSessionPush(root) {
     'Test 10 FAIL: expected close-session --push to print the bypassPermissions gate message ' +
       `even though settings.json says "acceptEdits". Output was:\n${output}`
   );
-  console.log('Test 10 passed: hook payload permission_mode is persisted to .mavp/permission-mode, and close-session --push honors it over settings-file "acceptEdits"');
+  console.log('Test 10 passed: hook payload permission_mode is persisted to .mavp/permission-mode as session-scoped JSON {mode, session_id, written_at}, and close-session --push honors it over settings-file "acceptEdits"');
 }
 
 // Test 11: no persisted state file present — close-session falls back to
@@ -399,6 +412,85 @@ function runCloseSessionPush(root) {
   assert.ok(!/T-3\d\d/.test(rawOutput), `Test 12 FAIL: --agent output leaked a real mavericks task ID (T-3xx range), MAVERICKS_PROJECT_ROOT redirect failed. Output: ${rawOutput}`);
 
   console.log('Test 12 passed: MAVERICKS_PROJECT_ROOT redirects agent.js data-root reads to the fixture (initiative "fixture-init", active_slices T-001 "Zebra fixture task", next_action references T-001), with no leakage of the real mavericks repo state');
+}
+
+// --- T-663: effective-vs-declared split with provenance ---
+//
+// A nonexistent path is used to pin MAVERICKS_USER_GLOBAL_SETTINGS_PATH in
+// Tests 13/14 below so these two tests never pick up whatever REAL
+// ~/.claude/settings.json happens to exist on the machine running the
+// suite — the injectability requirement (T-663) is exactly what makes this
+// possible without needing a real user-global file.
+const NO_USER_GLOBAL_PATH = path.join(SCRATCH_ROOT, 'no-such-user-global-settings.json');
+
+// Test 13: stdin payload with permission_mode "bypassPermissions" ->
+// permission_mode_source is "hook_payload" and permission_mode_verified is true.
+{
+  const root = makeFixture('t663-hook-payload-verified', {
+    shared: { permissions: { defaultMode: 'acceptEdits' } },
+  });
+  addMinimalState(root);
+  const hookPayload = JSON.stringify({
+    hook_event_name: 'SessionStart',
+    source: 'startup',
+    permission_mode: 'bypassPermissions',
+  });
+  const output = runAgent(root, {
+    input: hookPayload,
+    timeout: 5000,
+    env: { MAVERICKS_USER_GLOBAL_SETTINGS_PATH: NO_USER_GLOBAL_PATH },
+  });
+  assert.strictEqual(output.permission_mode, 'bypassPermissions', 'Test 13 FAIL: expected permission_mode "bypassPermissions" from hook payload');
+  assert.strictEqual(output.permission_mode_source, 'hook_payload', `Test 13 FAIL: expected permission_mode_source "hook_payload", got ${JSON.stringify(output.permission_mode_source)}`);
+  assert.strictEqual(output.permission_mode_verified, true, `Test 13 FAIL: expected permission_mode_verified true, got ${JSON.stringify(output.permission_mode_verified)}`);
+  console.log('Test 13 passed: hook stdin payload permission_mode "bypassPermissions" yields permission_mode_source="hook_payload" and permission_mode_verified=true');
+}
+
+// Test 14: no payload, settings files only -> permission_mode_source is
+// "settings_file", permission_mode_verified is false, and permission_mode
+// equals the settings-file value.
+{
+  const root = makeFixture('t663-settings-only-unverified', {
+    shared: { permissions: { defaultMode: 'acceptEdits' } },
+  });
+  addMinimalState(root);
+  const output = runAgent(root, {
+    timeout: 5000,
+    env: { MAVERICKS_USER_GLOBAL_SETTINGS_PATH: NO_USER_GLOBAL_PATH },
+  });
+  assert.strictEqual(output.permission_mode, 'acceptEdits', 'Test 14 FAIL: expected permission_mode "acceptEdits" (the settings-file value)');
+  assert.strictEqual(output.permission_mode_source, 'settings_file', `Test 14 FAIL: expected permission_mode_source "settings_file", got ${JSON.stringify(output.permission_mode_source)}`);
+  assert.strictEqual(output.permission_mode_verified, false, `Test 14 FAIL: expected permission_mode_verified false, got ${JSON.stringify(output.permission_mode_verified)}`);
+  assert.ok(!('permission_mode_conflict' in output), `Test 14 FAIL: expected no permission_mode_conflict field with a nonexistent stubbed user-global path, got ${JSON.stringify(output.permission_mode_conflict)}`);
+  console.log('Test 14 passed: no stdin payload, settings-file only, yields permission_mode_source="settings_file", permission_mode_verified=false, and permission_mode equal to the settings-file value ("acceptEdits")');
+}
+
+// Test 15: a stubbed user-global settings file declaring "dontAsk" against a
+// project-file resolution of "bypassPermissions" -> permission_mode_conflict
+// reports BOTH literals, and neither is asserted as the winner (both keys
+// are always present and equal to their respective declared literal).
+{
+  const root = makeFixture('t663-user-global-conflict', {
+    shared: { permissions: { defaultMode: 'bypassPermissions' } },
+  });
+  addMinimalState(root);
+  const stubbedUserGlobalPath = path.join(SCRATCH_ROOT, 't663-stub-user-global-settings.json');
+  fs.writeFileSync(
+    stubbedUserGlobalPath,
+    JSON.stringify({ permissions: { defaultMode: 'dontAsk' }, approvals: ['unrelated', 'history', 'never-echoed'] }, null, 2),
+    'utf8'
+  );
+  const output = runAgent(root, {
+    timeout: 5000,
+    env: { MAVERICKS_USER_GLOBAL_SETTINGS_PATH: stubbedUserGlobalPath },
+  });
+  assert.strictEqual(output.permission_mode_source, 'settings_file', 'Test 15 FAIL: expected permission_mode_source "settings_file" (no hook payload in this test)');
+  assert.ok(output.permission_mode_conflict, `Test 15 FAIL: expected permission_mode_conflict to be present, got ${JSON.stringify(output.permission_mode_conflict)}`);
+  assert.strictEqual(output.permission_mode_conflict.project, 'bypassPermissions', `Test 15 FAIL: expected permission_mode_conflict.project "bypassPermissions", got ${JSON.stringify(output.permission_mode_conflict)}`);
+  assert.strictEqual(output.permission_mode_conflict.user_global, 'dontAsk', `Test 15 FAIL: expected permission_mode_conflict.user_global "dontAsk", got ${JSON.stringify(output.permission_mode_conflict)}`);
+  const rawOutput15 = JSON.stringify(output);
+  assert.ok(!rawOutput15.includes('unrelated') && !rawOutput15.includes('never-echoed'), `Test 15 FAIL: --agent output must never echo any other key (e.g. approval history) from the user-global file. Output: ${rawOutput15}`);
+  console.log('Test 15 passed: stubbed user-global "dontAsk" vs. project "bypassPermissions" yields permission_mode_conflict reporting both literals ({project: "bypassPermissions", user_global: "dontAsk"}), with no other user-global key echoed, and no winner claimed');
 }
 
 console.log('\nAll permission_mode tests passed.');

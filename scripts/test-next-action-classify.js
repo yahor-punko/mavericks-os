@@ -189,4 +189,52 @@ function runAgent(scriptPath) {
   console.log('Test F passed: buildVolatileNextActionNotice returns null when there is nothing to preserve');
 }
 
+// ---------------------------------------------------------------------------
+// T-628: position-based narrowing — historical action-target strings classify
+// clean, state-assertion forms still flag, and one documented boundary case
+// (state-assertion "at" preceder wins over the action-target follower cue).
+// ---------------------------------------------------------------------------
+
+// Case G: the three historical strings that motivated the re-scope classify
+// with EMPTY volatile_facts under the narrowed matcher (RC-1).
+{
+  const historical = [
+    'T-610 → developer → guard test, rules clause, 0.42.1 bump',
+    'T-619 → technical-writer → amend the 0.42.1 section',
+    'T-631 → developer → bump to 0.43.0 and open the CHANGELOG section',
+  ];
+  for (const s of historical) {
+    const result = classifyNextAction(s);
+    assert.deepStrictEqual(result.volatile_facts, [], `Case G FAIL: expected empty volatile_facts for action-target string, got ${JSON.stringify(result.volatile_facts)} for: ${s}`);
+  }
+  console.log('Case G passed: the three historical action-target strings classify with empty volatile_facts');
+}
+
+// Case H: state-assertion forms still flag (must not be swallowed by narrowing).
+{
+  const isAt = classifyNextAction('T-700 → developer → confirm the repo is at 0.44.2 before merging');
+  assert.ok(isAt.volatile_facts.includes('0.44.2'), `Case H FAIL: expected "0.44.2" flagged for "is at" state assertion, got ${JSON.stringify(isAt.volatile_facts)}`);
+
+  const currentlyAt = classifyNextAction('T-701 → developer → sync docs (currently at 0.44.2)');
+  assert.ok(currentlyAt.volatile_facts.includes('0.44.2'), `Case H FAIL: expected "0.44.2" flagged for "currently at" state assertion, got ${JSON.stringify(currentlyAt.volatile_facts)}`);
+
+  console.log('Case H passed: state-assertion version literals still flag under the narrowed matcher');
+}
+
+// Case I: documented boundary case — "at" as a STATE_ASSERTION_PRECEDER wins
+// even when the literal is grammatically the directive's target ("cut the
+// release AT 0.45.0"). This is a known, accepted false positive (see the
+// doc comment on classifyNextAction in mavp-operator-lib.js) — pinned here
+// rather than widened, alongside its compliant rewrite which classifies
+// clean via the ACTION_TARGET_FOLLOWER cue instead.
+{
+  const stillFlags = classifyNextAction('T-800 → developer → cut the release at 0.45.0');
+  assert.ok(stillFlags.volatile_facts.includes('0.45.0'), `Case I FAIL: expected "cut the release at 0.45.0" to still flag (documented boundary case), got ${JSON.stringify(stillFlags.volatile_facts)}`);
+
+  const compliantRewrite = classifyNextAction('T-800 → developer → cut the 0.45.0 release');
+  assert.deepStrictEqual(compliantRewrite.volatile_facts, [], `Case I FAIL: expected the compliant rewrite "cut the 0.45.0 release" to classify clean, got ${JSON.stringify(compliantRewrite.volatile_facts)}`);
+
+  console.log('Case I passed: documented boundary case ("at" preceder) still flags; compliant target-noun rewrite classifies clean');
+}
+
 console.log('\nAll T-350 next_action classify assertions passed.');

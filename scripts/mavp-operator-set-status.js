@@ -50,6 +50,7 @@ const {
   resolveCommitHash,
   mergeCommitEvidence,
   printRepoIdentityHeader,
+  guardMutatingRoot,
   locateTaskBlock,
   extractBlockField,
   setBlockField,
@@ -216,7 +217,13 @@ function printUsage() {
 }
 
 function main() {
-  printRepoIdentityHeader(ROOT);
+  printRepoIdentityHeader(ROOT, { mutating: true });
+
+  const rootGuard = guardMutatingRoot(ROOT, '--set-status');
+  if (rootGuard.blocked) {
+    process.exitCode = 1;
+    return;
+  }
 
   const argv = process.argv.slice(2);
 

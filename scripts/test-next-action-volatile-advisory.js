@@ -1,13 +1,20 @@
 'use strict';
 // Regression test: T-351 — next_action_volatile_facts validator advisory.
+// Escalated to FAILURE severity by T-628 (RC-1,
+// docs/rca/2026-08-operator-channel-state-artifacts.md) once
+// classifyNextAction() was narrowed to volatile-FACT POSITION in the same
+// task — see scripts/test-next-action-classify.js Cases G/H/I for the
+// classifier-level narrowing coverage this test does not duplicate.
 //
 // Fixture-based: builds a synthetic BACKLOG.md + TASK_STATUS.md + PROCESS_STATE.json
 // triple (no active tasks — the check under test reads PROCESS_STATE.json
 // next_action independently) and runs the validator's parseArtifacts() against
 // each fixture variant, asserting:
-//   1. next_action with embedded volatile facts ("v0.25.0", "14 commits unpushed")
-//      produces a next_action_volatile_facts finding at info severity, and the
-//      exit code stays at the fixture's healthy baseline (0) — info never blocks.
+//   1. next_action with an embedded state-assertion volatile fact ("v0.25.0"
+//      asserted as current state) plus a commit-count phrase ("14 commits
+//      unpushed") produces a next_action_volatile_facts finding at FAILURE
+//      severity, and the exit code escalates to 2 (repair required) — this
+//      now blocks, which is the whole point of T-628.
 //   2. next_action as a clean routing directive ("T-123 -> developer -> fix parser")
 //      produces no finding.
 //   3. next_action null / missing produces no finding and does not crash.
@@ -57,12 +64,18 @@ function runFixture(caseName, processState) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: next_action embeds volatile facts -> finding emitted at info
-// severity, and exit code stays at the fixture's healthy baseline (0).
+// Test 1: next_action embeds volatile facts -> finding emitted at FAILURE
+// severity, and exit code escalates to 2 (repair required).
+//
+// Fixture text uses "is now at v0.25.0" (a state-assertion form) rather than
+// "to v0.25.0" — under T-628's position-based narrowing, "to X" is an
+// ACTION_TARGET_PRECEDER (the "<verb> to X" construction) and would no
+// longer flag; "is ... at X" is a STATE_ASSERTION_PRECEDER and correctly
+// still does. See scripts/test-next-action-classify.js Cases G/H/I.
 // ---------------------------------------------------------------------------
 {
   const parsed = runFixture('volatile', {
-    next_action: 'Bumped framework to v0.25.0 after landing 14 commits unpushed to origin — remember to push.',
+    next_action: 'The framework is now at v0.25.0 after landing 14 commits unpushed to origin — remember to push.',
   });
   const findings = parsed.comparison.findings;
   const finding = findings.find((f) => f.checkName === 'next_action_volatile_facts');
@@ -73,8 +86,8 @@ function runFixture(caseName, processState) {
   );
   assert.strictEqual(
     finding.severity,
-    'info',
-    `Test 1 FAIL: next_action_volatile_facts severity should be "info", got: "${finding.severity}"`
+    'failure',
+    `Test 1 FAIL: next_action_volatile_facts severity should be "failure", got: "${finding.severity}"`
   );
   assert.ok(
     /v0\.25\.0/.test(finding.message) && /14 commits/i.test(finding.message),
@@ -84,16 +97,45 @@ function runFixture(caseName, processState) {
   const exitCode = getExitCode(parsed.comparison.overallCandidateState);
   assert.strictEqual(
     exitCode,
-    0,
-    `Test 1 FAIL: info finding must not change exit code from the fixture's healthy baseline (0), got: ${exitCode}`
+    2,
+    `Test 1 FAIL: failure finding must escalate exit code to 2 (repair required), got: ${exitCode}`
   );
   assert.strictEqual(
     parsed.comparison.overallCandidateState,
-    'healthy',
-    `Test 1 FAIL: overallCandidateState should remain "healthy" (info never blocks), got: "${parsed.comparison.overallCandidateState}"`
+    'misleading_repair_required',
+    `Test 1 FAIL: overallCandidateState should be "misleading_repair_required" (failure blocks), got: "${parsed.comparison.overallCandidateState}"`
   );
 
-  console.log('Test 1 passed: volatile facts in next_action produce an info-severity finding without changing exit code');
+  console.log('Test 1 passed: volatile facts in next_action produce a failure-severity finding and escalate exit code to 2');
+}
+
+// ---------------------------------------------------------------------------
+// Test 1b: an action-target version literal (narrowed clean by T-628) does
+// NOT produce a finding, and the exit code stays at the fixture's healthy
+// baseline (0) — the escalation must never fire on top of the old (too
+// broad) matcher boundary.
+// ---------------------------------------------------------------------------
+{
+  const parsed = runFixture('action-target', {
+    next_action: 'T-631 → developer → bump to 0.43.0 and open the CHANGELOG section',
+  });
+  const findings = parsed.comparison.findings;
+  const finding = findings.find((f) => f.checkName === 'next_action_volatile_facts');
+
+  assert.strictEqual(
+    finding,
+    undefined,
+    `Test 1b FAIL: expected no next_action_volatile_facts finding for an action-target directive, got: ${JSON.stringify(finding, null, 2)}`
+  );
+
+  const exitCode = getExitCode(parsed.comparison.overallCandidateState);
+  assert.strictEqual(
+    exitCode,
+    0,
+    `Test 1b FAIL: expected exit code 0 (healthy) for a legitimate action-target directive, got: ${exitCode}`
+  );
+
+  console.log('Test 1b passed: a legitimate action-target directive produces no finding and no exit-code escalation');
 }
 
 // ---------------------------------------------------------------------------

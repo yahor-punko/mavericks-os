@@ -62,6 +62,7 @@ const {
   DEFERRED_TASK_STATUS_HEADING,
   writeContextBundle,
   printRepoIdentityHeader,
+  guardMutatingRoot,
   locateTaskBlock,
   setBlockField,
   extractBlockField,
@@ -225,7 +226,13 @@ function runValidatorOnce() {
 }
 
 function main() {
-  printRepoIdentityHeader(ROOT);
+  printRepoIdentityHeader(ROOT, { mutating: true });
+
+  const rootGuard = guardMutatingRoot(ROOT, '--rescope-task');
+  if (rootGuard.blocked) {
+    process.exitCode = 1;
+    return;
+  }
 
   const argv = process.argv.slice(2);
 

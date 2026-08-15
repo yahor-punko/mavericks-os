@@ -40,6 +40,7 @@ const {
   writeContextBundle,
   buildTaskStatusEntry,
   printRepoIdentityHeader,
+  guardMutatingRoot,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -253,7 +254,13 @@ function parseCliArgs(argv) {
 }
 
 async function main() {
-  printRepoIdentityHeader(ROOT);
+  printRepoIdentityHeader(ROOT, { mutating: true });
+
+  const rootGuard = guardMutatingRoot(ROOT, '--apply-decomposition');
+  if (rootGuard.blocked) {
+    process.exitCode = 1;
+    return;
+  }
 
   const today = new Date().toISOString().slice(0, 10);
   const { filePath, repoName } = parseCliArgs(process.argv.slice(2));

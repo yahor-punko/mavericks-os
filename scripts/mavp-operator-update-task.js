@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
 const { execSync } = require('node:child_process');
-const { writeContextBundle, updateTaskField } = require('./mavp-operator-lib.js');
+const { writeContextBundle, updateTaskField, printRepoIdentityHeader, guardMutatingRoot } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -87,6 +87,14 @@ async function prompt(rl, question) {
 }
 
 async function main() {
+  printRepoIdentityHeader(ROOT, { mutating: true });
+
+  const rootGuard = guardMutatingRoot(ROOT, '--update-task');
+  if (rootGuard.blocked) {
+    process.exitCode = 1;
+    return;
+  }
+
   const args = process.argv.slice(2);
   let taskId = args[0];
   let newStatus = args[1];

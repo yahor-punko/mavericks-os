@@ -48,6 +48,7 @@ const {
   parkedBacklogHeading,
   parkedTaskStatusHeading,
   printRepoIdentityHeader,
+  guardMutatingRoot,
 } = require('./mavp-operator-lib.js');
 
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -210,10 +211,16 @@ function unparkWave(waveNumber) {
 }
 
 function main() {
-  printRepoIdentityHeader(ROOT);
+  printRepoIdentityHeader(ROOT, { mutating: true });
 
   const mode = process.argv[2];
   const rest = process.argv.slice(3);
+
+  const rootGuard = guardMutatingRoot(ROOT, mode === '--unpark-wave' ? '--unpark-wave' : '--park-wave');
+  if (rootGuard.blocked) {
+    process.exitCode = 1;
+    return;
+  }
 
   if (mode === '--park-wave') {
     let waveNumber = null;

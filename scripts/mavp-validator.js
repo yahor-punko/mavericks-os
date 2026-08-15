@@ -377,7 +377,16 @@ function getSeverityForCheck(checkName) {
     conflicting_needs_fix_rounds: 'warning',
     conflicting_validator_blocked: 'warning',
     overdue_recheck: 'info',
-    next_action_volatile_facts: 'info',
+    // T-628 (RC-1, docs/rca/2026-08-operator-channel-state-artifacts.md):
+    // escalated from 'info' — an info-severity advisory on a mechanically
+    // decidable rule let three identical operator-channel writes land anyway
+    // (fc30329, 4571ea5, f62827a) with the advisory live. Shipped together
+    // with the position-based narrowing in classifyNextAction() so this tier
+    // never sits on top of the old (too-broad) matcher boundary. Any FUTURE
+    // classifier pattern this check gains still enters at 'info' by default
+    // and is promoted to 'failure' individually, on its own evidence — this
+    // escalation is not a precedent for blanket-promoting new patterns.
+    next_action_volatile_facts: 'failure',
     artifact_size_budget: 'info',
     state_in_claude_md: 'info',
     blocked_by_open: 'failure',
@@ -2040,12 +2049,18 @@ function checkOverdueRechecks(processStatePath) {
  * Reads next_action from PROCESS_STATE.json and classifies it with
  * classifyNextAction() from mavp-operator-lib.js. When the classifier finds
  * volatile facts (framework versions, unpushed-commit counts) embedded in the
- * string, emits one info-severity finding naming the matched facts and
- * advising to keep next_action a clean routing directive (move narrative
- * detail to HANDOFF.md instead).
- * Advisory only (info severity, exits 0) — mirrors the overdue_recheck
- * precedent: PROCESS_STATE.json is informational, so this check must NEVER
- * cause exit 1 or exit 2.
+ * string, emits one finding naming the matched facts and advising to keep
+ * next_action a clean routing directive (move narrative detail to
+ * HANDOFF.md instead).
+ * T-628 (RC-1, docs/rca/2026-08-operator-channel-state-artifacts.md):
+ * FAILURE severity (exit 2) — escalated from the prior info-only tier now
+ * that classifyNextAction() only flags a version literal in STATE-ASSERTION
+ * position (narrowed in the same task). An action-target literal like
+ * "bump to 0.43.0" no longer reaches this check at all. Any FUTURE pattern
+ * this classifier gains still enters at 'info' in getSeverityForCheck() and
+ * is promoted to 'failure' individually, on its own evidence — this
+ * escalation covers only the two patterns narrowed/verified here (semver,
+ * with commit-count/ahead-N unchanged), not a blanket promotion precedent.
  */
 function checkNextActionVolatileFacts(processStatePath) {
   let nextAction;
@@ -2065,9 +2080,9 @@ function checkNextActionVolatileFacts(processStatePath) {
     createFinding({
       checkName: 'next_action_volatile_facts',
       taskId: '(process_state.next_action)',
-      message: `PROCESS_STATE.json next_action embeds volatile fact(s) (${factsList}) that will go stale`,
+      message: `PROCESS_STATE.json next_action embeds volatile fact(s) (${factsList}) that will go stale — this now blocks (exit 2)`,
       repairTarget: 'PROCESS_STATE.json',
-      suggestedAction: 'Keep next_action a clean routing directive (e.g. "T-NNN -> role -> short goal"); move narrative detail or point-in-time facts (versions, commit counts) to HANDOFF.md instead.',
+      suggestedAction: 'Keep next_action a clean routing directive (e.g. "T-NNN -> role -> short goal"); move narrative detail or point-in-time facts (versions, commit counts) to HANDOFF.md instead. If a matched fact is actually the TARGET of the directive (e.g. a version bump/release), lead with the target noun instead of a state word — "cut the 0.45.0 release" classifies clean, "cut the release at 0.45.0" does not.',
     }),
   ];
 }

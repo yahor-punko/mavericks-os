@@ -16,7 +16,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { ROOT, collectOperatorData } = require('./mavp-operator-lib');
+const { ROOT, collectOperatorData, printRepoIdentityHeader, guardMutatingRoot } = require('./mavp-operator-lib');
 
 const HANDOFF_PATH = path.join(ROOT, 'HANDOFF.md');
 const EXECUTION_LOG_PATH = path.join(ROOT, 'EXECUTION_LOG.md');
@@ -153,6 +153,14 @@ function buildHandoff(data, notes) {
 // ---------------------------------------------------------------------------
 
 function main() {
+  printRepoIdentityHeader(ROOT, { mutating: true });
+
+  const rootGuard = guardMutatingRoot(ROOT, '--handoff');
+  if (rootGuard.blocked) {
+    process.exitCode = 1;
+    return;
+  }
+
   const args = parseArgs(process.argv.slice(2));
 
   if (fs.existsSync(HANDOFF_PATH)) {

@@ -19,7 +19,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execSync } = require('node:child_process');
-const { printRepoIdentityHeader, locateTaskBlock, updateTaskField } = require('./mavp-operator-lib.js');
+const { printRepoIdentityHeader, guardMutatingRoot, locateTaskBlock, updateTaskField } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -75,7 +75,13 @@ function printUsage() {
 }
 
 function main() {
-  printRepoIdentityHeader(ROOT);
+  printRepoIdentityHeader(ROOT, { mutating: true });
+
+  const rootGuard = guardMutatingRoot(ROOT, '--update-status');
+  if (rootGuard.blocked) {
+    process.exitCode = 1;
+    return;
+  }
 
   const args = process.argv.slice(2);
   const taskId = args[0];

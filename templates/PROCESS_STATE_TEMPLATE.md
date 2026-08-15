@@ -13,7 +13,7 @@ execution
 - [next task → owner]
 
 ## Wave status
-<!-- wave_status values: planning (default) | architect_reviewed | execution | closed -->
+<!-- wave_status values: planning (default) | architect_reviewed | execution — --close-session resets to planning on wave advance; there is no persisted "closed" value, wave_summary records what the closed wave accomplished -->
 planning
 
 ## Parked waves

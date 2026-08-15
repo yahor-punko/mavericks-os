@@ -254,3 +254,84 @@ Two definitions this decision pins down, because the mechanism is unenforceable 
 **Scope limit, stated plainly:** this decision introduces **no runtime check, no hook, and no validator change**. It is a documentation and review-cadence decision only — the ledger is a human-maintained record, reviewed at an existing checkpoint (stable promotion) that already requires human attention. No mechanical enforcement is proposed by this record; if one is ever wanted, it is a separate task with its own review.
 
 **Documented in:** `docs/core/DECISIONS.md` (this record); `docs/core/GATE_LEDGER.md` (the ledger itself, seeded from the 2026-08-06 audit inventory); `docs/PUBLIC_RELEASE_STRATEGY.md` §3b, "Gate-ledger review (DR-008)" (the stable-promotion checkpoint where the zero-fire review happens, shipped by T-646).
+
+## DR-009 — Info severity is not an acceptable terminal tier for a rule the operator channel can violate silently
+
+**Date:** 2026-08-14
+
+**Informed by:** `docs/rca/2026-08-operator-channel-state-artifacts.md` — RC-1 ("A detection-only enforcement tier does not stop an operator write, demonstrated three times") and RC-4 ("Truncating a command's output makes the artifact unfit to verify from, in either direction").
+
+**Tasks:** T-628 (this record and the escalation it governs)
+
+**Problem:** RC-1 documents three identical writes of a banned `next_action` shape — `T-610`, `T-619`, and `T-631` — landing after `classifyNextAction()` shipped, after the validator's `next_action_volatile_facts` finding was live, and after `--agent` surfaced it. All three commits happened anyway, because the finding was info severity: printed, never blocking. The third instance is decisive — it was committed *while registering the very task whose purpose is escalating this finding to blocking*, with the architect's ruling already in hand. RC-4 independently shows the same shape one layer down: a truncated command output (`tail -N`, a cut identity line) leaves an artifact that cannot be verified from in either direction — not "the check didn't run," but "no one can now tell whether it did." Both root causes share one property: the operator is the actor the rule constrains, the operator is also the one deciding whether to heed an advisory, and an advisory has no mechanism to stop a write the operator has already decided to make.
+
+**What was considered:**
+1. Leave `next_action_volatile_facts` (and comparable operator-channel rules) at info severity indefinitely, relying on the operator to read and heed the advisory each time.
+2. Escalate every existing info-severity operator-channel advisory to blocking in one sweep, regardless of whether its matcher is precise enough to survive the escalation.
+3. The adopted ruling: info severity is never an acceptable *terminal* tier for a rule that governs the operator's own writes to a state artifact the operator itself controls — such a rule must eventually reach a blocking tier (validator exit 2, or an equivalent hard stop) — but escalation is only sound once the underlying matcher is proven not to reject legitimate output, per RC-1's own finding that naively escalating the unnarrowed `next_action` matcher would have rejected all three historical strings' legitimate replacements too.
+
+**Why rejected (1, 2):**
+- **Indefinite info severity (1):** this is the status quo RC-1 measures directly — three demonstrated failures, the last one committed with the ruling already in hand. An advisory that the same actor can read, understand, and override in the same breath is not an enforcement tier; it is a comment. Continuing to rely on it after a third documented failure has no remaining justification.
+- **Sweep escalation without matcher review (2):** RC-1's own finding is that the `next_action` matcher as shipped would flag a version literal regardless of whether it names the *target* of an action ("bump to 0.43.0") or asserts *current state* ("we are at 0.43.0") — only the latter is the actual violation. Escalating severity before narrowing the matcher would make the artifact worse while claiming to protect it, rejecting legitimate routing directives alongside the real violations. A blanket sweep across every operator-channel advisory would repeat this mistake at scale, wherever a matcher hasn't yet been proven precise.
+
+**What was adopted instead:**
+
+Info severity is a valid *interim* tier for an operator-channel rule — useful while a matcher is still being sharpened, as `next_action_volatile_facts` was between its introduction and RC-1's finding — but it is never an acceptable *terminal* tier once the rule and its matcher are settled. The escalation path is: (a) prove the matcher does not reject legitimate output (narrow it to the specific violating shape, not the broad one), then (b) raise the finding to blocking severity so the write itself fails rather than merely being logged. T-628 ships both halves together for `next_action_volatile_facts` — narrowing `classifyNextAction()` to volatile-fact *position* and escalating `next_action_volatile_facts` from `info` to `failure` in `scripts/mavp-validator.js` — precisely so the blocking tier never exists on top of the wrong boundary. This ruling is general: it applies to any future rule constraining what the operator channel writes into `BACKLOG.md`, `TASK_STATUS.md`, or `PROCESS_STATE.json`, not only this one instance.
+
+**Scope limit, stated plainly:** this decision does not mandate blocking severity for every validator finding — most findings concern sub-agent output, which already carries `needs_fix_rounds:`/`validator_blocked:` evidence and passes through a human/QA review gate before merge, so info/warning tiers remain appropriate there. This ruling is scoped specifically to rules that govern **the operator's own direct writes to state artifacts**, where no downstream review gate exists to catch a silently-ignored advisory before it lands.
+
+**Documented in:** `docs/core/DECISIONS.md` (this record); `docs/rca/2026-08-operator-channel-state-artifacts.md` (RC-1, RC-4, and the RC-1 routing section that names this record's carrier); `scripts/mavp-validator.js` and `scripts/mavp-operator-lib.js` (the shipped `next_action_volatile_facts` narrowing + escalation this ruling governs, T-628).
+
+## DR-010 — Permission posture is declare, detect, report — never resolve, probe, or write beyond the framework's own project files
+
+**Date:** 2026-08-15
+
+**Informed by:** the 2026-08 three-week `dontAsk` divergence incident (a user-global `~/.claude/settings.json` `defaultMode` decided sessions while the committed project file declared `bypassPermissions` — the layer both `SECURITY.md` and `docs/core/BOOTSTRAP_GUIDE.md` ranked weakest won, with no local override in play); DR-009 (a signal the operator relies on must not be able to be confidently wrong).
+
+**Tasks:** T-663 (permission-posture reporting — effective-vs-declared split with provenance; shipped the `permission_mode` / `permission_mode_source` / `permission_mode_verified` fields this record governs), T-664 (this record and the docs it corrects)
+
+**Problem:** SECURITY.md and docs/core/BOOTSTRAP_GUIDE.md asserted a Claude Code settings-precedence order as established fact, and CLAUDE.md's session-start note called the reported `permission_mode` the "active" mode. Neither claim survived observation: for roughly three weeks a user-global `dontAsk` decided sessions over the committed project `bypassPermissions`, with no local override present — the precedence order's own weakest-ranked layer won. The framework cannot explain why: a harness precedence change, a harness rule refusing `bypassPermissions` from a committed repo-controlled file, and residual session state all fit the evidence equally, and none is verifiable from this repo's artifacts.
+
+**What was considered:**
+1. Retire the `permission_mode` field and its advisory entirely, since it was demonstrably wrong for three weeks and cannot be trusted.
+2. Re-implement precedence resolution in framework code so `--agent` computes and asserts a definitive winning mode itself, replacing reliance on Claude Code's documented order.
+3. The adopted ruling: keep the field, but restrict its contract to declare, detect, report — never resolve a winner, never probe for one, never write beyond the framework's own project files — and always label a declared value as declared, never active.
+
+**Why rejected (1, 2):**
+- **Retire the field (1):** fails the operator's own requirement for prompt-free operation. Session start is the only pre-work point at which a silently-degraded session can be caught before any tool call executes, and the failure mode this field exists to catch is exactly the one where retiring it would hurt most: under a genuinely denying mode, even the instrument that would ask the question is itself denied by that same mode, so the field's absence is felt precisely when it is most needed. Removing a cheap, already-shipped detection signal because one reading of it was wrong trades a false claim for a missing one — not an improvement, and the same shape DR-009 already rejected: an advisory being imperfect is not grounds for having no advisory at all.
+- **Re-implement precedence to name a winner (2):** a winner the framework computed and asserted could itself be confidently wrong, for the same unverifiable, harness-owned reasons the current divergence is unverifiable — recreating the exact DR-009 violation (a signal the operator relies on being confidently wrong) one level up, only now wearing the authority of "the framework says so" instead of "Claude Code's docs say so." Computing a resolution the framework cannot verify against reality is not more honest than reporting a declared value as declared; it is the same defect with a different narrator.
+
+**What was adopted instead:**
+
+Permission posture is declare, detect, report — never resolve, probe, or write beyond the framework's own project files. Concretely: (a) `~/.claude/settings.json` (user-global) is never written by any framework script — the framework reads its own project-controlled files (`.claude/settings.json`, `.claude/settings.local.json`) and, where the harness provides one, a same-session hook payload, but does not inspect, infer, or modify anything outside those; (b) effective (actually-in-force) mode is asserted only from a same-session harness channel — `permission_mode_verified: true` requires a live hook payload observed in the current session, and is `false` on any harness whose payload doesn't carry the field, which is a designed-for outcome, not a defect to be worked around; (c) every declared value — one read from a settings file rather than confirmed by a harness payload — is always labeled `declared`, never `active`, in both the field semantics and any doc describing them; (d) the settings-precedence order itself is documented as a sourced, harness-owned claim ("as documented at time of writing," with the known 2026-08 counter-observation named alongside it), not an asserted guarantee — a reader is pointed at the session-start `permission_mode` line to verify, not asked to trust the order.
+
+**Scope limit, stated plainly:** this ruling does not resolve, or attempt to resolve, why the 2026-08 divergence happened — that question is left open and harness-owned on purpose, per the mechanism-agnostic requirement carried into `SECURITY.md` and `docs/core/BOOTSTRAP_GUIDE.md`'s rewritten passages. It also does not add any new probing behavior (e.g. shelling out to inspect `~/.claude/settings.json`'s live value) — the framework's read surface stays exactly what it was before this incident; only the *labeling* of what that surface can and cannot claim changes.
+
+**Documented in:** `docs/core/DECISIONS.md` (this record); `SECURITY.md` ("How to opt out" — precedence demoted to a sourced claim); `docs/core/BOOTSTRAP_GUIDE.md` ("Shared permission-mode default" — same demotion in its own voice); `CLAUDE.md` (session-start note documents declared/verified semantics and field names; VSCode Agent permissions convention rescoped to a conditional diagnostic).
+
+## DR-011 — Dated is not released: a CHANGELOG section accumulates until its exact version is tagged, never on a bump-ahead schedule
+
+**Date:** 2026-08-15
+
+**Informed by:** T-628 (the concrete instance this ruling adjudicates); DR-009 (a rule the operator channel can silently violate must not stay advisory-only — the same shape recurs here one layer down, in what content a release-time gate can see at all).
+
+**Tasks:** T-662 (this record and the fold it governs), T-568, T-666
+
+**Problem:** T-628 merged into a freshly opened `## [0.44.3]` CHANGELOG section while `scripts/mavp-version.js` and `package.json` both still read `0.44.2` — an unreleased version bump was never made, so no code in the tree actually became "0.44.3." `mavp-publish-release.js` derives the tag it cuts from the edge tip's `mavp-version.js`, and `extractReleaseSections`' numeric upper bound silently *excludes* any section whose version compares greater than the version being tagged. Concretely: a release run against that shape would have tagged `v0.44.2`, and T-628 — an adopter-visible change that turns a previously advisory check into one that blocks commits — would have shipped inside that tag's tree with zero mention in its own release notes, every gate green. The section header looked tidy and forward-dated; the actual risk was live and unnoticed.
+
+**What was considered:**
+1. Leave the `## [0.44.3]` section in place and treat it as the normal home for new entries until the next deliberate version bump — i.e. let a CHANGELOG heading run ahead of the version files it's supposed to describe.
+2. Bump `scripts/mavp-version.js` and `package.json` to `0.44.3` immediately, so the heading and the version files agree.
+3. The adopted ruling: fold the `0.44.3` section's body back into `0.44.2` — the section that matches the version files' actual current value — and let `0.44.2` keep accumulating until a deliberate bump opens the next section.
+
+**Why rejected (1, 2):**
+- **Leave the ahead-of-version heading in place (1):** this is the status quo that produced the defect. `extractReleaseSections`' numeric exclusion means any section dated or numbered ahead of the tree's real current version is invisible to a release cut today — not merely untidy, armed. The gap between "a section exists" and "a section's version is what actually gets tagged" is exactly the gap T-628 fell into.
+- **Bump now to match the heading (2):** this manufactures a second consecutive never-tagged version. Under this project's own frozen-section rule, an untagged section stays editable forever, including inside whatever later tag's body eventually absorbs it — the same open residual already on record for a prior premature-bump instance (T-604). It also contradicts the framework's own close-session advisory, which recommends no bump while the current version remains unreleased, and it breaks with repo precedent: two prior tasks were folded into a still-unreleased `0.38.2` section rather than triggering a bump (`EXECUTION_LOG.md:285`).
+
+**What was adopted instead:**
+
+Dated is not released. A CHANGELOG section is released if and only if its exact version tag exists on the public mirror — verified with a real `git fetch --tags` against the mirror clone, never a stale local read. `scripts/mavp-version.js` and `package.json` are the sole authority for what the tree's current version actually is. An unreleased current version's section accumulates every merged task's entries — however many arrive — until the version is deliberately bumped as its own act. A new version section may open only with, or strictly after, that deliberate bump; a section heading must never run ahead of the version files it describes. T-628's body (the `### Changed` sub-heading and its bullet) is relocated into `0.44.2`'s existing body, placed between `### Added` and `### Fixed` per Keep-a-Changelog category order, and the `0.44.3` heading is deleted.
+
+**Scope limit, stated plainly:** this ruling governs CHANGELOG section-opening discipline only — it does not change the frozen-section rule (`docs/PUBLIC_RELEASE_STRATEGY.md` §5), which still governs sections whose version *is* already tagged, and it does not itself add a mechanical gate. T-568 and T-666 are the paired follow-ups that close this class mechanically — at release time (refusing a non-empty future-versioned section before any tag mutation) and at write time respectively — neither of which this record substitutes for.
+
+**Documented in:** `docs/core/DECISIONS.md` (this record); `CHANGELOG.md` (the folded `0.44.2` section this ruling produced); `docs/PUBLIC_RELEASE_STRATEGY.md` §5 (the adjacent frozen-section rule); `EXECUTION_LOG.md:285` (the `0.38.2` fold precedent cited above).

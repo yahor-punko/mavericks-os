@@ -30,7 +30,10 @@ Read the JSON above. Key fields:
 - `blocker` — stop if non-null, resolve blocker first
 - `wave` — current wave number
 - `wave_session` — session counter within the wave (may be absent or null)
-- `permission_mode` — the configured Claude Code permission mode
+- `permission_mode` — the best-known Claude Code permission mode (T-663: read its provenance from the three fields below before rendering it — never render this value bare)
+- `permission_mode_source` — `hook_payload` (observed on THIS session's SessionStart hook stdin), `persisted_runtime` (a hook payload from an EARLIER session, cached in `.mavp/permission-mode`), or `settings_file` (`.claude/settings.local.json` / `.claude/settings.json` — no live signal at all)
+- `permission_mode_verified` — `true` only when `permission_mode_source` is `hook_payload`; `false` otherwise, even when `persisted_runtime` originally came from a real payload — a mode resolved once at session start can be stale even when every settings file agrees, so "verified" always means "observed this session", never "read from more files"
+- `permission_mode_conflict` — present only when a readable user-global `~/.claude/settings.json` `defaultMode` differs from the project-file resolution; shape `{project, user_global}`, a fact report only — never render one as a "winner"
 - `UPDATE_AVAILABLE` — framework-version notice, a self-describing sentence (may be absent when versions match)
 - `must_read` — files changed since the previous close-session commit, plus context_docs declared by in-flight tasks (may be absent when empty)
 
@@ -42,10 +45,28 @@ Always render the wave digest header:
 
 (Omit "— Session {wave_session}" if `wave_session` is absent, null, or 0.)
 
-Immediately after the wave digest header, render the permission mode:
+Immediately after the wave digest header, render the permission mode — NEVER as a bare value; always label it with what is actually known about it (T-663):
+
+- When `permission_mode_verified` is `true`:
+  ```
+  Permission mode: {permission_mode} (verified this session)
+  ```
+- When `permission_mode_verified` is `false`:
+  ```
+  Permission mode: {permission_mode} (declared — source: {permission_mode_source}, not verified this session)
+  ```
+
+If `permission_mode_conflict` is present, render one more line immediately after the permission mode line — a fact report only, never a resolution; do not imply either value wins:
 
 ```
-Permission mode: {permission_mode}
+⚠ Permission mode conflict: project declares "{permission_mode_conflict.project}", user-global (~/.claude/settings.json) declares "{permission_mode_conflict.user_global}" — precedence between these is harness-owned; verify manually which one governed this session.
+```
+
+If the best-known `permission_mode` is anything other than `bypassPermissions` (the framework's shipped default for prompt-free operation), render a goal-state advisory immediately after the line(s) above, naming the exact fix — keep it short and actionable, not a lecture:
+
+```
+> [!TIP] Restore prompt-free operation
+> Set `permissions.defaultMode` to `bypassPermissions` in `.claude/settings.local.json` to remove interactive prompts.
 ```
 
 If `UPDATE_AVAILABLE` is present, surface a callout immediately after the permission mode line and before the task list:

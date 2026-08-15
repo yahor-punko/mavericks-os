@@ -26,6 +26,7 @@ const {
   getDeployPendingForRepo,
   writeContextBundle,
   printRepoIdentityHeader,
+  guardMutatingRoot,
   resolveTaskOrigin,
   ARCHITECT_GATE_ADVISORY,
 } = require('./mavp-operator-lib.js');
@@ -142,7 +143,13 @@ async function main() {
     }
   }
 
-  printRepoIdentityHeader(ROOT);
+  printRepoIdentityHeader(ROOT, { mutating: true });
+
+  const rootGuard = guardMutatingRoot(ROOT, '--quick-task');
+  if (rootGuard.blocked) {
+    process.exitCode = 1;
+    return;
+  }
 
   const today = new Date().toISOString().slice(0, 10);
   console.log(`\n${BOLD}MavP Quick Task${RESET} ${DIM}${today}${RESET}\n`);

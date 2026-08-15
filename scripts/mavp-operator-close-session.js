@@ -46,7 +46,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, readPermissionMode, readPersistedPermissionMode, printRepoIdentityHeader, getCommitHashesReachable, isShallowRepository, extractCommitHashesFromEvidence, buildReachableHashIndex, isHashReachable, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, resolvePermissionMode, printRepoIdentityHeader, guardMutatingRoot, getCommitHashesReachable, isShallowRepository, extractCommitHashesFromEvidence, buildReachableHashIndex, isHashReachable, isSelfHostedRoot, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 // T-530: checkVersionBump()'s release-awareness reads the public mirror's
 // tags EXCLUSIVELY through these check-changelog-frozen.js exports — never
@@ -65,10 +65,21 @@ const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFr
 const { resolveMirrorHome, getMirrorTags, isGitRepo } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'check-changelog-frozen.js'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
+
+// T-660: gate the mavericks_version stamp (see updateProcessStateJson()
+// below) strictly to self-mode — writing this repo's own PROCESS_STATE.json
+// while running as the framework's own installation. In adopter mode
+// (ROOT is a project that merely resolves the framework's shared scripts/
+// via MAVERICKS_SCRIPTS) mavericks_version instead records the last
+// INSTALLED framework version, a value only mavp-install.js may set; this
+// script must leave it byte-unchanged there.
+const SELF_MODE = isSelfHostedRoot(ROOT, MAVERICKS_SCRIPTS_DIR);
+
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
 const PROCESS_STATE_MD = path.join(ROOT, 'PROCESS_STATE.md');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
+const EXECUTION_LOG_MD = path.join(ROOT, 'EXECUTION_LOG.md');
 const VALIDATOR = path.join(
   process.env.MAVERICKS_SCRIPTS || path.join(os.homedir(), 'Documents', 'mavericks', 'scripts'),
   'mavp-validator.js'
@@ -464,6 +475,78 @@ function getDeployLabel(deployContours, status, evidenceCommit, root) {
   if (reachable === false) return '⚠ смёрджен — HELD, не запушен';
   // reachable === null: can't verify (no remote / no commit / git unavailable) — degrade
   return status || '—';
+}
+
+/**
+ * T-629 (RC-2, docs/rca/2026-08-operator-channel-state-artifacts.md): find
+ * every COMPLETED task (merged/deployed_dev/deployed_prod/runtime_verified —
+ * i.e. every record this run's terminal-status sweep produced) whose literal
+ * task id has ZERO occurrences anywhere in EXECUTION_LOG.md's full text.
+ *
+ * `completedTaskRecords` is expected to be `mergedTaskRecords` from either
+ * close path — the array that ALREADY excludes `deferred`/`deprecated`
+ * (TERMINAL_SKIP_STATUSES) tasks by construction (see
+ * sweepTerminalSkipTasks()'s doc comment: swept ids are deliberately never
+ * added to mergedTaskRecords), so this function does not need its own
+ * status filter to honor "deferred and deprecated tasks are not checked".
+ *
+ * Accepted v1 imprecision (documented per the acceptance criteria): this is a
+ * whole-file substring search, not a per-spawn-entry parser. A task id
+ * mentioned ANYWHERE in EXECUTION_LOG.md — including an ordinary
+ * registration-time or spawn-brief mention that carries no `tool_uses:`/
+ * `outcome:` per-spawn record at all — satisfies the check and suppresses the
+ * warning for that id, even though the mandatory per-spawn entry convention
+ * (docs/core/ORCHESTRATION_RULES.md — "Cap-hit triage") is still unmet. That
+ * is accepted rather than fixed here: the check targets the RCA's observed
+ * failure shape (a whole wave producing literally zero mentions of any of its
+ * task ids), not a stricter per-spawn-entry lint — see RC-2's routing detail,
+ * which explicitly rules a blocking/precise variant out ("a wave legitimately
+ * has more merged tasks than spawns... or more spawns than tasks").
+ *
+ * @param {Array<{id: string, status: string}>} completedTaskRecords
+ * @param {string} executionLogContent
+ * @returns {string[]} ids with zero occurrences, de-duplicated, input order preserved
+ */
+function findExecutionLogOmissions(completedTaskRecords, executionLogContent) {
+  const text = executionLogContent || '';
+  const seen = new Set();
+  const missing = [];
+  for (const rec of completedTaskRecords || []) {
+    const id = rec && rec.id;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (!text.includes(id)) missing.push(id);
+  }
+  return missing;
+}
+
+/**
+ * Print the T-629 warning, if any ids are missing. Non-blocking by design:
+ * never throws, never changes the close's exit code, reads EXECUTION_LOG.md
+ * defensively (a missing file degrades to "every id missing" rather than
+ * erroring). Called BEFORE printSessionCompletedTable at both close-session
+ * call sites, per the acceptance criteria's "prominently placed... before the
+ * results table".
+ *
+ * @param {Array<{id: string, status: string}>} completedTaskRecords
+ * @param {string} [executionLogPath]  defaults to EXECUTION_LOG_MD
+ */
+function printExecutionLogOmissionWarning(completedTaskRecords, executionLogPath) {
+  if (!completedTaskRecords || completedTaskRecords.length === 0) return;
+  const logPath = executionLogPath || EXECUTION_LOG_MD;
+  let content = '';
+  try {
+    if (fs.existsSync(logPath)) content = readUtf8(logPath);
+  } catch {
+    // Defensive only — an unreadable log degrades to "every id missing",
+    // never throws, never blocks the close.
+  }
+  const missing = findExecutionLogOmissions(completedTaskRecords, content);
+  if (missing.length === 0) return;
+  console.log(
+    `\n${YELLOW}${BOLD}⚠ EXECUTION_LOG.md has no entry for: ${missing.join(', ')}${RESET}` +
+      `${YELLOW} — per-spawn logging convention not observed (RC-2, docs/rca/2026-08-operator-channel-state-artifacts.md). Non-blocking.${RESET}`
+  );
 }
 
 /**
@@ -1177,9 +1260,19 @@ function updateProcessStateJson(nextAction, waveComplete, summaryValue, { summar
   // since the wave they describe is still open and its goal/note are still
   // live context. This is a scoping fix, not a staleness detector — nothing
   // is inspected for staleness; waveComplete alone decides.
+  //
+  // T-653: wave_status describes the ending wave's architect-review gate
+  // state (e.g. "architect_reviewed") and must reset to "planning" for the
+  // NEW wave being opened — otherwise the ...current spread above carries
+  // the old wave's gate state forward verbatim, letting the freshly opened
+  // wave falsely read as already past its own architect gate. Same
+  // discriminator, same block, no separate write path. A mid-wave close
+  // leaves wave_status untouched (still preserved by ...current), since the
+  // wave it describes is still open.
   if (waveComplete) {
     updated.wave_goal = null;
     updated.wave_strategy_note = null;
+    updated.wave_status = 'planning';
   }
 
   if (summaryValue !== undefined && summaryValue !== null) {
@@ -1196,6 +1289,24 @@ function updateProcessStateJson(nextAction, waveComplete, summaryValue, { summar
   // option; the pre-T-367 interactive call passed neither) are unaffected.
   if (waveSummary !== undefined && waveSummary !== null) {
     updated.wave_summary = waveSummary;
+  }
+
+  // T-660: self-mode-only stamp. Nothing else refreshes mavericks_version
+  // after a version bump in the framework's OWN repo, so a lagging value
+  // prints a false update-available notice at every session start. Gated
+  // strictly to SELF_MODE (computed once at module load — see its comment
+  // above): an adopter project's mavericks_version means "last INSTALLED
+  // framework version", a value only mavp-install.js may set, and must stay
+  // byte-unchanged here — including staying ABSENT when it was never set,
+  // never becoming null/"" as a side effect of this write. When the current
+  // version can't be read (missing/unparsable mavp-version.js), skip the
+  // stamp rather than writing an incorrect value; the field is simply left
+  // as whatever `...current` already carried.
+  if (SELF_MODE) {
+    const currentFrameworkVersion = readCurrentMavericksVersion();
+    if (currentFrameworkVersion) {
+      updated.mavericks_version = currentFrameworkVersion;
+    }
   }
 
   writeUtf8(PROCESS_STATE_JSON, JSON.stringify(updated, null, 2) + '\n');
@@ -1800,6 +1911,10 @@ async function runNonInteractive(args) {
     }
   } catch { /* use default */ }
 
+  // T-629 (RC-2): prominently placed, non-blocking — prints BEFORE the
+  // results table, per the acceptance criteria.
+  printExecutionLogOmissionWarning(mergedTaskRecords);
+
   // Print completed table BEFORE any push prompt/attempt — mandatory pre-push
   // review artifact (omitted when no tasks completed this session).
   const finalStatusMap = buildTaskStatusMap(updatedContent, sessionCompletedIds);
@@ -1813,13 +1928,17 @@ async function runNonInteractive(args) {
   // and the push under bypass mode.
   if (allMerged) {
     if (args.push) {
-      // Prefer a live runtime override persisted by the SessionStart hook
-      // (see mavp-operator-agent.js — persistRuntimePermissionMode) over the
+      // T-663: shared fallback order with --agent — persisted (from an
+      // earlier session's SessionStart hook payload; see
+      // mavp-operator-agent.js — persistRuntimePermissionMode) over the
       // settings-file resolution, so a `--permission-mode bypassPermissions`
       // override is honored by the gate even when settings files say
-      // otherwise. Falls back to readPermissionMode(ROOT) when no state
-      // file is present — unchanged T-320 behavior.
-      const permissionMode = readPersistedPermissionMode(ROOT) || readPermissionMode(ROOT);
+      // otherwise. --close-session never reads stdin itself, so it always
+      // omits hookPayloadMode — this call reduces to persisted > settings,
+      // unchanged in gate BEHAVIOR from T-320 (readPersistedPermissionMode(ROOT)
+      // || readPermissionMode(ROOT)), now routed through the one resolver
+      // --agent also uses instead of a duplicated local fallback chain.
+      const { mode: permissionMode } = resolvePermissionMode(ROOT);
       if (permissionMode === 'bypassPermissions') {
         console.log(`\n${YELLOW}${BOLD}push suppressed under bypassPermissions${RESET} — review the results above, then run \`git push\` yourself.`);
       } else {
@@ -2176,6 +2295,10 @@ async function runInteractive() {
     }
   } catch { /* use default */ }
 
+  // T-629 (RC-2): prominently placed, non-blocking — prints BEFORE the
+  // results table, per the acceptance criteria.
+  printExecutionLogOmissionWarning(mergedTaskRecords);
+
   // Print completed table BEFORE the "Run git push?" prompt — the table is
   // the mandatory pre-push review artifact the human sees before authorizing
   // push (omitted when no tasks completed this session).
@@ -2212,7 +2335,13 @@ async function runInteractive() {
 }
 
 async function main() {
-  printRepoIdentityHeader(ROOT);
+  printRepoIdentityHeader(ROOT, { mutating: true });
+
+  const rootGuard = guardMutatingRoot(ROOT, '--close-session');
+  if (rootGuard.blocked) {
+    process.exitCode = 1;
+    return;
+  }
 
   const args = parseArgs(process.argv.slice(2));
 
@@ -2231,4 +2360,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE };
+module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE, findExecutionLogOmissions, printExecutionLogOmissionWarning };

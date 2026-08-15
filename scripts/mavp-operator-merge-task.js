@@ -16,6 +16,7 @@ const { execSync } = require('node:child_process');
 const {
   resolveCommitHash,
   printRepoIdentityHeader,
+  guardMutatingRoot,
   locateTaskBlock,
   updateTaskField,
 } = require('./mavp-operator-lib.js');
@@ -118,7 +119,13 @@ async function prompt(rl, question) {
 }
 
 async function main() {
-  printRepoIdentityHeader(ROOT);
+  printRepoIdentityHeader(ROOT, { mutating: true });
+
+  const rootGuard = guardMutatingRoot(ROOT, '--merge-task');
+  if (rootGuard.blocked) {
+    process.exitCode = 1;
+    return;
+  }
 
   const today = new Date().toISOString().slice(0, 10);
   console.log(`\n${BOLD}MavP Merge Task${RESET} ${DIM}${today}${RESET}\n`);

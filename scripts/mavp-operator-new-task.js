@@ -26,6 +26,7 @@ const {
   writeContextBundle,
   buildTaskStatusEntry,
   printRepoIdentityHeader,
+  guardMutatingRoot,
   resolveTaskOrigin,
   ARCHITECT_GATE_ADVISORY,
 } = require('./mavp-operator-lib.js');
@@ -121,7 +122,13 @@ async function main() {
     return;
   }
 
-  printRepoIdentityHeader(ROOT);
+  printRepoIdentityHeader(ROOT, { mutating: true });
+
+  const rootGuard = guardMutatingRoot(ROOT, '--new-task');
+  if (rootGuard.blocked) {
+    process.exitCode = 1;
+    return;
+  }
 
   const today = new Date().toISOString().slice(0, 10);
   console.log(`\n${BOLD}MavP New Task${RESET} ${DIM}${today}${RESET}\n`);

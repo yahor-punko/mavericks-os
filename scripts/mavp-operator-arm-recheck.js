@@ -3,11 +3,18 @@
 // Usage: node mavp-operator-arm-recheck.js T-NNN --due YYYY-MM-DD [--interval 8w] [--note "..."]
 
 const path = require('node:path');
-const { armRecheck, ROOT } = require('./mavp-operator-lib.js');
+const { armRecheck, ROOT, printRepoIdentityHeader, guardMutatingRoot } = require('./mavp-operator-lib.js');
 
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
 const BACKLOG_PATH = path.join(ROOT, 'BACKLOG.md');
 const TASK_STATUS_PATH = path.join(ROOT, 'TASK_STATUS.md');
+
+printRepoIdentityHeader(ROOT, { mutating: true });
+
+const rootGuard = guardMutatingRoot(ROOT, '--arm-recheck');
+if (rootGuard.blocked) {
+  process.exit(1);
+}
 
 function printUsage() {
   console.error('Usage: mavp-operator --arm-recheck T-NNN --due YYYY-MM-DD [--interval 8w] [--note "..."]');
