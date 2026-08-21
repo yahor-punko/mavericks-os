@@ -6,7 +6,7 @@ paths:
 
 # Scripts Rules
 
-- Reporting surfaces are read-only operator tools — they report state, they do not modify it. This applies to: dashboard, `--snapshot`, `--agent`/`--watch`, and the validator. The mutating ritual scripts (close-session, new-task, quick-task, update-task, set-status, rename-task, apply-decomposition, merge-task) are explicitly exempt — they intentionally write artifacts as their primary purpose.
+- Reporting surfaces are read-only operator tools — they report state, they do not modify it. This applies to: dashboard, `--snapshot`, `--agent`/`--watch`, and the validator. The mutating ritual scripts (close-session, new-task, quick-task, update-task, set-status, rename-task, apply-decomposition, merge-task) are explicitly exempt — they intentionally write artifacts as their primary purpose. `--integrate` (T-567) is also gated by `guardMutatingRoot()` like these, but is NOT an artifact writer in the same sense: it mutates the resolved root's git history (cherry-pick) and writes no BACKLOG.md/TASK_STATUS.md/PROCESS_STATE.* content — its own state-artifact involvement is limited to printing a suggested `--set-status` line, never executing it.
 - `mavp-operator-lib.js` is shared logic; changes here affect all operator surfaces. Test snapshot and dashboard after any change.
 - `mavp-validator.js` parses `## Active Wave` section in BACKLOG.md. If the section heading changes, update the regex in `parseBacklogActiveTasks()`.
 - `mavp-operator-agent.js` is the Main Agent's session entry point — keep its JSON output schema stable. Any new fields are additive only.

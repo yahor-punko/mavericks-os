@@ -23,6 +23,22 @@
 //      proceeds — --set-status actually updates the Status field.
 //   9. GREEN end-to-end: the override env var permits the fixture write even
 //      though PROCESS_STATE.json still carries the placeholder.
+//
+// T-670 additions — discriminator (c), linked-worktree refusal:
+//  10. RED end-to-end + unit: a real `git worktree add` linked worktree
+//      blocks (discriminator "linked_worktree", primaryWorktreePath set);
+//      --set-status pointed at the linked worktree exits 1 BEFORE any file
+//      write, byte-unchanged, stderr names the primary checkout path.
+//  11. GREEN end-to-end: the override env var permits the write against the
+//      same linked-worktree root.
+//  12. GREEN end-to-end + unit: the PRIMARY checkout of that same repo
+//      proceeds (not blocked) and --set-status actually updates Status.
+//  13. Unit: bare-repo-plus-worktrees layout (git init --bare, then `git
+//      worktree add` off the bare clone) proceeds — the bare-primary
+//      exemption, so this layout is never permanently blocked.
+//  14. Unit: a non-git directory (and one that no longer exists) proceeds
+//      without throwing — listGitWorktrees()/checkNeverAProjectRoot() degrade
+//      silently.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -34,6 +50,7 @@ const {
   checkNeverAProjectRoot,
   guardMutatingRoot,
   printRepoIdentityHeader,
+  listGitWorktrees,
   NEVER_PROJECT_ROOT_OVERRIDE_ENV,
   NEVER_PROJECT_VERSION_PLACEHOLDER,
 } = require('./mavp-operator-lib.js');
@@ -105,6 +122,28 @@ function runSetStatus(args, cwd, env) {
     stdout: result.stdout || '',
     stderr: result.stderr || '',
   };
+}
+
+// T-670: real `git` invocations for building linked-worktree fixtures.
+// Throws (via a non-zero exit) if the underlying git command fails — callers
+// are setting up fixtures, so a setup failure should fail the test loudly
+// rather than degrade silently (degrade-silently is a property of the guard
+// under test, not of this fixture helper).
+function runGit(args, cwd) {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(' ')} (cwd=${cwd}) failed:\n${result.stderr || result.stdout}`);
+  }
+  return result.stdout || '';
+}
+
+function initGitRepoWithCommit(dir) {
+  runGit(['init', '-q', '-b', 'main'], dir);
+  runGit(['config', 'user.email', 'test@example.com'], dir);
+  runGit(['config', 'user.name', 'Test'], dir);
+  writeUtf8(path.join(dir, 'seed.txt'), 'seed\n');
+  runGit(['add', 'seed.txt'], dir);
+  runGit(['commit', '-q', '-m', 'init'], dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -284,4 +323,149 @@ function runSetStatus(args, cwd, env) {
   fs.rmSync(REPO, { recursive: true, force: true });
 }
 
-console.log('\nAll T-624 assertions passed.');
+// ---------------------------------------------------------------------------
+// Part 10 — RED end-to-end + unit: a real linked git worktree blocks.
+// ---------------------------------------------------------------------------
+{
+  const PRIMARY = fs.mkdtempSync(path.join(os.tmpdir(), 't670-primary-'));
+  initGitRepoWithCommit(PRIMARY);
+  writeFixture(PRIMARY, 'T-970', 'in_progress');
+  writeUtf8(path.join(PRIMARY, 'PROCESS_STATE.json'), JSON.stringify({ mavericks_version: '0.44.2', wave: 1, initiative: 'T-670 primary fixture' }));
+
+  const LINKED = fs.mkdtempSync(path.join(os.tmpdir(), 't670-linked-'));
+  fs.rmdirSync(LINKED); // `git worktree add` requires the target path not exist yet.
+  runGit(['worktree', 'add', '-q', LINKED, '-b', 't670-linked-branch'], PRIMARY);
+  // The linked worktree checks out only what's tracked by git (seed.txt);
+  // BACKLOG.md/TASK_STATUS.md/PROCESS_STATE.json are untracked fixtures we
+  // add directly, mirroring the real-world case: an operator invocation
+  // whose cwd sits inside a linked worktree that has its OWN untracked
+  // state artifacts (or none at all yet) — the guard must still catch it.
+  writeFixture(LINKED, 'T-970', 'in_progress');
+  writeUtf8(path.join(LINKED, 'PROCESS_STATE.json'), JSON.stringify({ mavericks_version: '0.44.2', wave: 1, initiative: 'T-670 linked fixture' }));
+
+  // Unit: checkNeverAProjectRoot() directly.
+  const unitResult = checkNeverAProjectRoot(LINKED);
+  assert.strictEqual(unitResult.blocked, true, 'Test 10 FAIL: a linked worktree root must block');
+  assert.strictEqual(unitResult.discriminator, 'linked_worktree', 'Test 10 FAIL: expected discriminator "linked_worktree"');
+  assert.strictEqual(fs.realpathSync(unitResult.primaryWorktreePath), fs.realpathSync(PRIMARY), 'Test 10 FAIL: primaryWorktreePath must name the primary checkout');
+
+  // End-to-end (RED): --set-status against the linked worktree refuses
+  // BEFORE any write.
+  const beforeBacklog = readUtf8(path.join(LINKED, 'BACKLOG.md'));
+  const beforeTaskStatus = readUtf8(path.join(LINKED, 'TASK_STATUS.md'));
+
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: LINKED };
+  delete env[NEVER_PROJECT_ROOT_OVERRIDE_ENV];
+  const r = runSetStatus(['T-970', 'dev_done'], LINKED, env);
+
+  assert.strictEqual(r.status, 1, `Test 10 FAIL: expected exit 1, got ${r.status}. stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+
+  const afterBacklog = readUtf8(path.join(LINKED, 'BACKLOG.md'));
+  const afterTaskStatus = readUtf8(path.join(LINKED, 'TASK_STATUS.md'));
+  assert.strictEqual(afterBacklog, beforeBacklog, 'Test 10 FAIL: BACKLOG.md must be byte-identical after a refused run');
+  assert.strictEqual(afterTaskStatus, beforeTaskStatus, 'Test 10 FAIL: TASK_STATUS.md must be byte-identical after a refused run');
+
+  assert.ok(r.stderr.includes('REFUSED'), 'Test 10 FAIL: stderr must contain the refusal message');
+  assert.ok(r.stderr.includes(fs.realpathSync(PRIMARY)) || r.stderr.includes(PRIMARY), `Test 10 FAIL: stderr must name the primary checkout path. stderr:\n${r.stderr}`);
+  assert.ok(r.stderr.includes(NEVER_PROJECT_ROOT_OVERRIDE_ENV), 'Test 10 FAIL: stderr must name the override env var');
+  assert.ok(r.stdout.includes('REFUSED'), 'Test 10 FAIL: stdout must also contain the refusal message (BOTH stdout and stderr required)');
+
+  console.log('Test 10 (RED) passed: a real `git worktree add` linked worktree blocks with discriminator "linked_worktree"; --set-status refuses exit 1 before any write; stderr names the primary checkout path');
+
+  // ---------------------------------------------------------------------------
+  // Part 11 — GREEN end-to-end: the override env var permits the write
+  // against the same linked-worktree root.
+  // ---------------------------------------------------------------------------
+  const overrideEnv = { ...process.env, MAVERICKS_PROJECT_ROOT: LINKED, [NEVER_PROJECT_ROOT_OVERRIDE_ENV]: '1' };
+  const overrideResult = runSetStatus(['T-970', 'dev_done'], LINKED, overrideEnv);
+  assert.ok(!overrideResult.stdout.includes('REFUSED'), `Test 11 FAIL: override env var must suppress the refusal. stdout:\n${overrideResult.stdout}`);
+  const overriddenBacklog = readUtf8(path.join(LINKED, 'BACKLOG.md'));
+  assert.ok(overriddenBacklog.includes('**Status:** dev_done'), 'Test 11 FAIL: BACKLOG.md Status must actually be updated when the override permits the write');
+  console.log('Test 11 (GREEN) passed: override env var permits the write against a linked-worktree root');
+
+  // ---------------------------------------------------------------------------
+  // Part 12 — GREEN end-to-end + unit: the PRIMARY checkout proceeds.
+  // ---------------------------------------------------------------------------
+  const primaryUnitResult = checkNeverAProjectRoot(PRIMARY);
+  assert.strictEqual(primaryUnitResult.blocked, false, 'Test 12 FAIL: the primary checkout must not be blocked as a linked worktree');
+
+  const primaryEnv = { ...process.env, MAVERICKS_PROJECT_ROOT: PRIMARY };
+  delete primaryEnv[NEVER_PROJECT_ROOT_OVERRIDE_ENV];
+  const primaryResult = runSetStatus(['T-970', 'dev_done'], PRIMARY, primaryEnv);
+  assert.ok(!primaryResult.stdout.includes('REFUSED'), `Test 12 FAIL: the primary checkout must not print the refusal message. stdout:\n${primaryResult.stdout}`);
+  const primaryBacklog = readUtf8(path.join(PRIMARY, 'BACKLOG.md'));
+  assert.ok(primaryBacklog.includes('**Status:** dev_done'), 'Test 12 FAIL: BACKLOG.md Status must actually be updated to dev_done at the primary checkout');
+  console.log('Test 12 (GREEN) passed: the primary checkout of the same repo proceeds and --set-status updates Status');
+
+  fs.rmSync(LINKED, { recursive: true, force: true });
+  runGit(['worktree', 'prune'], PRIMARY);
+  fs.rmSync(PRIMARY, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// Part 13 — unit: bare-repo-plus-worktrees layout proceeds (kills the
+// bare-layout false positive — the bare-primary exemption).
+// ---------------------------------------------------------------------------
+{
+  const SRC = fs.mkdtempSync(path.join(os.tmpdir(), 't670-bare-src-'));
+  initGitRepoWithCommit(SRC);
+
+  const BARE = fs.mkdtempSync(path.join(os.tmpdir(), 't670-bare-'));
+  fs.rmdirSync(BARE);
+  runGit(['clone', '-q', '--bare', SRC, BARE]);
+
+  const WT = fs.mkdtempSync(path.join(os.tmpdir(), 't670-bare-wt-'));
+  fs.rmdirSync(WT);
+  runGit(['worktree', 'add', '-q', WT], BARE);
+
+  // Sanity: confirm the primary entry really is reported bare before relying
+  // on the exemption it feeds.
+  const worktrees = listGitWorktrees(WT);
+  assert.ok(worktrees.length >= 2, 'Test 13 FAIL: expected at least the bare primary + the linked worktree entry');
+  assert.strictEqual(worktrees[0].bare, true, 'Test 13 FAIL: expected the first (primary) entry to be reported bare');
+
+  writeFixture(WT, 'T-971', 'in_progress');
+  writeUtf8(path.join(WT, 'PROCESS_STATE.json'), JSON.stringify({ mavericks_version: '0.44.2', wave: 1, initiative: 'T-670 bare-layout fixture' }));
+
+  const unitResult = checkNeverAProjectRoot(WT);
+  assert.strictEqual(unitResult.blocked, false, 'Test 13 FAIL: a worktree off a bare primary must not be blocked as "linked_worktree" (bare-primary exemption)');
+
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: WT };
+  delete env[NEVER_PROJECT_ROOT_OVERRIDE_ENV];
+  const r = runSetStatus(['T-971', 'dev_done'], WT, env);
+  assert.ok(!r.stdout.includes('REFUSED'), `Test 13 FAIL: bare-repo-plus-worktrees layout must not be refused. stdout:\n${r.stdout}`);
+  const afterBacklog = readUtf8(path.join(WT, 'BACKLOG.md'));
+  assert.ok(afterBacklog.includes('**Status:** dev_done'), 'Test 13 FAIL: BACKLOG.md Status must actually be updated in the bare-repo-plus-worktrees layout');
+
+  console.log('Test 13 passed: bare-repo-plus-worktrees layout proceeds (bare-primary exemption) — checked directly via listGitWorktrees() and end-to-end via --set-status');
+
+  fs.rmSync(WT, { recursive: true, force: true });
+  runGit(['worktree', 'prune'], BARE);
+  fs.rmSync(BARE, { recursive: true, force: true });
+  fs.rmSync(SRC, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// Part 14 — unit: a non-git directory (and one that no longer exists)
+// proceeds without throwing.
+// ---------------------------------------------------------------------------
+{
+  const nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 't670-nongit-'));
+  assert.doesNotThrow(() => listGitWorktrees(nonGitDir), 'Test 14 FAIL: listGitWorktrees() must never throw on a non-git directory');
+  assert.deepStrictEqual(listGitWorktrees(nonGitDir), [], 'Test 14 FAIL: listGitWorktrees() must degrade to [] on a non-git directory');
+
+  let nonGitResult;
+  assert.doesNotThrow(() => { nonGitResult = checkNeverAProjectRoot(nonGitDir); }, 'Test 14 FAIL: checkNeverAProjectRoot() must never throw on a non-git directory');
+  assert.strictEqual(nonGitResult.blocked, false, 'Test 14 FAIL: a non-git directory must not be blocked');
+  fs.rmSync(nonGitDir, { recursive: true, force: true });
+
+  // A path that no longer exists at all (already removed above) — the
+  // guard must still degrade silently rather than throw.
+  let missingResult;
+  assert.doesNotThrow(() => { missingResult = checkNeverAProjectRoot(nonGitDir); }, 'Test 14 FAIL: checkNeverAProjectRoot() must never throw on a removed/non-existent path');
+  assert.strictEqual(missingResult.blocked, false, 'Test 14 FAIL: a removed/non-existent path must not be blocked');
+
+  console.log('Test 14 passed: a non-git directory (and a removed path) proceed without throwing');
+}
+
+console.log('\nAll T-624/T-670 assertions passed.');

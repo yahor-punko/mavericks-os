@@ -10,8 +10,16 @@
 //
 // This script maps every staged CHANGELOG.md hunk to the `## [x.y.z]`
 // section it lands in (in the STAGED/new version of the file) and exits
-// non-zero, naming the version, when that version's tag already exists on
-// the resolved mirror clone.
+// non-zero, naming the version, when that section's version compares AT OR
+// BELOW the highest STABLE (strict `v<n>.<n>.<n>`) tag on the resolved
+// mirror clone (T-604) — not only when that exact version's own tag exists.
+// A version whose own tag was never cut still gets published inside a
+// later release's tag/body (e.g. 0.41.0 folded into the v0.42.0 release),
+// so exact-tag-only left it silently editable forever; the comparison is
+// segment-wise numeric (never lexicographic — a string compare would rank
+// "0.9.0" above "0.10.0"). `Unreleased` and any strictly-newer section stay
+// editable. Tags not matching the strict numeric shape are ignored by the
+// max-tag computation.
 //
 // Removal-vs-addition design decision (see inline comment on
 // `hunk.newCount === 0` below): a hunk that is a PURE DELETION (adds no
@@ -101,6 +109,27 @@
 // mirror / adopter fork) or a repo with no manifest, prints a short skip
 // message and exits 0. A CHANGELOG.md is not framework-managed outside the
 // canonical repo, so the guard must be inert there.
+//
+// SECOND, INDEPENDENT CHECK (T-666): a staged CHANGELOG.md edit that opens
+// a brand-new `## [x.y.z]` section HEADING for a version the canonical
+// version files (scripts/mavp-version.js) never reached blocks the commit,
+// naming both versions. This closes a gap the T-604 mirror-tag check above
+// cannot see: a section can sit open and accumulate entries for waves
+// before it is ever tagged, so comparing only against mirror tags catches
+// nothing until release time — the live incident this closes (2026-08-14)
+// had a dated 0.44.3 section opened while scripts/mavp-version.js still
+// read 0.44.2, and it sat undetected across two waves. This check is
+// SEPARATE from and coexists with the mirror-tag check: it compares a
+// newly-added heading line against the version FILES, not the mirror, and
+// only fires on the heading line itself — an ordinary entry written under
+// an already-existing heading never matches and never blocks. The version
+// is read from the STAGED index blob of scripts/mavp-version.js, falling
+// back to HEAD when that path isn't staged, so a commit that stages BOTH
+// the new section AND the matching version-file bump passes — the
+// legitimate release-bump commit must never be obstructed. Degrades
+// silently (no block, no output) when the version file can't be read or
+// parsed from either source — same posture as every other check in this
+// file.
 //
 // No external dependencies — Node's child_process/fs/path/os only.
 
@@ -193,6 +222,45 @@ function isGitRepo(dir) {
   }
 }
 
+// Strict `v<digits>.<digits>.<digits>` tag matcher — anything else (a
+// pre-release suffix, a non-numeric segment, a bare "latest" tag, etc.) is
+// ignored by the max-tag computation below rather than risking a wrong
+// comparison against an unparseable shape.
+const STABLE_TAG_RE = /^v(\d+)\.(\d+)\.(\d+)$/;
+
+// Segment-wise numeric compare of two [major, minor, patch] triples.
+// Returns -1, 0, or 1 — never a string/lexicographic comparison, which would
+// wrongly rank "0.9.0" above "0.10.0" (T-604).
+function compareVersionTriples(a, b) {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+// Parses a `## [x.y.z]` section version string into a [major, minor, patch]
+// triple, or null when it doesn't match the strict numeric shape (e.g.
+// "Unreleased", or any other non-numeric heading — callers must treat null
+// as "cannot be compared, never frozen by this rule").
+function parseVersionTriple(version) {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+  if (!m) return null;
+  return [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
+}
+
+// Returns the highest stable [major, minor, patch] triple among `tags`
+// (matching STABLE_TAG_RE only), or null when no tag matches that shape.
+function highestStableTagTriple(tags) {
+  let highest = null;
+  for (const tag of tags) {
+    const m = STABLE_TAG_RE.exec(tag.trim());
+    if (!m) continue;
+    const triple = [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
+    if (!highest || compareVersionTriples(triple, highest) > 0) highest = triple;
+  }
+  return highest;
+}
+
 // Returns a Set of tag names present in the mirror clone, or null on any
 // failure (caller treats null as "degrade silently, exit 0").
 function getMirrorTags(mirrorHome) {
@@ -221,6 +289,60 @@ function getMirrorTags(mirrorHome) {
   }
 }
 
+// Matches a `## [x.y.z]` (or `## [Unreleased]`) CHANGELOG.md section
+// heading line. Shared by buildSectionMap() below and by the T-666
+// newly-added-heading detection in main(), so both stay in sync on exactly
+// one heading shape.
+const SECTION_HEADING_RE = /^##\s*\[([^\]]+)\]/;
+
+// Returns the version string declared in scripts/mavp-version.js, read
+// from the STAGED index blob (`git show :scripts/mavp-version.js`) with a
+// fallback to HEAD's committed blob when that path isn't staged (T-666) —
+// this fallback is what lets a legitimate release-bump commit, which
+// stages BOTH the new CHANGELOG.md section and the version-file bump in
+// the SAME commit, see its own staged bump rather than the pre-bump HEAD
+// value. Returns null (never throws) when neither blob is readable or
+// parses — callers treat null as "cannot compare, skip this check".
+function readVersionFileString() {
+  for (const ref of [':scripts/mavp-version.js', 'HEAD:scripts/mavp-version.js']) {
+    let content;
+    try {
+      content = execFileSync('git', ['show', ref], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch {
+      continue;
+    }
+    const m = /MAVERICKS_VERSION\s*:\s*['"]([^'"]+)['"]/.exec(content);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+// Returns [{ line, text }] for every line in the staged CHANGELOG.md that
+// is (a) inside an added/replaced hunk range and (b) genuinely new text —
+// its exact trimmed form does not already appear anywhere in HEAD's
+// CHANGELOG.md (see the diff-attribution hardening note at the top of this
+// file). Blank lines never count. Shared by both checks in main() so the
+// "what counts as a real addition" rule can never drift between them.
+function collectGenuinelyAddedLines(hunks, stagedLines, oldLineSet) {
+  const result = [];
+  for (const hunk of hunks) {
+    if (hunk.newCount === 0) continue; // pure deletion — see removal-vs-addition note above
+    const rangeStart = hunk.newStart;
+    const rangeEnd = hunk.newStart + hunk.newCount - 1;
+    for (let line = rangeStart; line <= rangeEnd; line++) {
+      const lineText = (stagedLines[line - 1] || '').trim();
+      if (!lineText) continue;
+      if (oldLineSet.has(lineText)) continue;
+      result.push({ line, text: lineText });
+    }
+  }
+  return result;
+}
+
 // Parses `git diff --cached -U0 -- CHANGELOG.md` output into a list of
 // { oldStart, oldCount, newStart, newCount } hunks.
 function parseHunks(diffOutput) {
@@ -245,10 +367,9 @@ function parseHunks(diffOutput) {
 // returns null for it).
 function buildSectionMap(content) {
   const lines = content.split('\n');
-  const headingRe = /^##\s*\[([^\]]+)\]/;
   const headings = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(headingRe);
+    const m = lines[i].match(SECTION_HEADING_RE);
     if (m) headings.push({ line: i + 1, version: m[1].trim() });
   }
   return headings.map((h, idx) => ({
@@ -274,14 +395,6 @@ function main() {
       );
       process.exit(0);
     }
-
-    const mirrorHome = resolveMirrorHome();
-    if (!fs.existsSync(mirrorHome) || !isGitRepo(mirrorHome)) {
-      process.exit(0); // no mirror clone resolvable — degrade silently
-    }
-
-    const tags = getMirrorTags(mirrorHome);
-    if (!tags) process.exit(0); // git failed for any reason — degrade silently
 
     let diffOutput;
     try {
@@ -331,52 +444,113 @@ function main() {
       // no HEAD / no such path at HEAD — oldLineSet stays empty.
     }
 
-    // version -> true, collected across all hunks so one error message can
-    // name every frozen section touched by this commit.
-    const blockedVersions = new Set();
+    // Genuinely-added lines across all hunks (see collectGenuinelyAddedLines
+    // doc comment) — shared input for BOTH independent checks below.
+    const addedLines = collectGenuinelyAddedLines(hunks, stagedLines, oldLineSet);
 
-    for (const hunk of hunks) {
-      // Pure deletion (no lines added to the new file) — see the
-      // removal-vs-addition design note at the top of this file. Never
-      // blocks: it cannot reintroduce prose into an already-published
-      // section.
-      if (hunk.newCount === 0) continue;
+    let anyBlocked = false;
 
-      const rangeStart = hunk.newStart;
-      const rangeEnd = hunk.newStart + hunk.newCount - 1;
+    // --- Check A (T-604): staged edit touches a section AT OR BELOW the
+    // highest STABLE mirror tag. Degrades to a no-op for THIS check alone
+    // when the mirror doesn't resolve/have tags — Check B below is fully
+    // independent and must still run regardless.
+    checkA: {
+      const mirrorHome = resolveMirrorHome();
+      if (!fs.existsSync(mirrorHome) || !isGitRepo(mirrorHome)) break checkA;
 
-      // Check every line in the added/replaced range — a hunk that spans a
-      // section boundary (part in a frozen section, part in a newer one)
-      // is blocked if ANY line in it falls inside an already-tagged
-      // section. This is a deliberate fail-closed choice: partial overlap
-      // with frozen content is still an edit to frozen content.
-      for (let line = rangeStart; line <= rangeEnd; line++) {
-        const lineText = (stagedLines[line - 1] || '').trim();
-        if (!lineText) continue; // blank lines never count as prose
-        if (oldLineSet.has(lineText)) continue; // not new — see hardening note above
+      const tags = getMirrorTags(mirrorHome);
+      if (!tags) break checkA; // git failed for any reason — degrade silently
 
+      // The freeze boundary is the highest STABLE (strict v<n>.<n>.<n>) tag
+      // on the mirror — a section is frozen when its version compares AT OR
+      // BELOW that boundary, not only when its own exact tag exists (T-604).
+      const highestTriple = highestStableTagTriple(tags);
+      if (!highestTriple) break checkA; // no stable tag on the mirror — nothing frozen
+
+      // version -> true, collected across all hunks so one error message
+      // can name every frozen section touched by this commit.
+      const blockedVersions = new Set();
+
+      // A hunk that spans a section boundary (part in a frozen section,
+      // part in a newer one) is blocked if ANY line in it falls inside an
+      // already-tagged section — a deliberate fail-closed choice: partial
+      // overlap with frozen content is still an edit to frozen content.
+      for (const { line } of addedLines) {
         const version = findVersionForLine(sectionMap, line);
         if (!version) continue;
         if (version.toLowerCase() === 'unreleased') continue;
 
-        const tagName = version.startsWith('v') ? version : `v${version}`;
-        if (tags.has(tagName)) blockedVersions.add(version);
+        // Segment-wise numeric compare against the highest stable mirror
+        // tag. A version heading that doesn't parse to a strict numeric
+        // triple (anything other than "Unreleased", already excluded
+        // above) can never be compared, so it is never frozen by this rule.
+        const sectionTriple = parseVersionTriple(version);
+        if (!sectionTriple) continue;
+        if (compareVersionTriples(sectionTriple, highestTriple) <= 0) {
+          blockedVersions.add(version);
+        }
+      }
+
+      if (blockedVersions.size > 0) {
+        const versionList = [...blockedVersions].sort().join(', ');
+        console.error(
+          `COMMIT BLOCKED: staged CHANGELOG.md edit(s) touch already-released section(s): ${versionList}`
+        );
+        console.error(
+          `These version(s) are tagged on the mirror (${mirrorHome}) — per docs/PUBLIC_RELEASE_STRATEGY.md ` +
+            `§5 "Frozen-section rule", an already-tagged section is immutable. Add new entries under the ` +
+            `## [Unreleased] section instead — it is exempt from this check, and gets folded into a new ` +
+            `numbered section at the next version bump.`
+        );
+        anyBlocked = true;
       }
     }
 
-    if (blockedVersions.size > 0) {
-      const versionList = [...blockedVersions].sort().join(', ');
-      console.error(
-        `COMMIT BLOCKED: staged CHANGELOG.md edit(s) touch already-released section(s): ${versionList}`
-      );
-      console.error(
-        `These version(s) are tagged on the mirror (${mirrorHome}) — per docs/PUBLIC_RELEASE_STRATEGY.md ` +
-          `§5 "Frozen-section rule", an already-tagged section is immutable. Open a new version section instead.`
-      );
-      process.exit(1);
+    // --- Check B (T-666): a staged NEW `## [x.y.z]` section HEADING whose
+    // version compares STRICTLY GREATER than the canonical version files
+    // (scripts/mavp-version.js, staged blob with a HEAD fallback). Fully
+    // independent of the mirror — degrades to a no-op when the version file
+    // can't be read/parsed from either source.
+    {
+      const versionFileString = readVersionFileString();
+      const versionFileTriple = versionFileString ? parseVersionTriple(versionFileString) : null;
+
+      if (versionFileTriple) {
+        const aheadVersions = new Set();
+
+        // Only lines matching the section-heading shape count here — an
+        // ordinary entry added under an already-existing heading is never a
+        // heading line itself, so it never matches and never blocks.
+        for (const { text } of addedLines) {
+          const m = SECTION_HEADING_RE.exec(text);
+          if (!m) continue;
+          const version = m[1].trim();
+          if (version.toLowerCase() === 'unreleased') continue;
+
+          const headingTriple = parseVersionTriple(version);
+          if (!headingTriple) continue;
+          if (compareVersionTriples(headingTriple, versionFileTriple) > 0) {
+            aheadVersions.add(version);
+          }
+        }
+
+        if (aheadVersions.size > 0) {
+          const versionList = [...aheadVersions].sort().join(', ');
+          console.error(
+            `COMMIT BLOCKED: staged CHANGELOG.md opens section(s) ahead of the version files: ${versionList}`
+          );
+          console.error(
+            `scripts/mavp-version.js declares ${versionFileString} — a CHANGELOG.md section for a version the ` +
+              `version files have not reached must not be opened. Add new entries under the ## [Unreleased] ` +
+              `section instead — it is exempt from this check; the numbered section and the matching version-file ` +
+              `bump are opened together, in the same commit, at release time (T-666).`
+          );
+          anyBlocked = true;
+        }
+      }
     }
 
-    process.exit(0);
+    process.exit(anyBlocked ? 1 : 0);
   } catch {
     // Any unexpected failure — degrade silently (established guard posture).
     process.exit(0);
@@ -392,6 +566,13 @@ module.exports = {
   GIT_REPO_ENV_KEYS,
   getMirrorTags,
   isGitRepo,
+  STABLE_TAG_RE,
+  compareVersionTriples,
+  parseVersionTriple,
+  highestStableTagTriple,
+  SECTION_HEADING_RE,
+  readVersionFileString,
+  collectGenuinelyAddedLines,
 };
 
 if (require.main === module) {

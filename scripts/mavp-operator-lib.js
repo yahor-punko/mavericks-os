@@ -93,17 +93,29 @@ const NEVER_PROJECT_VERSION_PLACEHOLDER = '__MAVERICKS_VERSION__';
 const NEVER_PROJECT_ROOT_OVERRIDE_ENV = 'MAVERICKS_ALLOW_NEVER_PROJECT_ROOT';
 
 /**
- * T-624: determine whether `root` is a "never-a-project" tree — one that has
- * never been installed/adopted, or is the machine-shared adopter-resolved
- * framework-source clone ($HOME/.mavericks) — so mutating ritual commands can
- * refuse before writing to it.
+ * T-624/T-670: determine whether `root` is a "never-a-project" tree — one
+ * that has never been installed/adopted, is the machine-shared
+ * adopter-resolved framework-source clone ($HOME/.mavericks), or is a linked
+ * (non-primary) git worktree of a real project — so mutating ritual commands
+ * can refuse before writing to it.
  *
- * Two independent discriminators, either one is sufficient:
+ * Three independent discriminators, any one is sufficient:
  *   (a) <root>/PROCESS_STATE.json EXISTS and its `mavericks_version` field is
  *       exactly the literal shipped placeholder (NEVER_PROJECT_VERSION_PLACEHOLDER).
  *       A MISSING or unparsable PROCESS_STATE.json never triggers (a) — only
  *       an on-disk file carrying the literal placeholder does.
  *   (b) realpath(root) === realpath(<homeDir>/.mavericks).
+ *   (c) T-670: realpath(root) equals a NON-FIRST entry returned by
+ *       listGitWorktrees(root), AND the first (primary) entry is not bare.
+ *       `git worktree list --porcelain` always lists the primary/main
+ *       worktree first — any entry after it is a linked worktree. The bare
+ *       exemption matters: in a bare-repo-plus-worktrees layout every
+ *       checkout is linked and there is no primary to compare against or
+ *       name in a refusal message, so (c) never fires there (it would
+ *       otherwise permanently block every mutating command for that
+ *       adopter layout). A root that is not a git repo, or where git itself
+ *       fails, degrades to listGitWorktrees() returning `[]` (never throws),
+ *       so (c) silently does not fire.
  *
  * Both the home directory and the resolved root are injectable via `options`
  * so tests never need a real ~/.mavericks or a real never-installed tree
@@ -112,7 +124,7 @@ const NEVER_PROJECT_ROOT_OVERRIDE_ENV = 'MAVERICKS_ALLOW_NEVER_PROJECT_ROOT';
  * @param {string} root - Absolute path to the project root being checked.
  * @param {{homeDir?: string}} [options] - homeDir override for tests (defaults
  *   to os.homedir()).
- * @returns {{blocked: boolean, discriminator: ('placeholder'|'dot_mavericks'|null), resolvedRoot: string}}
+ * @returns {{blocked: boolean, discriminator: ('placeholder'|'dot_mavericks'|'linked_worktree'|null), resolvedRoot: string, primaryWorktreePath?: string}}
  */
 function checkNeverAProjectRoot(root, options = {}) {
   const homeDir = options && options.homeDir !== undefined ? options.homeDir : os.homedir();
@@ -143,16 +155,43 @@ function checkNeverAProjectRoot(root, options = {}) {
     // unparsable PROCESS_STATE.json never triggers (a) either
   }
 
+  // Discriminator (c): root is a linked (non-primary) git worktree.
+  // listGitWorktrees() itself never throws (degrades to [] on any git
+  // failure or non-git directory) — the try/catch here is belt-and-suspenders
+  // around the realpath comparisons only.
+  try {
+    const worktrees = listGitWorktrees(root);
+    if (worktrees.length > 1) {
+      const primary = worktrees[0];
+      if (!primary.bare) {
+        const isLinkedMatch = worktrees
+          .slice(1)
+          .some((wt) => safeRealpath(wt.path) === resolvedRoot);
+        if (isLinkedMatch) {
+          return {
+            blocked: true,
+            discriminator: 'linked_worktree',
+            resolvedRoot,
+            primaryWorktreePath: primary.path,
+          };
+        }
+      }
+    }
+  } catch {
+    // degrade silently - never let the guard itself throw
+  }
+
   return { blocked: false, discriminator: null, resolvedRoot };
 }
 
 /**
- * T-624: guard entry point for every mutating ritual command. Refuses BEFORE
- * any file write when checkNeverAProjectRoot() finds a match, unless the
- * override env var (NEVER_PROJECT_ROOT_OVERRIDE_ENV) is set to a truthy
+ * T-624/T-670: guard entry point for every mutating ritual command. Refuses
+ * BEFORE any file write when checkNeverAProjectRoot() finds a match, unless
+ * the override env var (NEVER_PROJECT_ROOT_OVERRIDE_ENV) is set to a truthy
  * string. On refusal, prints the refusal message to BOTH stdout and stderr
  * (a stdout-only pipe must not be able to cut it) naming the resolved path,
- * the matched discriminator, and the override env var.
+ * the matched discriminator (for discriminator (c), also the primary
+ * checkout path), and the override env var.
  *
  * @param {string} root - Absolute path to the project root being operated on.
  * @param {string} commandName - The mutating command's flag name (e.g. "--set-status"),
@@ -175,6 +214,8 @@ function guardMutatingRoot(root, commandName, options = {}) {
 
   const discriminatorText = check.discriminator === 'dot_mavericks'
     ? `root resolves to $HOME/.mavericks (the adopter-resolved framework-source clone)`
+    : check.discriminator === 'linked_worktree'
+    ? `root is a linked (non-primary) git worktree; the primary checkout is at ${check.primaryWorktreePath}`
     : `PROCESS_STATE.json's mavericks_version is the shipped placeholder "${NEVER_PROJECT_VERSION_PLACEHOLDER}" (never installed/adopted)`;
 
   const message = [

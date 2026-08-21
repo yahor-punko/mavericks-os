@@ -63,6 +63,11 @@ if [[ "${1-}" == "--help" ]]; then
   echo "                   Acknowledge a recheck: removes it from rechecks[]"
   echo "                   With --rearm: reschedule due = today + interval instead of removing"
   echo "  --reflect-skill <role>   Run skill reflection loop for a role (SkillOpt)"
+  echo "  --integrate      Cherry-pick a commit or range into the resolved project root,"
+  echo "                   pinned to that root regardless of the caller's cwd; refuses on a"
+  echo "                   never-a-project root, a linked worktree, or an in-progress pick;"
+  echo "                   writes NO state artifacts"
+  echo "                   Usage: --integrate <commit|base..tip> [--task T-NNN]"
   echo "  --worktree-report  Classify every agent git worktree (dirty / unintegrated /"
   echo "                   clean-and-integrated) via patch-equivalence (git cherry); read-only"
   echo "                   Usage: --worktree-report [--main-ref <ref>] [--mtime-threshold <ms>] [--json]"
@@ -150,6 +155,9 @@ elif [[ "${1-}" == "--arm-recheck" ]]; then
 elif [[ "${1-}" == "--ack-recheck" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-ack-recheck.js" "$@"
+elif [[ "${1-}" == "--integrate" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-integrate.js" "$@"
 elif [[ "${1-}" == "--worktree-report" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-worktree-report.js" "$@"

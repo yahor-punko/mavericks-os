@@ -58,6 +58,12 @@
 //      the previous stable tag AND no newer than the version being tagged —
 //      so a CHANGELOG section for a not-yet-tagged future version never
 //      leaks into an earlier release's body (security review round 2, M1).
+//      Also in this step (T-568), BEFORE that extraction runs: refuse if the
+//      `## [Unreleased]` section OR any section newer than the version being
+//      tagged has real (non-blank, non-sub-heading) content — the class of
+//      silent drop that reproduced on 2026-07-29 (0.39.0: a released body
+//      45,866 characters pre-fold vs. 116,698 post-fold) with every other
+//      gate green.
 //   8. Only once every gate above has passed does this script touch the
 //      clone: sync local `main` to the resolved `origin/main` SHA, fast-
 //      forward-merge it to the exact gated `edge` SHA (not a re-resolved
@@ -801,6 +807,61 @@ function extractReleaseSections(changelogContent, previousStableVersion, taggedV
   });
 }
 
+// T-568: matches a real Keep-a-Changelog sub-heading (`### Added`, `###
+// Fixed`, etc — this project's house style, and never itself "content" for
+// the emptiness check below). Deliberately narrower than SUSPICIOUS_HEADING_RE
+// (which also matches a BRACKETED, wrong-level heading — a different,
+// already-handled defect) — this one only needs to recognize the ordinary,
+// well-formed sub-heading shape so it can be skipped as non-content.
+const SUBHEADING_RE = /^###(\s|$)/;
+
+// T-568: true when `sectionText` (one parsed section's full text, its own
+// `## [...]` heading line included) holds anything beyond that heading,
+// blank lines, and `###`-level sub-headings. Fence-aware via
+// computeChangelogLineStates() (reused, never hand-rolled, per the T-568
+// brief's placement constraint) — recomputing fence state on this
+// already-carved-out slice is safe because parseChangelogSections() never
+// splits a section in the middle of a fence (a fence-internal heading-shaped
+// line does not reset `current`), so any fence appearing in this text opens
+// and closes entirely within it. Every line that is part of a fence —
+// including the fence delimiters themselves and any heading-shaped line
+// INSIDE the fence (e.g. a doc example illustrating the CHANGELOG format) —
+// counts as real content: a fenced block is never "just a sub-heading", so
+// it cannot be miscounted as one and cannot be miscounted as absent either.
+function sectionHasRealContent(sectionText) {
+  const { states } = computeChangelogLineStates(sectionText);
+  for (let i = 1; i < states.length; i++) {
+    // states[0] is the section's own heading line — skip it.
+    const { text: line, inFence } = states[i];
+    if (inFence) return true;
+    if (line.trim() === '') continue;
+    if (SUBHEADING_RE.test(line)) continue;
+    return true;
+  }
+  return false;
+}
+
+// T-568: finds every section extractReleaseSections() would silently drop
+// from the release body — the `## [Unreleased]` section (dropped by name,
+// see extractReleaseSections() above) or any `## [x.y.z]` section strictly
+// newer than `taggedVersion` (dropped by the upper bound) — that also has
+// real (non-blank, non-sub-heading) content. Mirrors
+// extractReleaseSections()'s own two drop predicates exactly, so a section
+// this function flags is precisely one that function would have dropped. A
+// live near-miss on 2026-07-29 (0.39.0: a released body 45,866 characters
+// pre-fold vs. 116,698 post-fold, an entire wave silently omitted) showed
+// every other gate stays green while this class of drop happens — this is
+// the mechanical refusal that closes it, for both drop paths.
+function findSuppressedNonEmptySections(changelogContent, taggedVersion) {
+  const allSections = parseChangelogSections(changelogContent);
+  return allSections.filter((section) => {
+    const isUnreleased = section.version.toLowerCase() === 'unreleased';
+    const isFuture = !isUnreleased && compareVersions(section.version, taggedVersion) > 0;
+    if (!isUnreleased && !isFuture) return false;
+    return sectionHasRealContent(section.text);
+  });
+}
+
 // Concatenates extracted sections (already in document order) into the
 // release-body text, blank-line separated, single trailing newline.
 function renderReleaseBody(sections) {
@@ -1022,6 +1083,26 @@ function main() {
     );
   }
 
+  // T-568: refuse BEFORE any mutation, and before extractReleaseSections()
+  // even runs, if the edge-tip CHANGELOG has real content in a section that
+  // function would silently drop from the release body — either the
+  // `## [Unreleased]` section (dropped by name) or any `## [x.y.z]` section
+  // strictly newer than the version being tagged (dropped by the upper
+  // bound). Both are ritual errors at release time: the code they describe
+  // is already in the tree being tagged, or the version bump was skipped.
+  // See findSuppressedNonEmptySections()'s comment for the live near-miss
+  // this closes.
+  const suppressedSections = findSuppressedNonEmptySections(changelogContent, version);
+  if (suppressedSections.length > 0) {
+    const names = suppressedSections.map((s) => s.version).join(', ');
+    abort(
+      `CHANGELOG.md at the edge tip (${edgeRef.sha}) has non-blank content in ${suppressedSections.length} ` +
+        `section(s) that would be silently dropped from the ${tagName} release body — ${names} — because each ` +
+        `is either the Unreleased section or newer than the version being tagged (${version}). Fold the content ` +
+        `into the '## [${version}]' section (or remove it if premature) and retry.`
+    );
+  }
+
   const previousStableVersion = computePreviousStableVersion(existingTags);
   log(
     previousStableVersion
@@ -1069,6 +1150,22 @@ function main() {
   pushTag(cloneDir, tagName);
   log(`Created and pushed tag ${tagName}.`);
 
+  // T-668: non-blocking reminder, printed BEFORE the gh release create
+  // command below — nothing here changes control flow, the exit code, or
+  // adds any gate/refusal. PUBLIC_RELEASE_STRATEGY.md §3b (line ~176)
+  // requires this human review before the printed gh command is actually
+  // run; the review itself was skipped on the first promotion after that
+  // doc step shipped (v0.44.2, 2026-08-15) precisely because nothing named
+  // it at the moment the operator is reading this script's own output. This
+  // line is the mechanical fix for that miss — it only informs, it never
+  // stops the run.
+  log('\n=== Reminder (human step, DR-008) ===');
+  log(
+    'Before running the gh release create command below: review docs/core/GATE_LEDGER.md (DR-008) — ' +
+      'record a demote/merge/retire disposition for every zero-fire blocking gate before running the ' +
+      'release command.'
+  );
+
   // NEVER executed — see file header. This is the deliberate human
   // checkpoint the whole feature exists to preserve. Every free-form value
   // (cloneDir, bodyPath) is shell-quoted via shQuote() — security review
@@ -1105,6 +1202,8 @@ module.exports = {
   findUnterminatedFenceLine,
   computePreviousStableVersion,
   extractReleaseSections,
+  sectionHasRealContent,
+  findSuppressedNonEmptySections,
   renderReleaseBody,
   resolveMirrorHome,
   shQuote,

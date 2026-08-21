@@ -250,6 +250,8 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "  --rename-task    Atomically rename a task title in BACKLOG.md and TASK_STATUS.md"
   echo "  --rescope-task   Atomically re-scope or un-defer a task"
   echo "  --sync-status    Sync TASK_STATUS.md Status lines from BACKLOG.md Active Wave"
+  echo "  --integrate      Cherry-pick a commit or range into the resolved project root,"
+  echo "                   pinned to that root regardless of the caller's cwd; writes no state"
   echo "  --arm-recheck    Register a time-based recheck entry in PROCESS_STATE.json"
   echo "  --ack-recheck    Acknowledge (or --rearm) a recheck entry"
   echo "  --reflect-skill <role>   Run skill reflection loop for a role (SkillOpt)"
@@ -315,6 +317,9 @@ elif [[ "\${1-}" == "--rescope-task" ]]; then
 elif [[ "\${1-}" == "--sync-status" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-sync-status.js" "$@"
+elif [[ "\${1-}" == "--integrate" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-integrate.js" "$@"
 elif [[ "\${1-}" == "--reflect-skill" ]]; then
   ROLE="\$2"
   shift 2

@@ -592,9 +592,18 @@ function commitAll(dir, message) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 7 — M1: a CHANGELOG section NEWER than the version being tagged must
-// NOT leak into the release body (edge tip stamped 0.39.0, but CHANGELOG
-// already has a 0.40.0 section from a later, not-yet-stamped commit).
+// Test 7 — M1/T-568 fixture 2: a CHANGELOG section NEWER than the version
+// being tagged, carrying REAL content, must now be REFUSED before any
+// mutation rather than silently excluded (edge tip stamped 0.39.0, but
+// CHANGELOG already has a non-empty 0.40.0 section from a later,
+// not-yet-stamped commit). Superseded by T-568's widened scope: this exact
+// shape used to succeed while quietly dropping the 0.40.0 section
+// (extractReleaseSections()'s upper bound alone) — that silent-drop
+// behavior is precisely the near-miss class T-568 closes, so the outcome
+// this test asserts on has deliberately changed from "excluded silently" to
+// "refused loudly, naming the offending section". extractReleaseSections()'s
+// own upper-bound exclusion guarantee is still covered independently, at
+// the pure-function level, in Test 6 above (unchanged).
 // ---------------------------------------------------------------------------
 {
   const bareDir = initBareMirror();
@@ -609,10 +618,14 @@ function commitAll(dir, message) {
   git(cloneDir, ['tag', 'v0.38.2']);
   git(cloneDir, ['push', '-q', 'origin', 'v0.38.2']);
 
+  const mirrorMainShaBefore = git(bareDir, ['rev-parse', 'main']).trim();
+
   git(cloneDir, ['checkout', '-q', '-b', 'edge']);
   // Version file still stamped 0.39.0 (this is the release being cut), but
-  // the CHANGELOG already has a 0.40.0 section from a later commit in the
-  // same multi-commit wave — the exact scenario M1 was reproduced against.
+  // the CHANGELOG already has a non-empty 0.40.0 section from a later
+  // commit in the same multi-commit wave — the exact scenario M1 was
+  // reproduced against, and T-568 fixture 2 (a non-empty future section
+  // above the tagged version).
   writeFile(path.join(cloneDir, 'scripts', 'mavp-version.js'), versionFileContent('0.39.0'));
   writeFile(
     path.join(cloneDir, 'CHANGELOG.md'),
@@ -622,23 +635,42 @@ function commitAll(dir, message) {
       { version: '0.38.2', date: '2026-07-20', body: '### Added\n\n- base\n' },
     ])
   );
-  commitAll(cloneDir, 'fixture: edge has both 0.39.0 and a premature 0.40.0 section');
+  commitAll(cloneDir, 'fixture: edge has both 0.39.0 and a premature non-empty 0.40.0 section');
   git(cloneDir, ['push', '-q', '-u', 'origin', 'edge']);
   git(cloneDir, ['checkout', '-q', 'main']);
 
   const bodyPath = path.join(mkTempDir('mavp-release-body7-'), 'release-body.md');
-  execFileSync('node', [RELEASE_SCRIPT, bareDir, cloneDir, '--body-out', bodyPath], { encoding: 'utf8' });
+  const result = spawnSync('node', [RELEASE_SCRIPT, bareDir, cloneDir, '--body-out', bodyPath], { encoding: 'utf8' });
 
-  const tagSha = git(bareDir, ['rev-parse', 'v0.39.0']).trim();
-  assert.ok(tagSha, 'Test 7 FAIL: expected tag v0.39.0 to have been created');
+  assert.notStrictEqual(
+    result.status,
+    0,
+    `Test 7 FAIL: expected non-zero exit on a non-empty future CHANGELOG section, got ${result.status}. stderr: ${result.stderr}`
+  );
+  assert.ok(
+    /0\.40\.0/.test(result.stderr),
+    `Test 7 FAIL: expected the refusal to name the offending 0.40.0 section, got: ${result.stderr}`
+  );
+  assert.ok(
+    result.stderr.includes('0.39.0'),
+    `Test 7 FAIL: expected the refusal to name the tagged version 0.39.0, got: ${result.stderr}`
+  );
+  assert.ok(/no push has occurred/.test(result.stderr), `Test 7 FAIL: expected the standard abort footer, got: ${result.stderr}`);
 
-  const body = fs.readFileSync(bodyPath, 'utf8');
-  assert.ok(body.includes('## [0.39.0]'), 'Test 7 FAIL: body should contain the [0.39.0] section');
-  assert.ok(body.includes('this release only'), 'Test 7 FAIL: body should contain the [0.39.0] section text');
-  assert.ok(!body.includes('## [0.40.0]'), 'Test 7 FAIL: body must NOT contain the [0.40.0] section (newer than the tagged version)');
-  assert.ok(!body.includes('NEXT release notes'), 'Test 7 FAIL: body must NOT contain the [0.40.0] section text (would leak the next release early)');
+  const mirrorMainShaAfter = git(bareDir, ['rev-parse', 'main']).trim();
+  assert.strictEqual(
+    mirrorMainShaAfter,
+    mirrorMainShaBefore,
+    'Test 7 FAIL: mirror main must be untouched — the refusal must fire before any mutation'
+  );
+  assert.strictEqual(
+    git(bareDir, ['tag', '--list', 'v0.39.0']).trim(),
+    '',
+    'Test 7 FAIL: tag v0.39.0 must not have been created on a refused run'
+  );
+  assert.strictEqual(fs.existsSync(bodyPath), false, 'Test 7 FAIL: no release-body file should have been written on a refused run');
 
-  console.log('Test 7 passed: a CHANGELOG section newer than the tagged version is excluded from the release body (M1)');
+  console.log('Test 7 passed: a non-empty CHANGELOG section newer than the tagged version is refused before any mutation, naming both the offending section and the tagged version (T-568 fixture 2)');
 }
 
 // ---------------------------------------------------------------------------
@@ -1710,3 +1742,323 @@ function makeTokenMutatingGitWrapper(metadataFilePathToMutate, foreignToken) {
 }
 
 console.log('\nAll T-506 (release.js lock wiring) assertions passed.');
+
+// ---------------------------------------------------------------------------
+// Test 24 — T-568 fixture 1: a non-empty `## [Unreleased]` section must be
+// refused before any mutation, naming it (kills a "never fires" mutant).
+// ---------------------------------------------------------------------------
+{
+  const bareDir = initBareMirror();
+  const cloneDir = initWorkingClone();
+
+  writeFile(path.join(cloneDir, 'README.md'), 'fixture\n');
+  writeFile(path.join(cloneDir, 'scripts', 'mavp-version.js'), versionFileContent('0.38.2'));
+  writeFile(path.join(cloneDir, 'CHANGELOG.md'), changelogContent([{ version: '0.38.2', date: '2026-07-20', body: '### Added\n\n- base\n' }]));
+  commitAll(cloneDir, 'fixture: base at 0.38.2');
+  git(cloneDir, ['remote', 'add', 'origin', bareDir]);
+  git(cloneDir, ['push', '-q', 'origin', 'HEAD:main']);
+  git(cloneDir, ['tag', 'v0.38.2']);
+  git(cloneDir, ['push', '-q', 'origin', 'v0.38.2']);
+
+  const mirrorMainShaBefore = git(bareDir, ['rev-parse', 'main']).trim();
+
+  git(cloneDir, ['checkout', '-q', '-b', 'edge']);
+  writeFile(path.join(cloneDir, 'scripts', 'mavp-version.js'), versionFileContent('0.39.0'));
+  // Hand-built (not via the changelogContent() helper, which always leaves
+  // Unreleased empty) — a real wave parked under Unreleased above the
+  // section being tagged, the exact live near-miss shape.
+  writeFile(
+    path.join(cloneDir, 'CHANGELOG.md'),
+    '# Changelog\n\n' +
+      '## [Unreleased]\n\n### Added\n\n- a wave parked here, not yet folded into a version\n\n' +
+      '## [0.39.0] — 2026-07-25\n\n### Added\n\n- this release only\n\n' +
+      '## [0.38.2] — 2026-07-20\n\n### Added\n\n- base\n'
+  );
+  commitAll(cloneDir, 'fixture: edge has a non-empty Unreleased section above 0.39.0');
+  git(cloneDir, ['push', '-q', '-u', 'origin', 'edge']);
+  git(cloneDir, ['checkout', '-q', 'main']);
+
+  const bodyPath = path.join(mkTempDir('mavp-release-body24-'), 'release-body.md');
+  const result = spawnSync('node', [RELEASE_SCRIPT, bareDir, cloneDir, '--body-out', bodyPath], { encoding: 'utf8' });
+
+  assert.notStrictEqual(
+    result.status,
+    0,
+    `Test 24 FAIL: expected non-zero exit on a non-empty Unreleased section, got ${result.status}. stderr: ${result.stderr}`
+  );
+  assert.ok(
+    /Unreleased/.test(result.stderr),
+    `Test 24 FAIL: expected the refusal to name the offending Unreleased section, got: ${result.stderr}`
+  );
+  assert.ok(
+    result.stderr.includes('0.39.0'),
+    `Test 24 FAIL: expected the refusal to name the tagged version 0.39.0, got: ${result.stderr}`
+  );
+  assert.ok(/no push has occurred/.test(result.stderr), `Test 24 FAIL: expected the standard abort footer, got: ${result.stderr}`);
+
+  const mirrorMainShaAfter = git(bareDir, ['rev-parse', 'main']).trim();
+  assert.strictEqual(
+    mirrorMainShaAfter,
+    mirrorMainShaBefore,
+    'Test 24 FAIL: mirror main must be untouched — the refusal must fire before any mutation'
+  );
+  assert.strictEqual(
+    git(bareDir, ['tag', '--list', 'v0.39.0']).trim(),
+    '',
+    'Test 24 FAIL: tag v0.39.0 must not have been created on a refused run'
+  );
+  assert.strictEqual(fs.existsSync(bodyPath), false, 'Test 24 FAIL: no release-body file should have been written on a refused run');
+
+  console.log('Test 24 passed: a non-empty Unreleased section is refused before any mutation, naming both Unreleased and the tagged version (T-568 fixture 1)');
+}
+
+// ---------------------------------------------------------------------------
+// Test 25 — T-568 fixture 3: an EMPTY `## [Unreleased]` section (including
+// one holding only `###` sub-headings) must NOT be refused — the run
+// succeeds exactly as it would without the new gate (kills a "fires on
+// empty" mutant).
+// ---------------------------------------------------------------------------
+{
+  const bareDir = initBareMirror();
+  const cloneDir = initWorkingClone();
+
+  writeFile(path.join(cloneDir, 'README.md'), 'fixture\n');
+  writeFile(path.join(cloneDir, 'scripts', 'mavp-version.js'), versionFileContent('0.38.2'));
+  writeFile(path.join(cloneDir, 'CHANGELOG.md'), changelogContent([{ version: '0.38.2', date: '2026-07-20', body: '### Added\n\n- base\n' }]));
+  commitAll(cloneDir, 'fixture: base at 0.38.2');
+  git(cloneDir, ['remote', 'add', 'origin', bareDir]);
+  git(cloneDir, ['push', '-q', 'origin', 'HEAD:main']);
+  git(cloneDir, ['tag', 'v0.38.2']);
+  git(cloneDir, ['push', '-q', 'origin', 'v0.38.2']);
+
+  git(cloneDir, ['checkout', '-q', '-b', 'edge']);
+  writeFile(path.join(cloneDir, 'scripts', 'mavp-version.js'), versionFileContent('0.39.0'));
+  // Unreleased holds only its own heading, blank lines, and bare `###`
+  // sub-headings with no bullet content under them — this is what "empty"
+  // means per the AC ("a section holding only its own heading plus `###`
+  // sub-headings and blank lines is empty").
+  writeFile(
+    path.join(cloneDir, 'CHANGELOG.md'),
+    '# Changelog\n\n' +
+      '## [Unreleased]\n\n### Added\n\n### Fixed\n\n' +
+      '## [0.39.0] — 2026-07-25\n\n### Added\n\n- this release only\n\n' +
+      '## [0.38.2] — 2026-07-20\n\n### Added\n\n- base\n'
+  );
+  commitAll(cloneDir, 'fixture: edge has an empty (sub-headings-only) Unreleased section');
+  git(cloneDir, ['push', '-q', '-u', 'origin', 'edge']);
+  git(cloneDir, ['checkout', '-q', 'main']);
+
+  const bodyPath = path.join(mkTempDir('mavp-release-body25-'), 'release-body.md');
+  const stdout = execFileSync('node', [RELEASE_SCRIPT, bareDir, cloneDir, '--body-out', bodyPath], { encoding: 'utf8' });
+
+  const tagSha = git(bareDir, ['rev-parse', 'v0.39.0']).trim();
+  assert.ok(tagSha, 'Test 25 FAIL: expected tag v0.39.0 to have been created (an empty Unreleased section must not block the release)');
+
+  const body = fs.readFileSync(bodyPath, 'utf8');
+  assert.ok(body.includes('## [0.39.0]'), 'Test 25 FAIL: body should contain the [0.39.0] section');
+  assert.ok(body.includes('this release only'), 'Test 25 FAIL: body should contain the [0.39.0] section text');
+  assert.ok(!body.includes('## [Unreleased]'), 'Test 25 FAIL: body must NOT contain the Unreleased heading');
+  assert.ok(stdout.includes("gh release create 'v0.39.0'"), 'Test 25 FAIL: expected the printed gh command (proves the run reached the end, not an early refusal)');
+
+  console.log('Test 25 passed: an empty (sub-headings-only) Unreleased section does not trigger the new refusal — behavior unchanged (T-568 fixture 3)');
+}
+
+// ---------------------------------------------------------------------------
+// Test 26 — T-568 fixture 4: no Unreleased section and no future section at
+// all (not merely empty — structurally absent) must leave behavior
+// byte-identical to before this change: same tag, same fast-forward, same
+// extracted body.
+// ---------------------------------------------------------------------------
+{
+  const bareDir = initBareMirror();
+  const cloneDir = initWorkingClone();
+
+  writeFile(path.join(cloneDir, 'README.md'), 'fixture\n');
+  writeFile(path.join(cloneDir, 'scripts', 'mavp-version.js'), versionFileContent('0.38.2'));
+  // Hand-built without any `## [Unreleased]` heading at all.
+  writeFile(
+    path.join(cloneDir, 'CHANGELOG.md'),
+    '# Changelog\n\n## [0.38.2] — 2026-07-20\n\n### Added\n\n- base release content\n\n' +
+      '## [0.38.1] — 2026-07-19\n\n### Added\n\n- older content\n'
+  );
+  commitAll(cloneDir, 'fixture: base at 0.38.2, no Unreleased heading at all');
+  git(cloneDir, ['remote', 'add', 'origin', bareDir]);
+  git(cloneDir, ['push', '-q', 'origin', 'HEAD:main']);
+  git(cloneDir, ['tag', 'v0.38.2']);
+  git(cloneDir, ['push', '-q', 'origin', 'v0.38.2']);
+
+  git(cloneDir, ['checkout', '-q', '-b', 'edge']);
+  writeFile(path.join(cloneDir, 'scripts', 'mavp-version.js'), versionFileContent('0.39.0'));
+  writeFile(
+    path.join(cloneDir, 'CHANGELOG.md'),
+    '# Changelog\n\n## [0.39.0] — 2026-07-25\n\n### Added\n\n- new stuff for the 0.39.0 release\n\n' +
+      '## [0.38.2] — 2026-07-20\n\n### Added\n\n- base release content\n\n' +
+      '## [0.38.1] — 2026-07-19\n\n### Added\n\n- older content\n'
+  );
+  commitAll(cloneDir, 'fixture: edge bump to 0.39.0, still no Unreleased heading and no future section');
+  git(cloneDir, ['push', '-q', '-u', 'origin', 'edge']);
+  git(cloneDir, ['checkout', '-q', 'main']);
+
+  const bodyPath = path.join(mkTempDir('mavp-release-body26-'), 'release-body.md');
+  const stdout = execFileSync('node', [RELEASE_SCRIPT, bareDir, cloneDir, '--body-out', bodyPath], { encoding: 'utf8' });
+
+  const mirrorMainSha = git(bareDir, ['rev-parse', 'main']).trim();
+  const mirrorEdgeSha = git(bareDir, ['rev-parse', 'edge']).trim();
+  assert.strictEqual(mirrorMainSha, mirrorEdgeSha, 'Test 26 FAIL: mirror main should now equal the edge tip');
+
+  const tagSha = git(bareDir, ['rev-parse', 'v0.39.0']).trim();
+  assert.strictEqual(tagSha, mirrorEdgeSha, 'Test 26 FAIL: tag v0.39.0 should point at the edge tip');
+
+  const body = fs.readFileSync(bodyPath, 'utf8');
+  assert.ok(body.includes('## [0.39.0]'), 'Test 26 FAIL: body should contain the [0.39.0] section heading');
+  assert.ok(body.includes('new stuff for the 0.39.0 release'), 'Test 26 FAIL: body should contain the [0.39.0] section body');
+  assert.ok(!body.includes('## [0.38.2]'), 'Test 26 FAIL: body must NOT contain the [0.38.2] section heading');
+  assert.ok(!body.includes('## [0.38.1]'), 'Test 26 FAIL: body must NOT contain the [0.38.1] section heading (older than 0.38.2)');
+  assert.ok(stdout.includes("gh release create 'v0.39.0'"), 'Test 26 FAIL: expected the printed gh command (proves a normal, unrefused completion)');
+
+  console.log('Test 26 passed: with no Unreleased section and no future section present at all, behavior is byte-identical to before this change (T-568 fixture 4)');
+}
+
+// ---------------------------------------------------------------------------
+// Test 27 — T-668: the success-path output prints a non-blocking DR-008
+// gate-ledger review reminder, and it appears BEFORE the printed
+// `gh release create` command (not merely "contains the line" — the
+// ordering itself is the substance of this test, since a reminder printed
+// AFTER the command it is supposed to precede would fail the acceptance
+// criterion while still passing a bare `.includes()` check).
+// ---------------------------------------------------------------------------
+{
+  const bareDir = initBareMirror();
+  const cloneDir = initWorkingClone();
+
+  writeFile(path.join(cloneDir, 'README.md'), 'fixture\n');
+  writeFile(path.join(cloneDir, 'scripts', 'mavp-version.js'), versionFileContent('0.38.2'));
+  writeFile(
+    path.join(cloneDir, 'CHANGELOG.md'),
+    changelogContent([{ version: '0.38.2', date: '2026-07-20', body: '### Added\n\n- base release content\n' }])
+  );
+  commitAll(cloneDir, 'fixture: base at 0.38.2');
+  git(cloneDir, ['remote', 'add', 'origin', bareDir]);
+  git(cloneDir, ['push', '-q', 'origin', 'HEAD:main']);
+  git(cloneDir, ['tag', 'v0.38.2']);
+  git(cloneDir, ['push', '-q', 'origin', 'v0.38.2']);
+
+  git(cloneDir, ['checkout', '-q', '-b', 'edge']);
+  writeFile(path.join(cloneDir, 'scripts', 'mavp-version.js'), versionFileContent('0.39.0'));
+  writeFile(
+    path.join(cloneDir, 'CHANGELOG.md'),
+    changelogContent([
+      { version: '0.39.0', date: '2026-07-25', body: '### Added\n\n- new stuff for the 0.39.0 release\n' },
+      { version: '0.38.2', date: '2026-07-20', body: '### Added\n\n- base release content\n' },
+    ])
+  );
+  commitAll(cloneDir, 'fixture: edge bump to 0.39.0');
+  git(cloneDir, ['push', '-q', '-u', 'origin', 'edge']);
+  git(cloneDir, ['checkout', '-q', 'main']);
+
+  const bodyPath = path.join(mkTempDir('mavp-release-body27-'), 'release-body.md');
+  const stdout = execFileSync('node', [RELEASE_SCRIPT, bareDir, cloneDir, '--body-out', bodyPath], {
+    encoding: 'utf8',
+  });
+
+  // Content: names docs/core/GATE_LEDGER.md and DR-008.
+  assert.ok(
+    stdout.includes('docs/core/GATE_LEDGER.md'),
+    `Test 27 FAIL: expected the reminder to name docs/core/GATE_LEDGER.md, got:\n${stdout}`
+  );
+  assert.ok(stdout.includes('DR-008'), `Test 27 FAIL: expected the reminder to name DR-008, got:\n${stdout}`);
+
+  // Ordering: the reminder line must appear BEFORE the ACTUAL gh command
+  // line, not merely be present somewhere in the output. Deliberately
+  // search for the exact shell-quoted command ("gh release create
+  // 'v0.39.0'") rather than the bare phrase "gh release create" — the
+  // reminder's own prose text also mentions that bare phrase ("Before
+  // running the gh release create command below"), so searching for the
+  // bare phrase would find the reminder's OWN reference to the command
+  // and falsely appear to precede itself.
+  const reminderIdx = stdout.indexOf('docs/core/GATE_LEDGER.md');
+  const ghCommandIdx = stdout.indexOf("gh release create 'v0.39.0'");
+  assert.ok(reminderIdx >= 0, 'Test 27 FAIL: reminder line not found at all');
+  assert.ok(ghCommandIdx >= 0, 'Test 27 FAIL: gh release create line not found at all');
+  assert.ok(
+    reminderIdx < ghCommandIdx,
+    `Test 27 FAIL: expected the DR-008 reminder (index ${reminderIdx}) to appear BEFORE the gh release create command (index ${ghCommandIdx}), got:\n${stdout}`
+  );
+
+  // Non-blocking: the run still completes normally (tag created, main
+  // promoted) — the reminder must never gate or refuse anything.
+  const mirrorMainSha = git(bareDir, ['rev-parse', 'main']).trim();
+  const mirrorEdgeSha = git(bareDir, ['rev-parse', 'edge']).trim();
+  assert.strictEqual(
+    mirrorMainSha,
+    mirrorEdgeSha,
+    'Test 27 FAIL: the reminder must be non-blocking — main should still be promoted to the edge tip'
+  );
+  const tagSha = git(bareDir, ['rev-parse', 'v0.39.0']).trim();
+  assert.strictEqual(tagSha, mirrorEdgeSha, 'Test 27 FAIL: the reminder must be non-blocking — tag v0.39.0 should still be created');
+
+  console.log('Test 27 passed: the success-path output prints a non-blocking DR-008 gate-ledger reminder BEFORE the printed gh release create command (T-668)');
+}
+
+// ---------------------------------------------------------------------------
+// Test 28 — T-671: end-to-end coverage for extractReleaseSections()'s upper
+// bound (mavp-publish-release.js:804) through the CALL SITE at :1113, using
+// an EMPTY future-version section (heading-only, `###` sub-headings only, no
+// bullet content) — modeled on Test 25's fixture shape. An empty future
+// section is not flagged by findSuppressedNonEmptySections() (isFuture true,
+// sectionHasRealContent false), so the run proceeds past the refusal gate at
+// :1096 and the upper bound at :804 must drop the section before it reaches
+// the rendered body. This restores the only through-main(), successful-run
+// exercise of the upper bound removed by T-568's Test 7 rewrite — Test 6
+// covers the pure function directly, and findSuppressedNonEmptySections()
+// mirrors the future-version predicate independently rather than calling
+// extractReleaseSections(), so neither existing test exercises the WIRING
+// at the call site.
+// ---------------------------------------------------------------------------
+{
+  const bareDir = initBareMirror();
+  const cloneDir = initWorkingClone();
+
+  writeFile(path.join(cloneDir, 'README.md'), 'fixture\n');
+  writeFile(path.join(cloneDir, 'scripts', 'mavp-version.js'), versionFileContent('0.38.2'));
+  writeFile(path.join(cloneDir, 'CHANGELOG.md'), changelogContent([{ version: '0.38.2', date: '2026-07-20', body: '### Added\n\n- base\n' }]));
+  commitAll(cloneDir, 'fixture: base at 0.38.2');
+  git(cloneDir, ['remote', 'add', 'origin', bareDir]);
+  git(cloneDir, ['push', '-q', 'origin', 'HEAD:main']);
+  git(cloneDir, ['tag', 'v0.38.2']);
+  git(cloneDir, ['push', '-q', 'origin', 'v0.38.2']);
+
+  git(cloneDir, ['checkout', '-q', '-b', 'edge']);
+  writeFile(path.join(cloneDir, 'scripts', 'mavp-version.js'), versionFileContent('0.39.0'));
+  // 0.40.0 is a future section relative to the tagged version (0.39.0) and
+  // holds only its own heading, a blank line, and a bare `###` sub-heading
+  // with no bullet content under it — this is what "empty" means per the AC
+  // ("heading-only, or heading-plus-`###`-sub-headings-only").
+  writeFile(
+    path.join(cloneDir, 'CHANGELOG.md'),
+    '# Changelog\n\n' +
+      '## [Unreleased]\n\n' +
+      '## [0.40.0] — 2026-08-01\n\n### Added\n\n' +
+      '## [0.39.0] — 2026-07-25\n\n### Added\n\n- this release only\n\n' +
+      '## [0.38.2] — 2026-07-20\n\n### Added\n\n- base\n'
+  );
+  commitAll(cloneDir, 'fixture: edge bump to 0.39.0, with an empty future 0.40.0 section');
+  git(cloneDir, ['push', '-q', '-u', 'origin', 'edge']);
+  git(cloneDir, ['checkout', '-q', 'main']);
+
+  const bodyPath = path.join(mkTempDir('mavp-release-body28-'), 'release-body.md');
+  const stdout = execFileSync('node', [RELEASE_SCRIPT, bareDir, cloneDir, '--body-out', bodyPath], { encoding: 'utf8' });
+
+  const tagSha = git(bareDir, ['rev-parse', 'v0.39.0']).trim();
+  assert.ok(tagSha, 'Test 28 FAIL: expected tag v0.39.0 to have been created (an empty future section must not block the release)');
+
+  const body = fs.readFileSync(bodyPath, 'utf8');
+  assert.ok(body.includes('## [0.39.0]'), 'Test 28 FAIL: body should contain the [0.39.0] section');
+  assert.ok(body.includes('this release only'), 'Test 28 FAIL: body should contain the [0.39.0] section text');
+  assert.ok(!body.includes('## [0.40.0]'), 'Test 28 FAIL: body must NOT contain the empty future [0.40.0] heading');
+  assert.ok(stdout.includes("gh release create 'v0.39.0'"), 'Test 28 FAIL: expected the printed gh command (proves the run reached the end, not an early refusal)');
+
+  console.log('Test 28 passed: an empty future-version section (0.40.0, sub-headings-only) is excluded from the release body via the extractReleaseSections() upper bound reached through the real call site (T-671)');
+}
+
+console.log('\nAll T-568 (release-script refusal gate for non-empty suppressed CHANGELOG sections), T-668 (DR-008 gate-ledger review reminder), and T-671 (end-to-end empty-future-section exclusion) assertions passed.');
