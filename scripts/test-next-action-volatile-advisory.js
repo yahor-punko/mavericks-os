@@ -25,6 +25,7 @@ const assert = require('node:assert');
 const os = require('node:os');
 
 const { parseArtifacts, getExitCode } = require('./mavp-validator.js');
+const { ACTION_TARGET_FOLLOWER_NOUNS } = require('./mavp-operator-lib.js');
 
 const TMP_DIR = path.join(os.tmpdir(), 't351-test-' + Date.now());
 fs.mkdirSync(TMP_DIR, { recursive: true });
@@ -195,8 +196,45 @@ function runFixture(caseName, processState) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 5 (T-694): suggestedAction derives its noun enumeration from
+// ACTION_TARGET_FOLLOWER_NOUNS (mavp-operator-lib.js) — it must name every
+// noun in that list (including the newly added "promotion"), and severity
+// stays "failure" (unchanged by this task).
+// ---------------------------------------------------------------------------
+{
+  const parsed = runFixture('suggested-action-nouns', {
+    next_action: 'The framework is now at v0.25.0 after landing 14 commits unpushed to origin — remember to push.',
+  });
+  const findings = parsed.comparison.findings;
+  const finding = findings.find((f) => f.checkName === 'next_action_volatile_facts');
+
+  assert.ok(finding, 'Test 5 FAIL: expected a next_action_volatile_facts finding');
+  assert.strictEqual(
+    finding.severity,
+    'failure',
+    `Test 5 FAIL: severity must remain "failure" (unchanged by T-694), got: "${finding.severity}"`
+  );
+  for (const noun of ACTION_TARGET_FOLLOWER_NOUNS) {
+    assert.ok(
+      finding.suggestedAction.includes(noun),
+      `Test 5 FAIL: expected suggestedAction to name noun "${noun}" from ACTION_TARGET_FOLLOWER_NOUNS, got: "${finding.suggestedAction}"`
+    );
+  }
+  assert.ok(
+    finding.suggestedAction.includes('promotion'),
+    `Test 5 FAIL: expected suggestedAction to name the newly added "promotion" noun, got: "${finding.suggestedAction}"`
+  );
+  // States the actual grammar, not just "lead with the target noun".
+  assert.ok(
+    /immediately/i.test(finding.suggestedAction) && /state-assertion/i.test(finding.suggestedAction),
+    `Test 5 FAIL: expected suggestedAction to state the adjacency + state-assertion-wins grammar, got: "${finding.suggestedAction}"`
+  );
+  console.log('Test 5 passed: suggestedAction names every noun in ACTION_TARGET_FOLLOWER_NOUNS (including "promotion") and describes the actual grammar; severity unchanged at "failure"');
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
 
-console.log('\nAll T-351 assertions passed.');
+console.log('\nAll T-351/T-694 assertions passed.');

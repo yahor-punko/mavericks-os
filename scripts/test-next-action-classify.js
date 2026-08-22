@@ -237,4 +237,60 @@ function runAgent(scriptPath) {
   console.log('Case I passed: documented boundary case ("at" preceder) still flags; compliant target-noun rewrite classifies clean');
 }
 
-console.log('\nAll T-350 next_action classify assertions passed.');
+// ---------------------------------------------------------------------------
+// T-694: `promotion` added to ACTION_TARGET_FOLLOWER_NOUNS. Case J kills the
+// architect-measured pre-fix mutant (BLOCKED pre-fix, must be CLEAN post-fix).
+// Case K pins the deliberate refusals the widened list must NOT swallow.
+// ---------------------------------------------------------------------------
+
+// Case J: the live incident string — BLOCKED pre-fix, CLEAN post-fix.
+{
+  const result = classifyNextAction('Run the 0.46.2 promotion on the mirror');
+  assert.deepStrictEqual(
+    result.volatile_facts,
+    [],
+    `Case J FAIL: expected "Run the 0.46.2 promotion on the mirror" to classify clean post-fix, got ${JSON.stringify(result.volatile_facts)}`
+  );
+  console.log('Case J passed: "Run the 0.46.2 promotion on the mirror" classifies clean post-fix (killed the pre-fix BLOCKED mutant)');
+}
+
+// Case K: deliberate refusals — all must still block after the widening.
+{
+  const stillBlocks = [
+    // No verb-object grammar: "to" governs "stable", not the literal itself.
+    'Promote 0.46.2 to stable on the mirror',
+    // No gap tolerance: "stable" sits between the literal and "promotion".
+    'Run the 0.46.2 stable promotion on the mirror',
+    // "tag" is deliberately excluded from the noun list.
+    'the 0.46.2 tag',
+    // "is" + "at" state-assertion preceder wins over any follower cue.
+    'the repo is at 0.46.2 release',
+  ];
+  for (const s of stillBlocks) {
+    const result = classifyNextAction(s);
+    assert.ok(
+      result.volatile_facts.length > 0,
+      `Case K FAIL: expected "${s}" to still block (deliberate refusal), got empty volatile_facts`
+    );
+  }
+  console.log('Case K passed: deliberate refusals (verb-object grammar, no gap tolerance, excluded "tag" noun, state-assertion precedence) all still block');
+}
+
+// Case L: commit-count / ahead-N patterns are unaffected by the noun widening
+// and still block (not position-sensitive, per the doc comment).
+{
+  const commitCount = classifyNextAction('T-800 -> developer -> ship it, 14 unpushed commits');
+  assert.ok(
+    commitCount.volatile_facts.some(f => /14\s+(?:unpushed\s+)?commits?/i.test(f)),
+    `Case L FAIL: expected a commit-count phrase to still block, got ${JSON.stringify(commitCount.volatile_facts)}`
+  );
+
+  const aheadN = classifyNextAction('T-801 -> developer -> push, currently ahead 5');
+  assert.ok(
+    aheadN.volatile_facts.some(f => /ahead\s+5/i.test(f)),
+    `Case L FAIL: expected an ahead-N phrase to still block, got ${JSON.stringify(aheadN.volatile_facts)}`
+  );
+  console.log('Case L passed: commit-count and ahead-N patterns still block, unaffected by the noun-list widening');
+}
+
+console.log('\nAll T-350/T-694 next_action classify assertions passed.');

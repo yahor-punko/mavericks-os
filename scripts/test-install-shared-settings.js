@@ -30,7 +30,7 @@ function readSettings(dir) {
   const scratch = makeScratchDir('mavp-install-fresh-');
   try {
     // Fresh install prompts "Create N file(s)...? [Y/n]" — answer 'y' via stdin.
-    execFileSync('node', [INSTALL_SCRIPT, scratch], {
+    execFileSync('node', [INSTALL_SCRIPT, scratch, '--stale-source-ok'], {
       input: 'y\n',
       encoding: 'utf8',
     });
@@ -63,7 +63,7 @@ function readSettings(dir) {
       'utf8'
     );
 
-    execFileSync('node', [INSTALL_SCRIPT, '--update', scratch], { encoding: 'utf8' });
+    execFileSync('node', [INSTALL_SCRIPT, '--update', scratch, '--stale-source-ok'], { encoding: 'utf8' });
 
     const settings = readSettings(scratch);
     assert.strictEqual(
@@ -87,7 +87,7 @@ function readSettings(dir) {
     const settingsPath = path.join(claudeDir, 'settings.json');
     fs.writeFileSync(settingsPath, JSON.stringify({ someOtherKey: true }, null, 2) + '\n', 'utf8');
 
-    execFileSync('node', [INSTALL_SCRIPT, '--update', scratch], { encoding: 'utf8' });
+    execFileSync('node', [INSTALL_SCRIPT, '--update', scratch, '--stale-source-ok'], { encoding: 'utf8' });
 
     let settings = readSettings(scratch);
     assert.strictEqual(
@@ -106,7 +106,7 @@ function readSettings(dir) {
   // Case 3b: settings.json does not exist at all before --update.
   const scratch = makeScratchDir('mavp-install-update-missing-file-');
   try {
-    execFileSync('node', [INSTALL_SCRIPT, '--update', scratch], { encoding: 'utf8' });
+    execFileSync('node', [INSTALL_SCRIPT, '--update', scratch, '--stale-source-ok'], { encoding: 'utf8' });
 
     const settingsPath = path.join(scratch, '.claude', 'settings.json');
     assert.strictEqual(fs.existsSync(settingsPath), true, 'Test 3b FAIL: --update did not create settings.json');
@@ -126,7 +126,7 @@ function readSettings(dir) {
 {
   const scratch = makeScratchDir('mavp-install-local-unchanged-');
   try {
-    execFileSync('node', [INSTALL_SCRIPT, scratch], {
+    execFileSync('node', [INSTALL_SCRIPT, scratch, '--stale-source-ok'], {
       input: 'y\n',
       encoding: 'utf8',
     });

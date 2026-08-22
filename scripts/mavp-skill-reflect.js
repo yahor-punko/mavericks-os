@@ -29,6 +29,11 @@ const {
   extractTrajectories,
   writeTrajectories,
   scoreTrajectory,
+  splitTrajectoriesForReflect,
+  parseOptimizerResponse,
+  renderFailureContrastDisclosure,
+  buildOptimizerPrompt,
+  renderConflictCheckChecklist,
 } = lib;
 
 // ---------------------------------------------------------------------------
@@ -85,12 +90,27 @@ async function main() {
   }
 
   // -----------------------------------------------------------------------
-  // Step 4: Train / holdout split (70/30, keyed on taskId for stability)
+  // Step 4: Train / holdout split (T-699)
+  //
+  // Deterministic and taskId-keyed, but NOT a taskId-order prefix slice:
+  // every trajectory scoring below 0.7 goes to train unconditionally (a
+  // failure is the scarce contrast signal the failure minibatch below
+  // consumes, so none may be withheld in the holdout — which no v1 code
+  // path reads), and a trajectory at or above 0.7 goes to holdout only when
+  // its numeric taskId modulo 10 is 7, 8, or 9. Modulo on the numeric id
+  // makes a task's bucket a pure function of its own id — reproducible
+  // across runs on the same input, and stable as the corpus grows, unlike
+  // the previous localeCompare-sort + floor(n * 0.7) slice this replaces.
+  // A score change from evidence enrichment (e.g. a task moving success ->
+  // failure) can legitimately move that task holdout -> train — that is by
+  // design, since a newly recognized failure must reach the optimizer. See
+  // splitTrajectoriesForReflect() in mavp-operator-lib.js for the full rule
+  // set and the corpus-measured defects this split fixes.
   // -----------------------------------------------------------------------
-  const sortedByTaskId = [...scored].sort((a, b) => a.taskId.localeCompare(b.taskId));
-  const trainCount = Math.floor(sortedByTaskId.length * 0.7);
-  const trainSet = sortedByTaskId.slice(0, trainCount);
-  // const holdoutSet = sortedByTaskId.slice(trainCount); // reserved for v2
+  const split = splitTrajectoriesForReflect(scored);
+  const trainSet = split.trainSet;
+  // const holdoutSet = split.holdoutSet; // reserved for v2
+  const trainCount = trainSet.length;
 
   // -----------------------------------------------------------------------
   // Step 5: All-success / all-failure guard (applied on training set)
@@ -170,6 +190,22 @@ async function main() {
   }
 
   // -----------------------------------------------------------------------
+  // Step 9c: Failure-batch contrast disclosure (T-700)
+  //
+  // Disclose, never block: a failure batch below the contrast floor
+  // (docs/SKILL_OPTIMIZATION.md §12.2) is a healthy, common outcome on a
+  // well-run project — it must not disable the reflection feature. It DOES
+  // need to be visible to the Section 9 human reviewer and to the optimizer
+  // model itself, since an undisclosed 1-vs-many contrast is exactly the
+  // incident this task closes. Exit code and proposal-writing are
+  // unaffected either way.
+  // -----------------------------------------------------------------------
+  const contrastDisclosure = renderFailureContrastDisclosure(successBatch, failureBatch);
+  if (contrastDisclosure.warning) {
+    console.log(`\n${contrastDisclosure.warning}`);
+  }
+
+  // -----------------------------------------------------------------------
   // Step 10: Load current spec and strip protected sections
   // -----------------------------------------------------------------------
   let specText;
@@ -187,39 +223,27 @@ async function main() {
 
   // -----------------------------------------------------------------------
   // Step 11: Build optimizer prompt
+  //
+  // buildOptimizerPrompt() (T-703) discloses to the model that this
+  // project's own operating rules (.claude/rules/*.md, CLAUDE.md) and the
+  // framework's docs/core/ORCHESTRATION_RULES.md were NOT provided, and
+  // prohibits it from proposing edits that mandate process-level behavior
+  // (test-execution scope, git operations, push/commit rituals, task
+  // registration/status, permissions) — see the function's doc comment in
+  // mavp-operator-lib.js for the incident that motivated it. The JSON
+  // response-format block inside it is unchanged from the pre-T-703
+  // version.
   // -----------------------------------------------------------------------
   const systemPrompt =
     'You are a skill document optimizer. You analyze agent performance trajectories and propose minimal, targeted improvements to agent skill specifications. You must respond with a JSON object only.';
 
-  const optimizerPrompt = [
-    `You are optimizing the skill document for the "${role}" agent role in the Mavericks framework.`,
-    '',
-    `## Current skill document (editable portions only — protected sections replaced with placeholders)`,
-    stripped,
-    '',
-    `## Successful trajectories (score ≥ 0.7) — ${successBatch.length} examples`,
-    JSON.stringify(successBatch, null, 2),
-    '',
-    `## Failure trajectories (score < 0.7) — ${failureBatch.length} examples`,
-    JSON.stringify(failureBatch, null, 2),
-    '',
-    '## Instructions',
-    'Propose at most 2 edit operations (add, delete, or replace) that would improve agent performance based on patterns in the failure trajectories while preserving what works in the successes.',
-    '',
-    'Respond with ONLY a JSON object in this exact format:',
-    '{',
-    '  "rationale": "one sentence explaining the key failure pattern observed",',
-    '  "edits": [',
-    '    {',
-    '      "op": "add" | "delete" | "replace",',
-    '      "targetSection": "section heading or \'end of file\'",',
-    '      "rationale": "one sentence",',
-    '      "before": "exact text to replace or delete (empty string for add)",',
-    '      "after": "new text (empty string for delete)"',
-    '    }',
-    '  ]',
-    '}',
-  ].join('\n');
+  const optimizerPrompt = buildOptimizerPrompt({
+    role,
+    strippedSpec: stripped,
+    successBatch,
+    failureBatch,
+    promptCaveat: contrastDisclosure.promptCaveat,
+  });
 
   // -----------------------------------------------------------------------
   // Step 12: Call optimizer model
@@ -228,6 +252,7 @@ async function main() {
 
   let optimizerResult = null;
   let optimizerError = null;
+  let response;
 
   try {
     const client = new Anthropic();
@@ -237,31 +262,20 @@ async function main() {
     // unlike the alias-only rule for `.claude/agents/*` frontmatter and
     // Agent-tool spawn overrides (see docs/AGENT_SPEC.md — "Why aliases,
     // not full-ids"). Keep this pinned to the current Opus generation.
-    const response = await client.messages.create({
+    response = await client.messages.create({
       model: 'claude-opus-5',
-      max_tokens: 2000,
+      max_tokens: 8000,
       messages: [{ role: 'user', content: optimizerPrompt }],
       system: systemPrompt,
     });
-    const rawJson = response.content[0].text;
-
-    try {
-      optimizerResult = JSON.parse(rawJson);
-    } catch (parseErr) {
-      // Try to extract JSON from the response if it has surrounding text
-      const jsonMatch = rawJson.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        try {
-          optimizerResult = JSON.parse(jsonMatch[0]);
-        } catch {
-          optimizerError = `JSON parse failed: ${parseErr.message}. Raw response: ${rawJson.slice(0, 200)}`;
-        }
-      } else {
-        optimizerError = `JSON parse failed: ${parseErr.message}. Raw response: ${rawJson.slice(0, 200)}`;
-      }
-    }
   } catch (apiErr) {
     optimizerError = `API call failed: ${apiErr.message}`;
+  }
+
+  if (response && !optimizerError) {
+    const parsed = parseOptimizerResponse(response);
+    optimizerResult = parsed.result;
+    optimizerError = parsed.error;
   }
 
   // -----------------------------------------------------------------------
@@ -295,7 +309,12 @@ async function main() {
   proposalLines.push(`- Trajectories used: ${trainCount} / ${N}`);
   proposalLines.push(`- Score range: ${minScore.toFixed(1)}–${maxScore.toFixed(1)}`);
   proposalLines.push(`- Generated: ${today}`);
+  contrastDisclosure.metadataLines.forEach((line) => proposalLines.push(line));
   proposalLines.push('');
+  if (contrastDisclosure.warning) {
+    proposalLines.push(`> ${contrastDisclosure.warning}`);
+    proposalLines.push('');
+  }
   proposalLines.push('## Proposed edits (lr budget: 2)');
   proposalLines.push('');
 
@@ -344,6 +363,10 @@ async function main() {
   proposalLines.push('## Reviewer notes');
   proposalLines.push('(fill in before applying)');
   proposalLines.push('');
+  // Conflict-check step (T-703) — sourced from the single lib helper so
+  // this proposal-embedded copy and docs/SKILL_OPTIMIZATION.md §8/§9
+  // cannot drift apart.
+  renderConflictCheckChecklist().forEach((line) => proposalLines.push(line));
   proposalLines.push('## Decision');
   proposalLines.push('- [ ] Accept all');
   proposalLines.push('- [ ] Accept with modifications (describe below)');

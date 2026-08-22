@@ -105,7 +105,7 @@ assertWrapperBehavior(CANONICAL_WRAPPER, 'canonical');
 // --- Adopter wrapper (freshly generated via mavp-install.js) ---
 const scratch = makeScratchDir('mavp-wrapper-unrecognized-flag-');
 try {
-  execFileSync('node', [INSTALL_SCRIPT, scratch, '--yes'], { encoding: 'utf8' });
+  execFileSync('node', [INSTALL_SCRIPT, scratch, '--yes', '--stale-source-ok'], { encoding: 'utf8' });
   const adopterWrapper = path.join(scratch, 'scripts', 'mavp-operator');
   assert.ok(fs.existsSync(adopterWrapper), 'FAIL: fresh install did not create scripts/mavp-operator');
   assertWrapperBehavior(adopterWrapper, 'adopter');

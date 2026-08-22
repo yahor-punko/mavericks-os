@@ -2503,6 +2503,324 @@ function scoreTrajectory(trajectory) {
 }
 
 /**
+ * Splits scored trajectories into deterministic train/holdout partitions for
+ * the skill reflection loop (T-699).
+ *
+ * Replaces the prior taskId-localeCompare-prefix-slice split, which had three
+ * measured defects on a real adopter corpus of 304 trajectories: (1) it was
+ * chronological (taskId assignment order is sequential), so holdout silently
+ * accumulated only the newest era of trajectories — both of the corpus's
+ * most recent failures landed there, structurally unreachable to the
+ * optimizer, while training contained only one failure out of three total;
+ * (2) `trainCount = floor(n * 0.7)` grows with corpus size, so a task near
+ * the boundary migrates holdout -> train whenever the corpus grows,
+ * contradicting the "stability" the prior comment claimed but never
+ * delivered; (3) lexicographic string comparison stops being chronological
+ * at four-digit ids (e.g. a four-digit id can sort ahead of a three-digit id
+ * beginning with a higher digit), silently scrambling the split once any
+ * adopter reaches that range.
+ *
+ * Rules (all deterministic — no RNG, no clock, no run-order dependence):
+ *   - Parse the numeric portion of `taskId` (e.g. "T-123" -> 123). An id
+ *     that can't be parsed goes to train deterministically.
+ *   - Any trajectory scoring below 0.7 goes to train UNCONDITIONALLY — a
+ *     failure is the scarce contrast signal the failure minibatch exists to
+ *     consume (three in three hundred on the measured corpus), and
+ *     withholding ~30% of them in a holdout that no v1 code path reads is
+ *     pure loss with no offsetting benefit.
+ *   - A trajectory scoring >= 0.7 goes to holdout iff `numericId % 10` is 7,
+ *     8, or 9; otherwise it goes to train. Modulo on the numeric id — never
+ *     on score order, never randomized — is what makes the split BOTH
+ *     reproducible across repeated runs on the same input AND stable per
+ *     task as the corpus grows: a task's bucket is a pure function of its
+ *     own id, so it never migrates when new trajectories are appended,
+ *     unlike the floor(n * 0.7) prefix slice it replaces.
+ *
+ * A task's score changing between runs (e.g. because evidence was enriched
+ * with a previously-missing `needs_fix_rounds:` or `validator_blocked:`
+ * field) can legitimately move it from success to failure and therefore from
+ * holdout to train. That is desired, not a defect: a newly recognized
+ * failure must reach the optimizer regardless of which modulo bucket its id
+ * falls in. The holdout set is unused by v1 (reserved for the v2 spec in
+ * docs/SKILL_OPTIMIZATION.md §12.1) so its size floating near, rather than
+ * exactly at, 30% is accepted.
+ *
+ * @param {Array<{taskId: string, score: number}>} scored
+ * @returns {{trainSet: Array, holdoutSet: Array}}
+ */
+function splitTrajectoriesForReflect(scored) {
+  const trainSet = [];
+  const holdoutSet = [];
+
+  for (const t of scored) {
+    const match = typeof t.taskId === 'string' ? t.taskId.match(/(\d+)/) : null;
+    const numericId = match ? parseInt(match[1], 10) : NaN;
+
+    if (t.score < 0.7 || Number.isNaN(numericId)) {
+      trainSet.push(t);
+      continue;
+    }
+
+    if (numericId % 10 >= 7) {
+      holdoutSet.push(t);
+    } else {
+      trainSet.push(t);
+    }
+  }
+
+  return { trainSet, holdoutSet };
+}
+
+/**
+ * Parses an Anthropic Messages API response from the skill-optimizer call.
+ *
+ * Selects text content by block `type` — never indexes block zero, since a
+ * pinned model may return a non-text block (e.g. `thinking`) first. Joins
+ * ALL `type === 'text'` blocks (a response can legitimately split its text
+ * across more than one block), rather than taking only the first.
+ *
+ * Distinguishes response-shape failures (no text content, or text content
+ * that isn't valid/extractable JSON) from transport failures — the caller
+ * is responsible for keeping its `API call failed:` prefix scoped to the
+ * network call itself, not this parsing step.
+ *
+ * Takes a PLAIN object and imports nothing from `@anthropic-ai/sdk`, so it
+ * is testable offline with fixture objects.
+ *
+ * @param {{content?: Array<{type?: string, text?: string}>, stop_reason?: string}} response
+ * @returns {{result: object|null, error: string|null}} exactly one of the two is non-null
+ */
+function parseOptimizerResponse(response) {
+  const content = Array.isArray(response && response.content) ? response.content : [];
+  const stopReason = response && response.stop_reason !== undefined && response.stop_reason !== null
+    ? response.stop_reason
+    : 'unknown';
+
+  const textBlocks = content.filter(
+    (block) => block && block.type === 'text' && typeof block.text === 'string'
+  );
+
+  if (textBlocks.length === 0) {
+    const blockTypes = content.length > 0 ? content.map((b) => (b && b.type) || 'unknown').join(', ') : 'none';
+    return {
+      result: null,
+      error: `Optimizer response contained no text content block (block types present: ${blockTypes}; stop_reason: ${stopReason})`,
+    };
+  }
+
+  const rawJson = textBlocks.map((b) => b.text).join('');
+
+  try {
+    return { result: JSON.parse(rawJson), error: null };
+  } catch (parseErr) {
+    // Try to extract JSON from the response if it has surrounding text
+    const jsonMatch = rawJson.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        return { result: JSON.parse(jsonMatch[0]), error: null };
+      } catch {
+        // fall through to the error below
+      }
+    }
+    return {
+      result: null,
+      error: `JSON parse failed: ${parseErr.message}. Raw text (first 200 chars): ${rawJson.slice(0, 200)}. stop_reason: ${stopReason}`,
+    };
+  }
+}
+
+/**
+ * Contrast floor for the failure minibatch, anchored to
+ * docs/SKILL_OPTIMIZATION.md §12.2's v2 contrast requirement ("≥ 3 with
+ * qaOutcome != passed"). A failure batch below this floor is not blocked —
+ * see the architect ruling in T-700 — but is disclosed to the human
+ * reviewer so a proposal generalizing from one or two trajectories cannot
+ * pass as a large-N result. The empty-batch guard (failureBatch.length ===
+ * 0) is a separate, pre-existing gate in mavp-skill-reflect.js and is
+ * unaffected by this constant.
+ */
+const FAILURE_CONTRAST_FLOOR = 3;
+
+/**
+ * Builds the failure-batch contrast disclosure surfaced in a skill-reflect
+ * proposal: how many trajectories informed the success/failure minibatches,
+ * which task IDs make up the failure batch, and — only when the failure
+ * batch sits below FAILURE_CONTRAST_FLOOR — a low-contrast warning string
+ * (for both the proposal body and stdout) and an optimizer-prompt caveat
+ * string. Disclosure never blocks: the caller always writes the proposal
+ * and always exits 0 regardless of what this function returns.
+ *
+ * Takes PLAIN arrays of trajectory-like objects (each needs only a
+ * `taskId` field) and returns PLAIN data — no file I/O, no network — same
+ * offline-testable shape as parseOptimizerResponse and
+ * splitTrajectoriesForReflect above.
+ *
+ * @param {Array<{taskId?: string}>} successBatch
+ * @param {Array<{taskId?: string}>} failureBatch
+ * @returns {{
+ *   successCount: number,
+ *   failureCount: number,
+ *   failureIds: string[],
+ *   lowContrast: boolean,
+ *   metadataLines: string[],
+ *   warning: string|null,
+ *   promptCaveat: string|null
+ * }}
+ */
+function renderFailureContrastDisclosure(successBatch, failureBatch) {
+  const successList = Array.isArray(successBatch) ? successBatch : [];
+  const failureList = Array.isArray(failureBatch) ? failureBatch : [];
+
+  const successCount = successList.length;
+  const failureIds = failureList.map((t) => (t && t.taskId !== undefined ? String(t.taskId) : 'unknown'));
+  const failureCount = failureIds.length;
+  const lowContrast = failureCount > 0 && failureCount < FAILURE_CONTRAST_FLOOR;
+
+  const idsText = failureCount > 0 ? failureIds.join(', ') : 'none';
+
+  const metadataLines = [
+    `- Success batch size: ${successCount}`,
+    `- Failure batch size: ${failureCount} (${idsText})`,
+  ];
+
+  let warning = null;
+  let promptCaveat = null;
+
+  if (lowContrast) {
+    const noun = failureCount === 1 ? 'trajectory' : 'trajectories';
+    warning =
+      `**Low-contrast warning:** this proposal's failure batch has only ${failureCount} ${noun} ` +
+      `(${idsText}) — below the contrast floor of ${FAILURE_CONTRAST_FLOOR} (docs/SKILL_OPTIMIZATION.md ` +
+      `§12.2). Treat the rationale below as generalized from very few cases, not a stable pattern.`;
+
+    promptCaveat =
+      `Caution: the failure batch you were given contains only ${failureCount} ${noun} ` +
+      `(${idsText}) — below the ${FAILURE_CONTRAST_FLOOR}-trajectory contrast floor. Do not generalize ` +
+      `a failure pattern from so few cases. Prefer proposing no edits over weakly supported ones.`;
+  }
+
+  return { successCount, failureCount, failureIds, lowContrast, metadataLines, warning, promptCaveat };
+}
+
+/**
+ * Discloses to the optimizer model exactly which project-operating-
+ * constraints corpora it was NOT given, and prohibits it from proposing
+ * edits that mandate process-level behavior (T-703).
+ *
+ * Added after a live adopter run where the optimizer, in good faith,
+ * proposed a developer-spec edit instructing "run the full existing test
+ * suite" — a categorical violation of docs/core/ORCHESTRATION_RULES.md's
+ * "Test-execution scope (worktree developers)" that the optimizer had
+ * simply never been shown, because the prompt is built from only the
+ * stripped role spec and the two scored minibatches. The architect
+ * rejected injecting the constraints corpus itself: it is over a thousand
+ * lines, a curated partial digest would be a second unsynced copy of
+ * normative text, and it creates false confidence twice (the model treats
+ * the digest as exhaustive, the reviewer over-trusts an edit that
+ * "passed" it). This is the honest inverse — disclose the blind spot and
+ * narrow the model's edit scope accordingly, claiming nothing false.
+ */
+const OPTIMIZER_CONSTRAINTS_DISCLOSURE = [
+  '## What you were not shown',
+  '',
+  "You were NOT given this project's own operating rules (its `.claude/rules/*.md` files and its `CLAUDE.md`), and you were NOT given the framework's `docs/core/ORCHESTRATION_RULES.md`. You cannot know what those documents require, and the trajectories below are not a substitute for them.",
+  '',
+  'Because of this, do not propose any edit that mandates PROCESS-level behavior — anything governing test-execution scope, git operations, push/commit rituals, task registration or status transitions, or permissions. If a failure trajectory looks like it stems from a process rule, name the pattern in your rationale text only; do not encode it as an edit operation. A process-shaped edit proposed without seeing the process rules risks re-mandating exactly the behavior those rules already prohibit.',
+].join('\n');
+
+/**
+ * Builds the full optimizer prompt sent as the user message to the
+ * skill-reflect optimizer model. Pure helper — no SDK dependency, no
+ * network, no file I/O — so it is unit-testable offline like
+ * parseOptimizerResponse and splitTrajectoriesForReflect above.
+ *
+ * Deliberately preserves the JSON response-format block byte-for-byte
+ * from the pre-T-703 inline version in mavp-skill-reflect.js: this task
+ * changes only what the model is told about its own blind spots, never
+ * the response contract parseOptimizerResponse() parses.
+ *
+ * @param {{
+ *   role: string,
+ *   strippedSpec: string,
+ *   successBatch: Array<object>,
+ *   failureBatch: Array<object>,
+ *   promptCaveat?: string|null
+ * }} options
+ * @returns {string}
+ */
+function buildOptimizerPrompt({ role, strippedSpec, successBatch, failureBatch, promptCaveat }) {
+  const successList = Array.isArray(successBatch) ? successBatch : [];
+  const failureList = Array.isArray(failureBatch) ? failureBatch : [];
+
+  return [
+    `You are optimizing the skill document for the "${role}" agent role in the Mavericks framework.`,
+    '',
+    OPTIMIZER_CONSTRAINTS_DISCLOSURE,
+    '',
+    `## Current skill document (editable portions only — protected sections replaced with placeholders)`,
+    strippedSpec,
+    '',
+    `## Successful trajectories (score ≥ 0.7) — ${successList.length} examples`,
+    JSON.stringify(successList, null, 2),
+    '',
+    `## Failure trajectories (score < 0.7) — ${failureList.length} examples`,
+    JSON.stringify(failureList, null, 2),
+    '',
+    ...(promptCaveat ? [promptCaveat, ''] : []),
+    '## Instructions',
+    'Propose at most 2 edit operations (add, delete, or replace) that would improve agent performance based on patterns in the failure trajectories while preserving what works in the successes.',
+    '',
+    'Respond with ONLY a JSON object in this exact format:',
+    '{',
+    '  "rationale": "one sentence explaining the key failure pattern observed",',
+    '  "edits": [',
+    '    {',
+    '      "op": "add" | "delete" | "replace",',
+    '      "targetSection": "section heading or \'end of file\'",',
+    '      "rationale": "one sentence",',
+    '      "before": "exact text to replace or delete (empty string for add)",',
+    '      "after": "new text (empty string for delete)"',
+    '    }',
+    '  ]',
+    '}',
+  ].join('\n');
+}
+
+/**
+ * Renders the conflict-check checklist block included verbatim in every
+ * generated skill-reflect proposal (T-703). This is the human-facing half
+ * of the same disclosure buildOptimizerPrompt() gives the model: an
+ * adopter reviewing a proposal in their own repo will not have this
+ * framework's docs/SKILL_OPTIMIZATION.md open, so the procedure has to
+ * travel with the artifact itself. Both surfaces are built from this one
+ * helper so their text cannot drift apart.
+ *
+ * Phrased corpus-agnostically so it reads correctly both in this repo and
+ * in an adopter's: "this project's" rules/CLAUDE.md are whichever repo the
+ * proposal was generated in (the installer syncs `.claude/rules` into
+ * every adopter project, so both files genuinely exist there too), and
+ * "the framework's" orchestration rules is always this document by name,
+ * regardless of which repo is reading it. Nothing here reads or resolves
+ * those files at run time — it only names where a human should look.
+ *
+ * Pure — returns plain text lines, no file I/O.
+ *
+ * @returns {string[]}
+ */
+function renderConflictCheckChecklist() {
+  return [
+    '## Conflict check',
+    '',
+    "The optimizer that generated this proposal was not shown this project's own operating rules (`.claude/rules/*.md`, `CLAUDE.md`) or the framework's `docs/core/ORCHESTRATION_RULES.md`, and cannot self-check a proposed edit against them. Before deciding below, check each proposed edit against all three:",
+    '',
+    "- [ ] Checked against this project's `.claude/rules/*.md`",
+    "- [ ] Checked against this project's `CLAUDE.md`",
+    "- [ ] Checked against the framework's `docs/core/ORCHESTRATION_RULES.md`",
+    '',
+  ];
+}
+
+/**
  * Summarize trajectory records from .mavp/trajectories/*.jsonl per role.
  *
  * @param {{ dir: string }} options - dir is the absolute path to the trajectories directory
@@ -3118,6 +3436,18 @@ function detectPermissionModeConflict(root, userGlobalPath) {
 }
 
 /**
+ * T-694: the enumerated noun list an ACTION_TARGET_FOLLOWER match accepts
+ * immediately after a version literal (see classifyNextAction() below).
+ * Single source of truth — mavp-validator.js's next_action_volatile_facts
+ * suggestedAction text derives its noun enumeration from this same array so
+ * the printed remediation advice and the matcher it describes can never
+ * drift apart again (the T-694 incident this closes: the message taught an
+ * open rule while the matcher enforced a closed list one noun short of the
+ * fact the live directive needed).
+ */
+const ACTION_TARGET_FOLLOWER_NOUNS = ['bump', 'release', 'section', 'version', 'promotion'];
+
+/**
  * Classify a next_action string as a routing directive vs. freeform prose that
  * may have copied volatile facts (framework version, unpushed-commit counts) with
  * no invalidation trigger. This is a SHAPE check only — it does not fact-check
@@ -3143,10 +3473,34 @@ function detectPermissionModeConflict(root, userGlobalPath) {
  *     still) -> state assertion, always flagged. Checked FIRST, so it wins
  *     over the action-target check below for any input that could match both.
  *   - otherwise preceded by "to" (the "<verb> to X" construction, e.g. "bump
- *     to X") or followed by a target noun (bump/release/section/version, e.g.
- *     "X bump"/"the X section") -> action-target position, not flagged.
+ *     to X") or IMMEDIATELY followed (no gap tolerance) by one of the
+ *     ACTION_TARGET_FOLLOWER_NOUNS (bump/release/section/version/promotion,
+ *     e.g. "X bump"/"the X section") -> action-target position, not flagged.
  *   - otherwise (no cue on either side) -> flagged, preserving the prior
  *     conservative default for ambiguous/bare version literals.
+ *
+ * T-694 (measured divergence, 2026-08-22): `promotion` was added to
+ * ACTION_TARGET_FOLLOWER_NOUNS after a live directive ("Run the 0.46.2
+ * promotion on the mirror") was refused and its own message-prescribed
+ * rewrite ("Promote the 0.46.2 release to stable on the mirror") was the
+ * only rewrite that actually passed — the message taught an open rule
+ * ("lead with the target noun") while the matcher enumerated a closed list
+ * that didn't include the noun the directive needed. The follower-noun list
+ * is now a single module-scope constant (ACTION_TARGET_FOLLOWER_NOUNS) and
+ * `mavp-validator.js`'s suggestedAction text derives its noun enumeration
+ * from this same constant, so the two can no longer drift apart. Three
+ * refusal shapes remain DELIBERATE boundaries, not gaps to close:
+ *   - `tag` is deliberately excluded from the noun list ("HEAD is at the
+ *     0.46.2 tag" must keep flagging as a state assertion).
+ *   - no gap tolerance: the noun must be the immediate next token, not
+ *     merely present nearby ("the 0.46.2 stable promotion" still flags —
+ *     adjacency is what separates a target-naming literal from one merely
+ *     floating inside a state claim).
+ *   - no verb-object grammar: "Promote 0.46.2 to stable" still flags,
+ *     because the bare literal here has neither an ACTION_TARGET_PRECEDER
+ *     ("to" immediately before it) nor an ACTION_TARGET_FOLLOWER_NOUNS match
+ *     immediately after it — "to" appears later in the sentence governing
+ *     "stable", not immediately preceding the literal itself.
  * Commit-count and ahead-N patterns are NOT position-sensitive — they are
  * always a claim about current repo state, never a directive's target, so
  * they are matched exactly as before this change.
@@ -3182,7 +3536,7 @@ function classifyNextAction(str) {
   // Semver — position-sensitive (see the doc comment above for the boundary).
   const STATE_ASSERTION_PRECEDER = /\b(?:is|are|at|on|now|currently|already|still)\s*$/i;
   const ACTION_TARGET_PRECEDER = /\bto\s*$/i;
-  const ACTION_TARGET_FOLLOWER = /^\s*(?:bump|release|section|version)\b/i;
+  const ACTION_TARGET_FOLLOWER = new RegExp(`^\\s*(?:${ACTION_TARGET_FOLLOWER_NOUNS.join('|')})\\b`, 'i');
   const versionPattern = /\bv?\d+\.\d+\.\d+\b/g;
   let m;
   while ((m = versionPattern.exec(trimmed)) !== null) {
@@ -4597,10 +4951,12 @@ module.exports = {
   armRecheck,
   buildContextBundle,
   buildDeployQueue,
+  buildOptimizerPrompt,
   buildReachableHashIndex,
   buildTaskStatusEntry,
   checkNeverAProjectRoot,
   classifyNextAction,
+  ACTION_TARGET_FOLLOWER_NOUNS,
   classifyWorktrees,
   clip,
   collectOperatorData,
@@ -4616,6 +4972,7 @@ module.exports = {
   extractCommitHashesFromEvidence,
   extractHeadingIds,
   extractTrajectories,
+  FAILURE_CONTRAST_FLOOR,
   findPreviousCloseSessionCommit,
   findTaskBlockById,
   formatIsoTime,
@@ -4659,6 +5016,7 @@ module.exports = {
   parseIntervalDays,
   parseMidWaveArchivedTasks,
   parseModuleRegistry,
+  parseOptimizerResponse,
   parseRepoMap,
   parseTaskHolds,
   parseTasksWithRepo,
@@ -4671,6 +5029,8 @@ module.exports = {
   readTaskField,
   relativeTime,
   renameTask,
+  renderConflictCheckChecklist,
+  renderFailureContrastDisclosure,
   renderThinSnapshot,
   readUtf8,
   REPO_META_HEADINGS,
@@ -4684,6 +5044,7 @@ module.exports = {
   scoreTrajectory,
   setBlockField,
   shortenSessionKey,
+  splitTrajectoriesForReflect,
   summarizeTrajectories,
   summarizeWorktreeClassification,
   TERMINAL_SKIP_STATUSES,

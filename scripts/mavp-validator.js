@@ -29,6 +29,7 @@ const path = require('node:path');
 const {
   computeDueRechecks,
   classifyNextAction,
+  ACTION_TARGET_FOLLOWER_NOUNS,
   extractHeadingIds,
   MODULE_META_HEADINGS,
   REPO_META_HEADINGS,
@@ -2061,7 +2062,29 @@ function checkOverdueRechecks(processStatePath) {
  * is promoted to 'failure' individually, on its own evidence — this
  * escalation covers only the two patterns narrowed/verified here (semver,
  * with commit-count/ahead-N unchanged), not a blanket promotion precedent.
+ * T-694: suggestedAction below derives its noun enumeration from
+ * ACTION_TARGET_FOLLOWER_NOUNS (mavp-operator-lib.js) — the same constant
+ * classifyNextAction() itself matches against — so the printed remediation
+ * text can never enumerate a noun the matcher doesn't actually accept, or
+ * vice versa. It also states the actual grammar the matcher enforces
+ * (verb-then-to-then-literal, or a literal immediately followed by one of
+ * the enumerated nouns, with a state-assertion preceder always winning the
+ * tie), not merely "lead with the target noun" as before.
  */
+function buildNextActionVolatileFactsSuggestedAction() {
+  const nounsList = ACTION_TARGET_FOLLOWER_NOUNS.join(', ');
+  return (
+    'Keep next_action a clean routing directive (e.g. "T-NNN -> role -> short goal"); ' +
+    'move narrative detail or point-in-time facts (versions, commit counts) to HANDOFF.md instead. ' +
+    'A version literal classifies clean only in one of two positions: preceded by "to" as in ' +
+    '"<verb> to X" (e.g. "bump to 0.45.0"), or immediately followed (no gap) by one of these nouns: ' +
+    `${nounsList} (e.g. "cut the 0.45.0 release"). A state-assertion word immediately before the ` +
+    'literal (is/are/at/on/now/currently/already/still) always wins and still flags, even if the ' +
+    'literal could otherwise read as a target (e.g. "cut the release at 0.45.0" still flags). ' +
+    'If neither position applies, drop the literal entirely and reference the source of truth instead.'
+  );
+}
+
 function checkNextActionVolatileFacts(processStatePath) {
   let nextAction;
   try {
@@ -2082,7 +2105,7 @@ function checkNextActionVolatileFacts(processStatePath) {
       taskId: '(process_state.next_action)',
       message: `PROCESS_STATE.json next_action embeds volatile fact(s) (${factsList}) that will go stale — this now blocks (exit 2)`,
       repairTarget: 'PROCESS_STATE.json',
-      suggestedAction: 'Keep next_action a clean routing directive (e.g. "T-NNN -> role -> short goal"); move narrative detail or point-in-time facts (versions, commit counts) to HANDOFF.md instead. If a matched fact is actually the TARGET of the directive (e.g. a version bump/release), lead with the target noun instead of a state word — "cut the 0.45.0 release" classifies clean, "cut the release at 0.45.0" does not.',
+      suggestedAction: buildNextActionVolatileFactsSuggestedAction(),
     }),
   ];
 }

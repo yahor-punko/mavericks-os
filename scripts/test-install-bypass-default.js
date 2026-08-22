@@ -28,7 +28,7 @@ function readSettings(dir) {
   const scratch = makeScratchDir('mavp-install-bypass-fresh-');
   try {
     // Fresh install prompts "Create N file(s)...? [Y/n]" — answer 'y' via stdin.
-    execFileSync('node', [INSTALL_SCRIPT, scratch], {
+    execFileSync('node', [INSTALL_SCRIPT, scratch, '--stale-source-ok'], {
       input: 'y\n',
       encoding: 'utf8',
     });
@@ -62,7 +62,7 @@ function readSettings(dir) {
       'utf8'
     );
 
-    const output = execFileSync('node', [INSTALL_SCRIPT, '--update', scratch], { encoding: 'utf8' });
+    const output = execFileSync('node', [INSTALL_SCRIPT, '--update', scratch, '--stale-source-ok'], { encoding: 'utf8' });
 
     const settings = readSettings(scratch);
     assert.strictEqual(
@@ -95,7 +95,7 @@ for (const deliberateValue of ['plan', 'default', 'dontAsk', 'bypassPermissions'
       'utf8'
     );
 
-    execFileSync('node', [INSTALL_SCRIPT, '--update', scratch], { encoding: 'utf8' });
+    execFileSync('node', [INSTALL_SCRIPT, '--update', scratch, '--stale-source-ok'], { encoding: 'utf8' });
 
     const settings = readSettings(scratch);
     assert.strictEqual(
@@ -113,7 +113,7 @@ for (const deliberateValue of ['plan', 'default', 'dontAsk', 'bypassPermissions'
 {
   const scratch = makeScratchDir('mavp-install-bypass-missing-file-');
   try {
-    execFileSync('node', [INSTALL_SCRIPT, '--update', scratch], { encoding: 'utf8' });
+    execFileSync('node', [INSTALL_SCRIPT, '--update', scratch, '--stale-source-ok'], { encoding: 'utf8' });
 
     const settingsPath = path.join(scratch, '.claude', 'settings.json');
     assert.strictEqual(fs.existsSync(settingsPath), true, 'Case 4 FAIL: --update did not create settings.json');

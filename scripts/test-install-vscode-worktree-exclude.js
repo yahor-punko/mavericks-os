@@ -79,7 +79,7 @@ try {
   // proves the wiring into main(), not just the unit-level function.
   // ============================================================
   const freshScratch = trackedScratchDir('mavp-vscode-fresh-');
-  execFileSync('node', [INSTALL_SCRIPT, freshScratch], { encoding: 'utf8' });
+  execFileSync('node', [INSTALL_SCRIPT, freshScratch, '--stale-source-ok'], { encoding: 'utf8' });
 
   const freshSettingsPath = path.join(freshScratch, '.vscode', 'settings.json');
   assert.ok(fs.existsSync(freshSettingsPath), 'FAIL: fresh install did not create .vscode/settings.json');
@@ -200,12 +200,12 @@ try {
   // an already-bootstrapped project, same idempotent contract.
   // ============================================================
   const updateScratch = trackedScratchDir('mavp-vscode-update-');
-  execFileSync('node', [INSTALL_SCRIPT, updateScratch], { encoding: 'utf8' });
+  execFileSync('node', [INSTALL_SCRIPT, updateScratch, '--stale-source-ok'], { encoding: 'utf8' });
   // Remove the freshly-seeded .vscode/settings.json to simulate an older
   // bootstrap that pre-dates this feature, then run --update.
   fs.rmSync(path.join(updateScratch, '.vscode'), { recursive: true, force: true });
   assert.ok(!fs.existsSync(path.join(updateScratch, '.vscode', 'settings.json')), 'sanity: .vscode removed before --update');
-  execFileSync('node', [INSTALL_SCRIPT, '--update', updateScratch], { encoding: 'utf8' });
+  execFileSync('node', [INSTALL_SCRIPT, '--update', updateScratch, '--stale-source-ok'], { encoding: 'utf8' });
   const updateSettings = readVscodeSettings(updateScratch);
   assert.strictEqual(
     updateSettings['files.exclude'][VSCODE_WORKTREES_EXCLUDE_PATTERN],

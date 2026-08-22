@@ -53,7 +53,11 @@ function sessionStartTAEntries(settings) {
 }
 
 function runInstall(args) {
-  return execFileSync('node', [INSTALL_SCRIPT].concat(args), { encoding: 'utf8' });
+  // Every call site here runs a gated mode (fresh install, --update, or
+  // --hooks-only) against the real installer — pin the deterministic
+  // stale-source escape hatch so a fetch mid-run can never flip these
+  // scratch-dir installs from exit 0 to the behind-upstream refusal.
+  return execFileSync('node', [INSTALL_SCRIPT].concat(args).concat(['--stale-source-ok']), { encoding: 'utf8' });
 }
 
 const cleanupDirs = [];

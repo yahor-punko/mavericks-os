@@ -58,7 +58,7 @@ console.log(`Canonical wrapper dispatches ${canonicalFlags.size} flags: ${[...ca
 const scratch = makeScratchDir('mavp-wrapper-flag-parity-');
 let adopterFlags;
 try {
-  execFileSync('node', [INSTALL_SCRIPT, scratch, '--yes'], { encoding: 'utf8' });
+  execFileSync('node', [INSTALL_SCRIPT, scratch, '--yes', '--stale-source-ok'], { encoding: 'utf8' });
   const adopterWrapperPath = path.join(scratch, 'scripts', 'mavp-operator');
   assert.ok(fs.existsSync(adopterWrapperPath), 'FAIL: fresh install did not create scripts/mavp-operator');
   const adopterSource = fs.readFileSync(adopterWrapperPath, 'utf8');

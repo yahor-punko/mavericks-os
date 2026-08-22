@@ -109,7 +109,7 @@ try {
   fs.writeFileSync(settingsPath, JSON.stringify(seededSettings, null, 2) + '\n', 'utf8');
 
   // Run --update.
-  execFileSync('node', [INSTALL_SCRIPT, '--update', scratch], { encoding: 'utf8' });
+  execFileSync('node', [INSTALL_SCRIPT, '--update', scratch, '--stale-source-ok'], { encoding: 'utf8' });
 
   // --- Assertion 1 + 2: wrapper --validate now targets mavp-validator.js with "$PROJECT_ROOT" ---
   const newWrapper = fs.readFileSync(wrapperPath, 'utf8');
@@ -206,7 +206,7 @@ function runFallbackModelMigrationCase(seededChain, expectedChain, expectMigrati
     const seededSettings = { fallbackModel: seededChain };
     fs.writeFileSync(settingsPath, JSON.stringify(seededSettings, null, 2) + '\n', 'utf8');
 
-    const output = execFileSync('node', [INSTALL_SCRIPT, '--update', caseScratch], { encoding: 'utf8' });
+    const output = execFileSync('node', [INSTALL_SCRIPT, '--update', caseScratch, '--stale-source-ok'], { encoding: 'utf8' });
 
     const updatedSettings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     assert.deepStrictEqual(

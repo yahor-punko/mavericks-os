@@ -68,7 +68,7 @@ try {
   {
     const tmp = scratch('mavp-fresh-install-validate-a-');
 
-    const installResult = spawnSync(process.execPath, [INSTALL_SCRIPT, tmp], {
+    const installResult = spawnSync(process.execPath, [INSTALL_SCRIPT, tmp, '--stale-source-ok'], {
       cwd: REPO_ROOT,
       env: childEnv(tmp),
       encoding: 'utf8',
@@ -94,7 +94,7 @@ try {
   {
     const tmp = scratch('mavp-fresh-install-validate-b-');
 
-    const installResult = spawnSync(process.execPath, [INSTALL_SCRIPT, tmp], {
+    const installResult = spawnSync(process.execPath, [INSTALL_SCRIPT, tmp, '--stale-source-ok'], {
       cwd: REPO_ROOT,
       env: childEnv(tmp),
       encoding: 'utf8',

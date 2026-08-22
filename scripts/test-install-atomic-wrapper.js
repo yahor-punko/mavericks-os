@@ -91,7 +91,7 @@ try {
 
   // Run the update THROUGH the on-disk wrapper (not via `node mavp-install.js`
   // directly) — this is what exercises the in-place-write race.
-  const result = runProcess('bash', [wrapperPath, '--install', '--update', scratch]);
+  const result = runProcess('bash', [wrapperPath, '--install', '--update', scratch, '--stale-source-ok']);
 
   assert.strictEqual(
     result.code,
@@ -125,7 +125,7 @@ try {
   console.log('Assertion 5 passed: no mavp-operator.tmp-* residue in scripts/');
 
   // Second leg: fresh install into a separate scratch dir.
-  const freshResult = runProcess('node', [INSTALL_SCRIPT, scratch2]);
+  const freshResult = runProcess('node', [INSTALL_SCRIPT, scratch2, '--stale-source-ok']);
   assert.strictEqual(
     freshResult.code,
     0,

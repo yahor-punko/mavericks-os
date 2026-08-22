@@ -128,7 +128,7 @@ function readSettings(scratch) {
 }
 
 function runUpdate(scratch, extraArgs) {
-  const args = [INSTALL_SCRIPT, '--update', scratch].concat(extraArgs || []);
+  const args = [INSTALL_SCRIPT, '--update', scratch, '--stale-source-ok'].concat(extraArgs || []);
   return execFileSync('node', args, { encoding: 'utf8' });
 }
 

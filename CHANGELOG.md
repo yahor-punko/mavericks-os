@@ -5,6 +5,22 @@ inspired by [Keep a Changelog](https://keepachangelog.com/). For how the
 framework actually works, see [README.md](README.md) and the core process
 docs in [`docs/core/`](docs/core/).
 
+## [0.47.0] — 2026-08-22
+
+### Added
+
+- **A skill-reflection proposal now discloses how many failure trajectories its recommendation actually rests on, and names them** (T-700) — a proposal could previously generalize from a single failing case while the metadata alongside it showed a corpus of hundreds, with nothing to tell a human reviewer the two numbers described different things. Each proposal's contrast section now states the failure-batch size it was built from and lists the trajectories in it, and prints a non-blocking warning when that count sits below three — the same threshold the optimizer's own instructions now tell it not to generalize from. The disclosure text is shared between the printed warning and the proposal body itself, so the two cannot drift apart, and nothing about this is enforced by an exit code — a small batch still produces a proposal, just a clearly labeled one.
+- **The skill-reflection optimizer now discloses which of this project's own operating constraints it was never shown, and every generated proposal carries an explicit conflict-check step** (T-703) — the optimizer prompt is built from only the role spec and two scored minibatches, and had never seen `.claude/rules/*.md`, `CLAUDE.md`, or `docs/core/ORCHESTRATION_RULES.md`; on a live adopter run it proposed, in good faith, a developer-spec edit that would have re-created a measured incident already prohibited by those rules. The prompt now names the corpora it was not given and prohibits edits mandating process-level behavior (test-execution scope, git operations, push/commit rituals, task registration or status, permissions), directing any such observation into rationale text instead. The optimizer's own JSON response contract is unchanged. A matching checklist now travels inside every generated proposal file, not only in `docs/SKILL_OPTIMIZATION.md`, so an adopter reviewing a proposal in their own repo sees the same reminder.
+
+### Changed
+
+- **Skill-reflection's train/holdout split is now deterministic and stratified, so re-running reflection today can produce different proposals than an earlier run over the same growing trajectory log** (T-699) — the split previously behaved chronologically in effect, which meant training only ever saw the oldest era of trajectories and let recent failures quietly never reach the optimizer at all. The split is now built to guarantee failing trajectories are represented in proportion, ordered numerically rather than by insertion order, and reproducible given the same input. **If you re-run `--reflect-skill` and get a different proposal than before, this is why** — the split is now seeing failures the old logic was structurally excluding, not a change in the underlying trajectories themselves.
+- **Strings that previously blocked the `next_action` volatile-facts gate now pass it** (T-694) — the gate's own remediation message was telling writers to rewrite a blocked directive into a form the matcher itself still refused, because the message and the matcher disagreed about which nouns mark a version literal as an instruction's target rather than a state claim. Both now derive from one shared list, and `promotion` has joined the accepted nouns alongside `bump`/`release`/`section`/`version` — so a directive like "run the 0.46.2 promotion" now passes where it previously blocked. This is an observable behavior change in a commit-blocking gate: a `next_action` write that failed validation before this release may pass unchanged after it.
+
+### Fixed
+
+- **`--reflect-skill` could crash on a live optimizer response, and reported the crash under a misleading label** (T-697) — the response handler assumed the model's first content block was always plain text and indexed into it unconditionally; a response that led with a different block type (observed in a live adopter run) crashed instead of being handled, and the resulting error was reported as if it were a transport failure rather than a response-shape problem it should have caught and named honestly.
+
 ## [0.46.2] — 2026-08-22
 
 ### Added

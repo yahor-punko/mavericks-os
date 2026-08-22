@@ -99,7 +99,7 @@ jobs:
       - name: Quick Start proxy
         run: |
           mkdir -p "$RUNNER_TEMP/qs-project"
-          node scripts/mavp-install.js "$RUNNER_TEMP/qs-project"
+          node scripts/mavp-install.js "$RUNNER_TEMP/qs-project" --stale-source-ok
           test -x "$RUNNER_TEMP/qs-project/scripts/mavp-operator"
           MAVERICKS_HOME="$GITHUB_WORKSPACE" "$RUNNER_TEMP/qs-project/scripts/mavp-operator" --validate
 
@@ -137,6 +137,6 @@ jobs:
       - name: Quick Start proxy
         run: |
           mkdir -p "$RUNNER_TEMP/qs-project"
-          node scripts/mavp-install.js "$RUNNER_TEMP/qs-project"
+          node scripts/mavp-install.js "$RUNNER_TEMP/qs-project" --stale-source-ok
           test -x "$RUNNER_TEMP/qs-project/scripts/mavp-operator"
           MAVERICKS_HOME="$GITHUB_WORKSPACE" "$RUNNER_TEMP/qs-project/scripts/mavp-operator" --validate
