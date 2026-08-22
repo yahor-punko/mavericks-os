@@ -250,10 +250,18 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "  --rename-task    Atomically rename a task title in BACKLOG.md and TASK_STATUS.md"
   echo "  --rescope-task   Atomically re-scope or un-defer a task"
   echo "  --sync-status    Sync TASK_STATUS.md Status lines from BACKLOG.md Active Wave"
+  echo "  --archive-merged Mid-wave: move merged task blocks out of BACKLOG.md's Active Wave /"
+  echo "                   TASK_STATUS.md's Active tasks without closing the wave"
+  echo "  --park-wave [N] --reason \"text\"  Move a wave's task blocks into parked sections"
+  echo "  --unpark-wave <N>  Inverse of --park-wave: restore a wave's blocks byte-for-byte"
   echo "  --integrate      Cherry-pick a commit or range into the resolved project root,"
   echo "                   pinned to that root regardless of the caller's cwd; writes no state"
   echo "  --arm-recheck    Register a time-based recheck entry in PROCESS_STATE.json"
   echo "  --ack-recheck    Acknowledge (or --rearm) a recheck entry"
+  echo "  --worktree-report  Classify agent git worktrees (dirty/unintegrated/clean-and-integrated);"
+  echo "                   read-only"
+  echo "  --prune-worktrees  Remove clean-and-integrated worktrees past the mtime safety window;"
+  echo "                   defaults to dry-run"
   echo "  --reflect-skill <role>   Run skill reflection loop for a role (SkillOpt)"
   echo "  --validate       Run the MavP validator (artifact sync check)"
   echo "  --check-sync     Compare agent/skill files in known projects against mavericks source"
@@ -317,6 +325,15 @@ elif [[ "\${1-}" == "--rescope-task" ]]; then
 elif [[ "\${1-}" == "--sync-status" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-sync-status.js" "$@"
+elif [[ "\${1-}" == "--archive-merged" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-archive-merged.js" "$@"
+elif [[ "\${1-}" == "--park-wave" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-park-wave.js" --park-wave "$@"
+elif [[ "\${1-}" == "--unpark-wave" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-park-wave.js" --unpark-wave "$@"
 elif [[ "\${1-}" == "--integrate" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-integrate.js" "$@"
@@ -330,6 +347,12 @@ elif [[ "\${1-}" == "--arm-recheck" ]]; then
 elif [[ "\${1-}" == "--ack-recheck" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-ack-recheck.js" "$@"
+elif [[ "\${1-}" == "--worktree-report" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-worktree-report.js" "$@"
+elif [[ "\${1-}" == "--prune-worktrees" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-prune-worktrees.js" "$@"
 elif [[ "\${1-}" == "--validate" ]]; then
   shift
   node "$MAVERICKS/mavp-validator.js" "$PROJECT_ROOT" "$@"
@@ -347,8 +370,12 @@ elif [[ "\${1-}" == "--version" ]]; then
 elif [[ "\${1-}" == "--demo" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-demo.js" "$@"
-else
+elif [[ -z "\${1-}" || "\${1-}" == "--watch" ]]; then
   node "$MAVERICKS/mavp-operator-dashboard.js" "$@"
+else
+  echo "Unrecognized argument: \${1-}" >&2
+  echo "Run './scripts/mavp-operator --help' for the list of supported flags." >&2
+  exit 1
 fi
 `;
 }

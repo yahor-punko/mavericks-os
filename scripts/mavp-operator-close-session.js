@@ -102,6 +102,19 @@ const CYAN = '\x1b[36m';
 const VERSION_BUMP_LINE = `${YELLOW}⚠ scripts/ changed since last version bump — consider bumping scripts/mavp-version.js before git push${RESET}`;
 const VERSION_UNRELEASED_LINE = `${CYAN}ℹ scripts/ changed but the current version is unreleased (untagged on the mirror) and still accumulating — no bump advised yet${RESET}`;
 
+// T-689: canonical repo CI has no printed consumer at push time — a wave's
+// close commit can push straight to a red run with nobody looking (see
+// EXECUTION_LOG.md for the two-consecutive-push incident this closes). This
+// script never invokes `gh` itself (text only, see .claude/rules/scripts.md
+// — no external-dependency rule — and the release promoter's parallel
+// "never executes gh" invariant); it only names a command a human can run.
+// CI_CHECK_POST_PUSH_LINE fires once a push has genuinely happened (past
+// tense); CI_CHECK_REMINDER_SUFFIX is appended to a reminder that a push has
+// NOT happened yet, so it must not claim otherwise.
+const CI_CHECK_COMMAND = 'gh run watch --exit-status';
+const CI_CHECK_POST_PUSH_LINE = `${DIM}Check CI on the commit you just pushed — \`${CI_CHECK_COMMAND}\` (the push itself does not verify anything).${RESET}`;
+const CI_CHECK_REMINDER_SUFFIX = `, and then check CI once it's pushed — \`${CI_CHECK_COMMAND}\`.`;
+
 // T-649: a following, separate line naming the changed path(s) — printed
 // immediately after VERSION_BUMP_LINE/VERSION_UNRELEASED_LINE, never merged
 // into them, so existing whole-line assertions against those two constants
@@ -1946,12 +1959,16 @@ async function runNonInteractive(args) {
         const pushed = tryGitPush();
         if (pushed) {
           console.log(`${GREEN}✓ Pushed${RESET}`);
+          // T-689 (b): genuinely post-push here — the push above just ran.
+          console.log(CI_CHECK_POST_PUSH_LINE);
         } else {
           console.log(`${YELLOW}⚠ Push failed or skipped — push manually if needed${RESET}`);
         }
       }
     } else {
-      console.log(`\n${CYAN}${BOLD}Wave complete — run \`git push\` to close the wave${RESET}`);
+      // T-689 (c): a reminder to push, not a post-push confirmation — the
+      // suffix must not claim a push has happened yet.
+      console.log(`\n${CYAN}${BOLD}Wave complete — run \`git push\` to close the wave${RESET}${CI_CHECK_REMINDER_SUFFIX}`);
     }
   }
 
@@ -2319,6 +2336,8 @@ async function runInteractive() {
       const pushed = tryGitPush();
       if (pushed) {
         console.log(`${GREEN}✓ Pushed${RESET}`);
+        // T-689 (a): genuinely post-push here — the confirmed push above just ran.
+        console.log(CI_CHECK_POST_PUSH_LINE);
       } else {
         console.log(`${YELLOW}⚠ Push failed or skipped — push manually if needed${RESET}`);
       }
@@ -2360,4 +2379,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE, findExecutionLogOmissions, printExecutionLogOmissionWarning };
+module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE, findExecutionLogOmissions, printExecutionLogOmissionWarning, CI_CHECK_COMMAND, CI_CHECK_POST_PUSH_LINE, CI_CHECK_REMINDER_SUFFIX };

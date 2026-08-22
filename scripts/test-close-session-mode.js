@@ -12,7 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawnSync, spawn: spawnChildProcess } = require('node:child_process');
 
-const { resolveMode, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, classifyVersionBumpAdvisory, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE } = require('./mavp-operator-close-session.js');
+const { resolveMode, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, classifyVersionBumpAdvisory, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, CI_CHECK_COMMAND, CI_CHECK_REMINDER_SUFFIX } = require('./mavp-operator-close-session.js');
 
 // 1. --interactive flag always wins → 'interactive'
 assert.strictEqual(
@@ -1580,6 +1580,41 @@ console.log('All T-649 assertions passed.');
 }
 
 console.log('All T-542 assertions passed.');
+
+// Case 29 (T-689): non-interactive wave-complete close, no --push flag —
+// the printed reminder must append a CI-verification suggestion, worded as
+// a reminder (push has NOT happened yet), not a post-push confirmation.
+{
+  const repoDir = makeFixtureRepo();
+
+  const result = runCloseSessionCli(repoDir, __dirname, ['--non-interactive']);
+
+  // ANSI color codes sit between the base reminder text and the appended
+  // suffix (RESET closes the colored span before the suffix prints), so
+  // assert on the two pieces separately rather than one contiguous string.
+  assert.ok(
+    result.stdout.includes('Wave complete — run `git push` to close the wave'),
+    `Case 29 FAIL: expected the base git-push reminder line, got:\n${result.stdout}`
+  );
+  assert.ok(
+    result.stdout.includes(CI_CHECK_REMINDER_SUFFIX),
+    `Case 29 FAIL: expected the CI-check suffix appended to the git-push reminder line, got:\n${result.stdout}`
+  );
+  assert.ok(
+    result.stdout.includes(CI_CHECK_COMMAND),
+    `Case 29 FAIL: expected the suggested command "${CI_CHECK_COMMAND}" to appear in stdout, got:\n${result.stdout}`
+  );
+  assert.ok(
+    !/you just pushed/.test(result.stdout),
+    `Case 29 FAIL: reminder text must not claim a push already happened, got:\n${result.stdout}`
+  );
+
+  console.log('Case 29 passed: non-interactive wave-complete close appends a CI-verification reminder, worded as a reminder rather than a post-push confirmation');
+
+  cleanup(repoDir);
+}
+
+console.log('All T-689 assertions passed.');
 
 }
 

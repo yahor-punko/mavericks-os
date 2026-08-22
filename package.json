@@ -1,6 +1,6 @@
 {
   "name": "mavericks",
-  "version": "0.45.0",
+  "version": "0.46.2",
   "private": true,
   "engines": {
     "node": ">=20"

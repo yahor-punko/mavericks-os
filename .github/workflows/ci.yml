@@ -7,6 +7,17 @@ name: CI
 # on a weekly schedule plus on-demand via workflow_dispatch instead of on
 # every push/PR — GitHub bills macOS runners at a 10x minute multiplier.
 #
+# T-680: `edge` is added below alongside `main`. This entry is INERT on the
+# canonical (private) repo — no `edge` branch exists here, so it never
+# triggers a run — and FREE on the public mirror in the sense that matters
+# for this cost policy: `edge` push volume is the mirror's own working-build
+# cadence (mavp-publish-build.js, several times a day), not new volume this
+# workflow's ubuntu matrix wasn't already billing for on `main`. It exists so
+# the ubuntu x mirror-tree verification cell (the one that historically
+# caught real defects only after they reached the mirror) has a `push`-event
+# trigger at all — `workflow_dispatch` cannot manufacture one, since it
+# routes exclusively to the macOS-only job below (see that job's own `if:`).
+#
 # REQUIRED-CHECK TRAP: branches/main/protection and rulesets both return 403
 # "Upgrade to GitHub Pro" on this private free-plan repo, so no check can be
 # marked required today and paths-ignore below cannot strand one. If this
@@ -17,6 +28,7 @@ on:
   push:
     branches:
       - main
+      - edge
     paths-ignore:
       - BACKLOG.md
       - TASK_STATUS.md

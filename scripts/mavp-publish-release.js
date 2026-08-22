@@ -64,6 +64,23 @@
 //      silent drop that reproduced on 2026-07-29 (0.39.0: a released body
 //      45,866 characters pre-fold vs. 116,698 post-fold) with every other
 //      gate green.
+//   7b. HARD GATE (T-680): refuse unless the GitHub Actions CI workflow run
+//      for the exact edge-tip SHA resolved in step 3 (never re-resolved) is
+//      `status: completed` and `conclusion: success` on the mirror itself —
+//      queried read-only via `node:https` built-ins against
+//      `GET /repos/{owner}/{repo}/actions/runs?head_sha=<sha>`, filtered to
+//      the CI workflow (`.github/workflows/ci.yml`) and its latest attempt.
+//      This is the ubuntu × mirror-tree verification cell — the one that
+//      historically caught real defects (0.39.0, 0.40.0) only after they
+//      had already reached the mirror. FAILS CLOSED: any network error, any
+//      non-2xx response, or an unparseable body refuses exactly like a red
+//      run — there is no way to interpret "could not verify" as "assume
+//      green". Engages ONLY when the clone's `origin` parses as a
+//      github.com remote (the local-path fixtures this file's own test
+//      suite uses do not, so the gate prints a named skip line and does not
+//      engage for them) — see checkMirrorCiGate() below. No skip flag, no
+//      `--force`: the remote shape is the only switch, and it is not
+//      operator-reachable on a real github.com clone.
 //   8. Only once every gate above has passed does this script touch the
 //      clone: sync local `main` to the resolved `origin/main` SHA, fast-
 //      forward-merge it to the exact gated `edge` SHA (not a re-resolved
@@ -114,6 +131,7 @@
 
 const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
 
@@ -881,6 +899,261 @@ function resolveMirrorHome() {
 }
 
 // ---------------------------------------------------------------------------
+// T-680 — mirror-CI-green promotion gate. Read-only against the GitHub
+// Actions REST API (node:https built-ins only — no `gh`, no child_process,
+// no new npm dependency, per .claude/rules/scripts.md and this file's own
+// "NEVER executes `gh`" invariant). Unauthenticated: the mirror is a public
+// repo, so an unauthenticated GET is well within the 60 req/hr limit for a
+// promotion ritual that runs a handful of times a month — no token
+// handling, no `gh auth token`, no credential argument, by design.
+// ---------------------------------------------------------------------------
+
+const CI_WORKFLOW_PATH = '.github/workflows/ci.yml';
+
+// Parses `remoteUrl` as a github.com remote, returning { owner, repo } or
+// null if it does not match one of the three shapes git itself accepts for
+// a GitHub remote (https, scp-like git@ shorthand, explicit ssh://). A local
+// path (this file's own test fixtures) or any non-github.com host matches
+// none of these and returns null — that null IS the "not a github.com
+// remote" signal checkMirrorCiGate() uses to decide whether to engage at
+// all. Deliberately NOT based on an operator flag (see the brief's
+// "non-obvious constraints" — the stand-down is remote-shape-derived only).
+function parseGithubRemote(remoteUrl) {
+  const trimmed = String(remoteUrl || '').trim();
+  const patterns = [
+    /^https?:\/\/(?:[^@/]+@)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i,
+    /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?\/?$/i,
+    /^ssh:\/\/git@github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i,
+  ];
+  for (const re of patterns) {
+    const m = trimmed.match(re);
+    if (m) return { owner: m[1], repo: m[2] };
+  }
+  return null;
+}
+
+// Real network fetch — the only impure piece of this gate. Never rejects:
+// every failure mode (DNS/connect error, timeout, non-2xx status, unparseable
+// body) resolves to `{ ok: false, error: <string> }` so the caller (and
+// evaluateMirrorCiGate() below) has exactly one shape to branch on rather
+// than needing a try/catch around an awaited call — the fail-closed posture
+// this gate requires is structurally the easy path, not an extra branch to
+// remember. `fetchImpl` is injectable purely for testing (see
+// test-publish-release.js) — production callers always use the default.
+// Response-body size cap (security review round 2, finding 1): a workflow-
+// runs API page is normally a few KB; 1MB is ample headroom. Without a cap,
+// `res.on('data', ...)` would accumulate an unbounded string in memory — a
+// misbehaving api.github.com, or a network intermediary able to terminate
+// TLS, could otherwise return an arbitrarily large body before JSON.parse
+// is ever reached. Exceeding the cap destroys the request and resolves
+// through the SAME `{ ok: false, error }` shape as every other failure mode
+// here, so it can only ever reach the fail-closed 'api_error' branch below
+// — never something that could resolve to 'pass'.
+const MAX_MIRROR_CI_RESPONSE_BYTES = 1024 * 1024;
+
+function fetchMirrorCiRuns(owner, repo, sha, { timeoutMs = 15000 } = {}) {
+  return new Promise((resolve) => {
+    const options = {
+      hostname: 'api.github.com',
+      path: `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs?head_sha=${encodeURIComponent(sha)}`,
+      method: 'GET',
+      headers: {
+        'User-Agent': 'mavp-publish-release.js',
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      timeout: timeoutMs,
+    };
+    let settled = false;
+    const req = https.get(options, (res) => {
+      let data = '';
+      let receivedBytes = 0;
+      let oversized = false;
+      res.on('data', (chunk) => {
+        if (oversized) return;
+        receivedBytes += chunk.length;
+        if (receivedBytes > MAX_MIRROR_CI_RESPONSE_BYTES) {
+          oversized = true;
+          req.destroy();
+          if (settled) return;
+          settled = true;
+          resolve({
+            ok: false,
+            error: `GitHub API response for ${options.path} exceeded ${MAX_MIRROR_CI_RESPONSE_BYTES} bytes — aborted before parsing`,
+          });
+          return;
+        }
+        data += chunk;
+      });
+      res.on('end', () => {
+        if (settled) return;
+        settled = true;
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          resolve({
+            ok: false,
+            error: `GitHub API returned HTTP ${res.statusCode} for ${options.path}: ${data.slice(0, 300)}`,
+          });
+          return;
+        }
+        try {
+          const json = JSON.parse(data);
+          resolve({ ok: true, statusCode: res.statusCode, json });
+        } catch (err) {
+          resolve({ ok: false, error: `could not parse GitHub API response as JSON: ${err.message}` });
+        }
+      });
+    });
+    req.on('timeout', () => {
+      if (settled) return;
+      settled = true;
+      req.destroy();
+      resolve({ ok: false, error: `GitHub API request timed out after ${timeoutMs}ms` });
+    });
+    req.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      resolve({ ok: false, error: `GitHub API request failed: ${err.message}` });
+    });
+  });
+}
+
+// Pure decision function (no network, no git) — takes an `apiResult` shaped
+// exactly like fetchMirrorCiRuns()'s resolved value (`{ ok: false, error }`
+// or `{ ok: true, statusCode, json }`) and the SHA being gated, and returns
+// `{ outcome, detail, run }`. `outcome` is one of: 'pass', 'red' (a
+// completed run with a non-success conclusion — `detail` names the actual
+// conclusion, e.g. 'failure'/'cancelled'/'timed_out'), 'in_progress',
+// 'queued' (covers the API's 'queued'/'requested'/'waiting'/'pending'
+// in-flight statuses), 'no_run' (no run at all for this SHA on the CI
+// workflow), or 'api_error' (`detail` carries the raw error/shape problem —
+// this is the fail-closed branch: an api_error is never treated as pass).
+// Filters to the CI workflow by `path` (never by `name`, which is operator-
+// renameable in the GitHub UI without changing the file the workflow
+// actually lives at) and, when more than one run exists for the same SHA
+// (a realistic shape — e.g. a manual re-run creates a new run id), selects
+// the most recently created one as "the latest attempt".
+//
+// `sha` is re-verified locally against the selected run's own `head_sha`
+// (security review round 2, finding 2) rather than trusted purely from the
+// `?head_sha=` query string that scoped the API request. That query-string
+// filter is a reasonable trust assumption about GitHub's own documented
+// behavior, but this gate exists specifically so a GitHub-side bug or
+// behavior change that returned a run for a DIFFERENT sha under the same
+// query can never silently satisfy it. `sha` is accepted as optional
+// (older/direct callers that omit it skip this extra check rather than
+// throwing) but every call site in this file always supplies it.
+function evaluateMirrorCiGate(apiResult, sha) {
+  if (!apiResult || !apiResult.ok) {
+    return { outcome: 'api_error', detail: (apiResult && apiResult.error) || 'unknown API failure', run: null };
+  }
+  const allRuns =
+    apiResult.json && Array.isArray(apiResult.json.workflow_runs) ? apiResult.json.workflow_runs : null;
+  if (allRuns === null) {
+    return { outcome: 'api_error', detail: 'GitHub API response did not include a workflow_runs array', run: null };
+  }
+  const ciRuns = allRuns.filter((r) => r && r.path === CI_WORKFLOW_PATH);
+  if (ciRuns.length === 0) {
+    return { outcome: 'no_run', detail: null, run: null };
+  }
+  const latest = ciRuns.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+  if (sha !== undefined && latest.head_sha !== sha) {
+    // Fail closed, never silently pass and never silently skip: a mismatch
+    // here means the API responded to our head_sha-scoped query with a run
+    // for a different commit than the one being gated.
+    return {
+      outcome: 'api_error',
+      detail: `GitHub API returned a workflow run for head_sha '${latest.head_sha}', not the requested '${sha}'`,
+      run: latest,
+    };
+  }
+  if (latest.status === 'completed' && latest.conclusion === 'success') {
+    return { outcome: 'pass', detail: null, run: latest };
+  }
+  if (latest.status === 'completed') {
+    return { outcome: 'red', detail: latest.conclusion, run: latest };
+  }
+  if (latest.status === 'in_progress') {
+    return { outcome: 'in_progress', detail: null, run: latest };
+  }
+  if (['queued', 'requested', 'waiting', 'pending'].includes(latest.status)) {
+    return { outcome: 'queued', detail: latest.status, run: latest };
+  }
+  // Any other status GitHub might introduce: treat conservatively as a
+  // not-yet-green "red" naming the literal observed status, rather than
+  // assuming success for a shape this gate doesn't specifically recognize.
+  return { outcome: 'red', detail: latest.status, run: latest };
+}
+
+// Builds the refusal text for every non-'pass' outcome — names the SHA, the
+// observed state, the recovery action, and the mirror's Actions URL (the
+// specific run's URL when one was found, the repo's general Actions page
+// otherwise — see file header step 7b and the brief's requirement that the
+// refusal name all four of these for each of the six states).
+function buildMirrorCiGateMessage(sha, decision, owner, repo) {
+  const actionsUrl = `https://github.com/${owner}/${repo}/actions`;
+  const runUrl = decision.run && decision.run.html_url ? decision.run.html_url : actionsUrl;
+  switch (decision.outcome) {
+    case 'red':
+      return (
+        `mirror CI gate: refusing to promote — the CI workflow run for edge tip ${sha} completed with ` +
+        `conclusion '${decision.detail}' (not success). Recovery: fix the failure and publish a new working ` +
+        `build to edge (mavp-publish-build.js) so a fresh CI run goes green, then retry this promotion. ` +
+        `Run: ${runUrl}`
+      );
+    case 'in_progress':
+      return (
+        `mirror CI gate: refusing to promote — the CI workflow run for edge tip ${sha} is still IN PROGRESS. ` +
+        `Recovery: wait for it to finish (green), then retry this promotion. Run: ${runUrl}`
+      );
+    case 'queued':
+      return (
+        `mirror CI gate: refusing to promote — the CI workflow run for edge tip ${sha} is QUEUED ('${decision.detail}') ` +
+        `and has not started yet. Recovery: wait for it to start and finish (green), then retry this promotion. ` +
+        `Run: ${runUrl}`
+      );
+    case 'no_run':
+      return (
+        `mirror CI gate: refusing to promote — no CI workflow run was found for edge tip ${sha} at all. ` +
+        'Recovery: publish a working build to edge (mavp-publish-build.js) to trigger one, or wait for an ' +
+        `in-flight push's run to register on the mirror, then retry this promotion. Actions: ${actionsUrl}`
+      );
+    case 'api_error':
+      return (
+        `mirror CI gate: refusing to promote — could not verify the CI status of edge tip ${sha} against the ` +
+        `GitHub Actions API (${decision.detail}). Fails closed: an unreachable/unparseable API response is never ` +
+        `treated as a green run. Recovery: check network connectivity and GitHub's status, then retry this ` +
+        `promotion. Actions: ${actionsUrl}`
+      );
+    default:
+      return `mirror CI gate: refusing to promote — unrecognized gate outcome '${decision.outcome}' for edge tip ${sha}.`;
+  }
+}
+
+// Orchestrates the whole gate for one call site: parses `originUrl` (the
+// already-verified mirror remote — see assertOriginMatches() in main()) as a
+// github.com remote; if it is not one at all (the local-path fixtures this
+// file's own test suite uses, and any non-github.com clone), returns
+// `{ engaged: false, skipMessage }` and never touches the network — no
+// operator flag reaches this branch, only the remote's own shape does (see
+// the brief's "non-obvious constraints"). Otherwise fetches (via the
+// injectable `fetchRuns`, defaulting to the real fetchMirrorCiRuns()) and
+// runs the pure decision function above, returning
+// `{ engaged: true, decision, owner, repo }`.
+async function checkMirrorCiGate(originUrl, sha, { fetchRuns = fetchMirrorCiRuns } = {}) {
+  const repoInfo = parseGithubRemote(originUrl);
+  if (!repoInfo) {
+    return {
+      engaged: false,
+      skipMessage:
+        'mirror-CI gate: origin is not a github.com remote — no Actions to consult; gate not applicable',
+    };
+  }
+  const apiResult = await fetchRuns(repoInfo.owner, repoInfo.repo, sha);
+  const decision = evaluateMirrorCiGate(apiResult, sha);
+  return { engaged: true, decision, owner: repoInfo.owner, repo: repoInfo.repo };
+}
+
+// ---------------------------------------------------------------------------
 // Mutation phase (only reached after every gate above has passed)
 // ---------------------------------------------------------------------------
 
@@ -985,7 +1258,7 @@ function pushTag(cloneDir, tagName) {
 // main
 // ---------------------------------------------------------------------------
 
-function main() {
+async function main() {
   const { mirrorRemote, cloneDir, bodyOutPath, bodyOutError } = parseArgs(process.argv.slice(2));
 
   if (bodyOutError) {
@@ -1134,11 +1407,29 @@ function main() {
   fs.writeFileSync(bodyPath, body);
   log(`Release body written to ${bodyPath}`);
 
+  // T-680, file header step 7b: the one NETWORK gate, deliberately last among
+  // the read-only checks (cheap local gates above all fire first) and still
+  // strictly before step 8's first mutation. Consumes edgeRef.sha exactly as
+  // resolved in step 3 — never re-resolved. `mirrorRemote` is the same value
+  // assertOriginMatches() already verified the clone's `origin` matches, so
+  // this reasons about the identical remote the rest of the script operates
+  // on, not a freshly re-read one.
+  log(`\n=== Verifying mirror CI status at edge tip ${edgeRef.sha} (network gate, fails closed) ===`);
+  const ciGateResult = await checkMirrorCiGate(mirrorRemote, edgeRef.sha);
+  if (!ciGateResult.engaged) {
+    log(ciGateResult.skipMessage);
+  } else if (ciGateResult.decision.outcome !== 'pass') {
+    abort(buildMirrorCiGateMessage(edgeRef.sha, ciGateResult.decision, ciGateResult.owner, ciGateResult.repo));
+  } else {
+    log(`Mirror CI gate: edge tip ${edgeRef.sha} has a completed, successful CI run — proceeding.`);
+  }
+
   // -------------------------------------------------------------------------
-  // Everything above this line is read-only against origin (fetch) or purely
-  // local reads (git show / merge-base against SHAs). Nothing has mutated
-  // the clone's branches, the working tree, or the mirror. Every mutation
-  // below is gated on every check above having already passed.
+  // Everything above this line is read-only against origin (fetch), against
+  // the GitHub Actions API (the mirror-CI gate just above), or purely local
+  // reads (git show / merge-base against SHAs). Nothing has mutated the
+  // clone's branches, the working tree, or the mirror. Every mutation below
+  // is gated on every check above having already passed.
   // -------------------------------------------------------------------------
 
   log("\n=== Promoting: sync main to origin/main, fast-forward to edge, push, tag, push tag ===");
@@ -1189,7 +1480,14 @@ function main() {
 }
 
 if (require.main === module) {
-  main();
+  // main() itself already handles every expected failure via abort()
+  // (which calls process.exit(1) synchronously) — this .catch() is only a
+  // safety net for a truly unexpected thrown/rejected promise (e.g. a bug
+  // in the new async gate code), never the normal fail-closed path.
+  main().catch((err) => {
+    console.error(`\nABORT: unexpected error: ${err && err.stack ? err.stack : err}`);
+    process.exit(1);
+  });
 }
 
 module.exports = {
@@ -1207,4 +1505,10 @@ module.exports = {
   renderReleaseBody,
   resolveMirrorHome,
   shQuote,
+  parseGithubRemote,
+  evaluateMirrorCiGate,
+  buildMirrorCiGateMessage,
+  checkMirrorCiGate,
+  fetchMirrorCiRuns,
+  CI_WORKFLOW_PATH,
 };

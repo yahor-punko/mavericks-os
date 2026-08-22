@@ -181,6 +181,10 @@ elif [[ "${1-}" == "--version" ]]; then
 elif [[ "${1-}" == "--demo" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-demo.js" "$@"
-else
+elif [[ -z "${1-}" || "${1-}" == "--watch" ]]; then
   node "$SCRIPT_DIR/mavp-operator-dashboard.js" "$@"
+else
+  echo "Unrecognized argument: ${1-}" >&2
+  echo "Run './scripts/mavp-operator --help' for the list of supported flags." >&2
+  exit 1
 fi
