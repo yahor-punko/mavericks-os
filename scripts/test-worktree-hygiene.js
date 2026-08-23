@@ -21,8 +21,10 @@ const { execFileSync, spawnSync } = require('node:child_process');
 const {
   classifyWorktrees,
   formatWorktreeHygieneAdvisory,
+  formatWorktreePruneSuggestion,
   getPatchEquivalenceStatus,
   UnresolvableMainRefError,
+  WORKTREE_PRUNE_MTIME_THRESHOLD_MS,
 } = require('./mavp-operator-lib.js');
 const { buildWorktreeHygieneAdvisory } = require('./mavp-operator-close-session.js');
 
@@ -139,6 +141,20 @@ function makeWorktreeFixture() {
 
 function cleanup(...dirs) {
   for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+}
+
+/**
+ * Age a worktree directory's mtime past WORKTREE_PRUNE_MTIME_THRESHOLD_MS so
+ * a clean-and-integrated entry classifies as genuinely `prunable` under the
+ * REAL (default, unoverridden) mtime safety window — as opposed to Test 2's
+ * approach of overriding `mtimeThresholdMs` down to 0. T-710's live
+ * close-session assertions specifically want the real threshold exercised
+ * via `fs.utimesSync`, following the existing fixture-aging approach used
+ * elsewhere in this file.
+ */
+function ageWorktreeDirectory(dirPath) {
+  const past = new Date(Date.now() - (WORKTREE_PRUNE_MTIME_THRESHOLD_MS + 60 * 1000));
+  fs.utimesSync(dirPath, past, past);
 }
 
 function runPruneCli(mainDir, argv) {
@@ -426,8 +442,50 @@ function makeMasterDefaultWorktreeFixture() {
     'Test 4 FAIL: buildWorktreeHygieneAdvisory() must delegate to the shared formatWorktreeHygieneAdvisory() implementation'
   );
 
-  console.log('Test 4 passed: buildWorktreeHygieneAdvisory() degrades to null when absent/empty, and matches the shared formatter when populated.');
+  // T-710: on this all-fresh fixture, none of the three worktrees is
+  // prunable (the clean-and-integrated one is too recently created), so the
+  // composed advisory must still equal ONLY the shared counts line — no
+  // suggestion line appended. Confirms the no-suggestion case is untouched
+  // by the composition added in this task.
+  assert.strictEqual(
+    advisory.split('\n').length,
+    1,
+    `Test 4 FAIL: an all-fresh fixture must produce a single-line advisory (no suggestion line): ${advisory}`
+  );
+
   cleanup(fx.tmp);
+
+  // T-710: extend the delegation invariant to the COMPOSED case — age the
+  // clean-and-integrated worktree past the real mtime safety window so it
+  // becomes genuinely prunable, then assert line 1 equals the shared counts
+  // formatter and line 2 equals formatWorktreePruneSuggestion(entries).
+  const fx2 = makeWorktreeFixture();
+  ageWorktreeDirectory(fx2.integratedDir);
+  const entries2 = classifyWorktrees(fx2.mainDir);
+  const advisory2 = buildWorktreeHygieneAdvisory(fx2.mainDir);
+  const lines2 = advisory2.split('\n');
+  assert.strictEqual(
+    lines2.length,
+    2,
+    `Test 4 FAIL: an aged-prunable fixture must produce a two-line composed advisory: ${advisory2}`
+  );
+  assert.strictEqual(
+    lines2[0],
+    formatWorktreeHygieneAdvisory(entries2),
+    'Test 4 FAIL: composed advisory line 1 must equal the shared counts formatter, byte-for-byte'
+  );
+  assert.strictEqual(
+    lines2[1],
+    formatWorktreePruneSuggestion(entries2),
+    'Test 4 FAIL: composed advisory line 2 must equal formatWorktreePruneSuggestion(entries), byte-for-byte'
+  );
+
+  console.log(
+    'Test 4 passed: buildWorktreeHygieneAdvisory() degrades to null when absent/empty, matches the shared ' +
+      'formatter (single line) when no worktree is prunable, and composes counts+suggestion (two lines, each ' +
+      "matching the shared formatters byte-for-byte) once a worktree is genuinely prunable."
+  );
+  cleanup(fx2.tmp);
 }
 
 // ---------------------------------------------------------------------------
@@ -663,9 +721,23 @@ function makeMasterDefaultWorktreeFixture() {
     `Test 10 FAIL: expected the degraded advisory to point at --worktree-report --main-ref (stdout: ${result.stdout})`
   );
 
+  // T-710 (stand-down): the degraded UnresolvableMainRefError line must
+  // carry NO prune-suggestion text — a suggestion derived from a
+  // classification that never ran would be an unsound proposal.
+  assert.ok(
+    !/--prune-worktrees/.test(result.stdout),
+    `Test 10 FAIL (T-710): the UnresolvableMainRefError stand-down line must not mention --prune-worktrees ` +
+      `(stdout: ${result.stdout})`
+  );
+  assert.ok(
+    !/Suggested:/.test(result.stdout),
+    `Test 10 FAIL (T-710): the UnresolvableMainRefError stand-down line must carry no suggestion text at all ` +
+      `(stdout: ${result.stdout})`
+  );
+
   console.log(
     'Test 10 passed: --close-session --non-interactive completes on a master-default repo and degrades ' +
-      'the worktree-hygiene advisory to a single line naming the unresolved ref.'
+      'the worktree-hygiene advisory to a single line naming the unresolved ref, with no prune-suggestion text.'
   );
   cleanup(fx.tmp);
 }
@@ -707,4 +779,207 @@ function makeMasterDefaultWorktreeFixture() {
   cleanup(fx.tmp);
 }
 
-console.log('All T-559/T-633 assertions passed.');
+// ---------------------------------------------------------------------------
+// Test 12 (T-710) — unit: formatWorktreePruneSuggestion() returns null at
+// prunable == 0 (both the all-fresh case and the clean-but-mtime-held
+// case), returns a non-null string at prunable > 0, and appends the
+// held-back clause exactly when clean-and-integrated count exceeds
+// prunable count.
+// ---------------------------------------------------------------------------
+{
+  // All-fresh: no clean-and-integrated entries at all.
+  assert.strictEqual(
+    formatWorktreePruneSuggestion([
+      { classification: 'dirty', prunable: false },
+      { classification: 'unintegrated', prunable: false },
+    ]),
+    null,
+    'Test 12 FAIL: suggestion must be null when no entry is clean-and-integrated'
+  );
+
+  // Clean-but-mtime-held: clean-and-integrated entries exist, but none is
+  // prunable (all held back by the mtime window).
+  assert.strictEqual(
+    formatWorktreePruneSuggestion([
+      { classification: 'clean-and-integrated', prunable: false },
+      { classification: 'clean-and-integrated', prunable: false },
+    ]),
+    null,
+    'Test 12 FAIL: suggestion must be null when clean-and-integrated entries exist but none is prunable'
+  );
+
+  // prunable > 0, clean === prunable: no held-back clause.
+  const noClauseSuggestion = formatWorktreePruneSuggestion([
+    { classification: 'clean-and-integrated', prunable: true },
+    { classification: 'clean-and-integrated', prunable: true },
+  ]);
+  assert.ok(noClauseSuggestion, 'Test 12 FAIL: suggestion must be non-null when prunable > 0');
+  assert.ok(
+    !/held back/.test(noClauseSuggestion),
+    `Test 12 FAIL: no held-back clause expected when clean-and-integrated === prunable: ${noClauseSuggestion}`
+  );
+  assert.ok(
+    /preview 2 removable worktree\(s\)/.test(noClauseSuggestion),
+    `Test 12 FAIL: expected the prunable count in the suggestion text: ${noClauseSuggestion}`
+  );
+
+  // prunable > 0, clean > prunable: held-back clause present, naming the gap.
+  const withClauseSuggestion = formatWorktreePruneSuggestion([
+    { classification: 'clean-and-integrated', prunable: true },
+    { classification: 'clean-and-integrated', prunable: false },
+    { classification: 'unintegrated', prunable: false },
+  ]);
+  assert.ok(withClauseSuggestion, 'Test 12 FAIL: suggestion must be non-null when prunable > 0');
+  assert.ok(
+    /1 more clean-and-integrated held back by the mtime safety window/.test(withClauseSuggestion),
+    `Test 12 FAIL: expected the held-back clause naming the gap (1): ${withClauseSuggestion}`
+  );
+
+  console.log(
+    'Test 12 passed: formatWorktreePruneSuggestion() is null at prunable == 0 (both all-fresh and ' +
+      'clean-but-mtime-held), non-null at prunable > 0, and appends the held-back clause exactly when ' +
+      'clean-and-integrated count exceeds prunable count.'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Test 13 (T-710, mutant-killer) — the RUNNABLE COMMAND quoted inside the
+// suggestion line is exactly the dry-run form and NEVER contains --yes.
+// (The surrounding prose is allowed to reference "--yes" as the manual
+// follow-up step — see the brief's "attach the zero-live-sub-agents
+// constraint to the --yes step in the line's wording" — so this asserts
+// against the QUOTED command substring specifically, not the whole line;
+// checking the whole line would false-fail on that legitimate wording.)
+// Verified to actually fail against a mutant that appends --yes inside the
+// quotes (see task evidence — mutated mavp-operator-lib.js, re-ran this
+// file, reverted).
+// ---------------------------------------------------------------------------
+{
+  const suggestion = formatWorktreePruneSuggestion([
+    { classification: 'clean-and-integrated', prunable: true },
+  ]);
+  assert.ok(suggestion, 'Test 13 FAIL: expected a non-null suggestion');
+
+  const match = /run '([^']+)'/.exec(suggestion);
+  assert.ok(match, `Test 13 FAIL: expected a single-quoted runnable command in the suggestion: ${suggestion}`);
+  assert.strictEqual(
+    match[1],
+    './scripts/mavp-operator --prune-worktrees',
+    `Test 13 FAIL (mutant-killer): the quoted runnable command must be exactly the dry-run form, no --yes: ${suggestion}`
+  );
+
+  console.log(
+    'Test 13 passed (mutant-killer): the quoted runnable command is exactly the dry-run form and never contains --yes.'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Test 14 (T-710) — a real `--close-session --non-interactive` run, on a
+// fixture with one clean-and-integrated worktree aged past the REAL mtime
+// safety window (via fs.utimesSync, not an overridden threshold), prints
+// BOTH the counts line and the suggestion line, and removes no worktree.
+// ---------------------------------------------------------------------------
+{
+  const fx = makeWorktreeFixture();
+  ageWorktreeDirectory(fx.integratedDir);
+
+  const result = runCloseSessionCli(fx.mainDir, ['--non-interactive']);
+  assert.ok(
+    /Worktree hygiene: 3 agent worktree\(s\) — 1 dirty, 1 unintegrated, 1 clean-and-integrated \(1 prunable\)/.test(
+      result.stdout
+    ),
+    `Test 14 FAIL: expected the counts line with 1 prunable (stdout: ${result.stdout}\nstderr: ${result.stderr})`
+  );
+  assert.ok(
+    /Suggested: run '\.\/scripts\/mavp-operator --prune-worktrees' \(dry-run\)/.test(result.stdout),
+    `Test 14 FAIL: expected the suggestion line in close-session output (stdout: ${result.stdout})`
+  );
+  // The quoted RUNNABLE command must never contain --yes (prose elsewhere in
+  // the line is allowed to mention "--yes" as the manual follow-up step).
+  const quotedCommandMatch = /run '([^']+)'/.exec(result.stdout);
+  assert.ok(quotedCommandMatch, `Test 14 FAIL: expected a quoted runnable command (stdout: ${result.stdout})`);
+  assert.strictEqual(
+    quotedCommandMatch[1],
+    './scripts/mavp-operator --prune-worktrees',
+    `Test 14 FAIL: the quoted runnable command must be exactly the dry-run form, no --yes (stdout: ${result.stdout})`
+  );
+
+  // close-session must remove NO worktree, even though one is now prunable.
+  assert.ok(fs.existsSync(fx.dirtyDir), 'Test 14 FAIL: close-session must never remove the dirty worktree');
+  assert.ok(
+    fs.existsSync(fx.unintegratedDir),
+    'Test 14 FAIL: close-session must never remove the unintegrated worktree'
+  );
+  assert.ok(
+    fs.existsSync(fx.integratedDir),
+    'Test 14 FAIL: close-session must never remove the clean-and-integrated worktree either, even though ' +
+      'it is now prunable — the advisory is propose-only'
+  );
+
+  console.log(
+    'Test 14 passed: --close-session --non-interactive prints both the counts line and the suggestion line ' +
+      'on a genuinely-aged-prunable fixture, and removes no worktree.'
+  );
+  cleanup(fx.tmp);
+}
+
+// ---------------------------------------------------------------------------
+// Test 15 (T-710, absence) — on the all-fresh fixture (no worktree aged),
+// --close-session --non-interactive prints the counts line but NO
+// suggestion line.
+// ---------------------------------------------------------------------------
+{
+  const fx = makeWorktreeFixture();
+
+  const result = runCloseSessionCli(fx.mainDir, ['--non-interactive']);
+  assert.ok(
+    /Worktree hygiene: 3 agent worktree\(s\) — 1 dirty, 1 unintegrated, 1 clean-and-integrated \(0 prunable\)/.test(
+      result.stdout
+    ),
+    `Test 15 FAIL: expected the counts line with 0 prunable (stdout: ${result.stdout}\nstderr: ${result.stderr})`
+  );
+  assert.ok(
+    !/Suggested:/.test(result.stdout),
+    `Test 15 FAIL: an all-fresh fixture (0 prunable) must print no suggestion line (stdout: ${result.stdout})`
+  );
+  assert.ok(
+    !/--prune-worktrees --yes/.test(result.stdout),
+    `Test 15 FAIL: no destructive command text may appear (stdout: ${result.stdout})`
+  );
+
+  console.log(
+    'Test 15 passed: on the all-fresh fixture (0 prunable), --close-session --non-interactive prints the ' +
+      'counts line only, with no suggestion line.'
+  );
+  cleanup(fx.tmp);
+}
+
+// ---------------------------------------------------------------------------
+// Test 16 (T-710) — --worktree-report also appends the suggestion line
+// after its existing summary line, once a worktree is genuinely prunable
+// (same aged fixture as Test 14), and prints nothing extra when none is.
+// ---------------------------------------------------------------------------
+{
+  const fx = makeWorktreeFixture();
+  ageWorktreeDirectory(fx.integratedDir);
+
+  const result = runWorktreeReportCli(fx.mainDir, []);
+  assert.strictEqual(
+    result.status,
+    0,
+    `Test 16 FAIL: --worktree-report should exit 0 (stdout: ${result.stdout}\nstderr: ${result.stderr})`
+  );
+  assert.ok(
+    /\(1 prunable\)/.test(result.stdout),
+    `Test 16 FAIL: expected "(1 prunable)" in --worktree-report output (stdout: ${result.stdout})`
+  );
+  assert.ok(
+    /Suggested: run '\.\/scripts\/mavp-operator --prune-worktrees' \(dry-run\)/.test(result.stdout),
+    `Test 16 FAIL: expected the suggestion line appended after the summary line (stdout: ${result.stdout})`
+  );
+
+  console.log('Test 16 passed: --worktree-report appends the suggestion line once a worktree is genuinely prunable.');
+  cleanup(fx.tmp);
+}
+
+console.log('All T-559/T-633/T-710 assertions passed.');

@@ -34,6 +34,7 @@ const path = require('node:path');
 const {
   classifyWorktrees,
   formatWorktreeHygieneAdvisory,
+  formatWorktreePruneSuggestion,
   printRepoIdentityHeader,
   relativeTime,
   UnresolvableMainRefError,
@@ -113,6 +114,14 @@ function main() {
 
   console.log('');
   console.log(`${CYAN}${formatWorktreeHygieneAdvisory(entries)}${RESET}`);
+
+  // T-710: propose-only, dry-run-only prune suggestion — appended AFTER the
+  // unchanged counts line, never instead of it. `--prune-worktrees` itself
+  // never calls this function.
+  const suggestion = formatWorktreePruneSuggestion(entries);
+  if (suggestion) {
+    console.log(`${DIM}${suggestion}${RESET}`);
+  }
 }
 
 main();

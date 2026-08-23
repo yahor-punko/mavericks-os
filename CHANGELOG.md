@@ -5,6 +5,12 @@ inspired by [Keep a Changelog](https://keepachangelog.com/). For how the
 framework actually works, see [README.md](README.md) and the core process
 docs in [`docs/core/`](docs/core/).
 
+## [0.47.1] — 2026-08-23
+
+### Added
+
+- **The worktree-hygiene advisory now names the ready-to-run dry-run prune command whenever a worktree is actually prunable** (T-710) — at a recent wave close the advisory read `... (15 prunable)` and named no next step, leaving the operator to recall `--prune-worktrees` unprompted. A new `formatWorktreePruneSuggestion()` composes a second, propose-only line after the unchanged counts line in both `--close-session` modes and `--worktree-report`: it is `null` whenever nothing is prunable (including when clean-and-integrated worktrees exist but are all held back by the mtime safety window — a stale hint would be worse than no hint), and otherwise names the exact dry-run form `./scripts/mavp-operator --prune-worktrees`, **never** `--yes`, appending a clause attributing any clean-and-integrated/prunable gap to the mtime window. `--prune-worktrees` itself never calls the new function, and the existing `UnresolvableMainRefError` stand-down line carries no suggestion text — a suggestion derived from a classification that never ran would be an unsound proposal.
+
 ## [0.47.0] — 2026-08-22
 
 ### Added

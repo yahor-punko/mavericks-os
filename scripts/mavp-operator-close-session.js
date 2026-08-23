@@ -46,7 +46,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, resolvePermissionMode, printRepoIdentityHeader, guardMutatingRoot, getCommitHashesReachable, isShallowRepository, extractCommitHashesFromEvidence, buildReachableHashIndex, isHashReachable, isSelfHostedRoot, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, formatWorktreePruneSuggestion, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, resolvePermissionMode, printRepoIdentityHeader, guardMutatingRoot, getCommitHashesReachable, isShallowRepository, extractCommitHashesFromEvidence, buildReachableHashIndex, isHashReachable, isSelfHostedRoot, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 // T-530: checkVersionBump()'s release-awareness reads the public mirror's
 // tags EXCLUSIVELY through these check-changelog-frozen.js exports — never
@@ -1428,6 +1428,14 @@ function buildWaveCompletionAnnouncement(waveComplete, sessionWave, remainingTas
  * complete either way (never throw here), but "nothing to report" and "the
  * classifier couldn't check" are different facts and must read differently.
  *
+ * T-710: composes the unchanged counts line with a second, propose-only line
+ * from `formatWorktreePruneSuggestion()` — never instead of it — when at
+ * least one worktree is prunable. `formatWorktreeHygieneAdvisory()` itself
+ * stays byte-identical; this function only concatenates its output with the
+ * suggestion line via a newline. The `UnresolvableMainRefError` stand-down
+ * line below carries NO suggestion text — a suggestion derived from a
+ * classification that never ran would be an unsound proposal.
+ *
  * @param {string} root - project root (ROOT — may differ from the mavericks
  *   installation for bootstrapped projects).
  * @returns {string|null}
@@ -1440,7 +1448,9 @@ function buildWorktreeHygieneAdvisory(root) {
     if (contents.length === 0) return null;
     const entries = classifyWorktrees(root);
     if (entries.length === 0) return null;
-    return formatWorktreeHygieneAdvisory(entries);
+    const countsLine = formatWorktreeHygieneAdvisory(entries);
+    const suggestionLine = formatWorktreePruneSuggestion(entries);
+    return suggestionLine ? `${countsLine}\n${suggestionLine}` : countsLine;
   } catch (err) {
     if (err instanceof UnresolvableMainRefError) {
       return `Worktree hygiene: unable to classify — mainRef '${err.mainRef}' does not resolve to a commit (see --worktree-report --main-ref)`;

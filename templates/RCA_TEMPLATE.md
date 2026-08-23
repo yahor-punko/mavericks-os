@@ -25,6 +25,8 @@ See `docs/core/RCA_CODIFICATION.md` for the full process this template implement
 
 Route each root cause above to exactly one mechanism. Do not leave any root cause unrouted; do not split one cause across two mechanisms.
 
+Before choosing mechanism (c), apply the portability tie-break in `docs/core/RCA_CODIFICATION.md` — "The portability tie-break": memory is the residual route, not the default one.
+
 ### RC-1 routing
 - **Mechanism:** [ (a) .claude/rules edit | (b) role-spec proposal via SKILL_PROPOSALS/ | (c) memory-index entry | (d) armed recheck | (e) mechanical enforcement ]
 - **Detail:** <the proposed rules-file text / the SKILL_PROPOSALS filing note / the memory-index entry text / the `--arm-recheck` command with due date / the hook-validator-test change to file as a developer task>

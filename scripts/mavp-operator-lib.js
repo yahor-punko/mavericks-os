@@ -4940,6 +4940,49 @@ function formatWorktreeHygieneAdvisory(entries) {
   );
 }
 
+/**
+ * Render a one-line, propose-only suggestion naming the ready-to-run
+ * DRY-RUN prune command, composed AFTER (never instead of) the unchanged
+ * `formatWorktreeHygieneAdvisory()` counts line (T-710). Returns `null` when
+ * no entry is prunable — including the "clean-and-integrated exist but are
+ * all held back by the mtime safety window" case, where routing the
+ * operator to a command that would immediately answer "nothing prunable"
+ * is exactly the advisory chatter DR-005/DR-008 warn against.
+ *
+ * The rendered command is always the dry-run form
+ * `./scripts/mavp-operator --prune-worktrees` and must NEVER contain
+ * `--yes` — actually deleting a worktree is irreversible and acts on a
+ * repository-global shared resource (see the T-559 header on
+ * `mavp-operator-prune-worktrees.js`), so this function only ever proposes
+ * the safe, read-only preview step; the operator still runs `--yes`
+ * themselves, by hand, once they've confirmed zero live sub-agents.
+ *
+ * When `clean-and-integrated` outnumbers `prunable`, an extra clause
+ * attributes the gap to the mtime safety window so the discrepancy reads
+ * as intentional rather than a bug.
+ *
+ * @param {Array<{classification:string, prunable:boolean}>} entries - classifyWorktrees() output.
+ * @returns {string|null}
+ */
+function formatWorktreePruneSuggestion(entries) {
+  const { counts } = summarizeWorktreeClassification(entries);
+  const prunableCount = entries.filter((e) => e.prunable).length;
+  if (prunableCount === 0) return null;
+
+  const cleanCount = counts['clean-and-integrated'];
+  const heldBack = cleanCount - prunableCount;
+  const heldBackClause =
+    heldBack > 0
+      ? ` (${heldBack} more clean-and-integrated held back by the mtime safety window)`
+      : '';
+
+  return (
+    `Suggested: run './scripts/mavp-operator --prune-worktrees' (dry-run) to preview ` +
+    `${prunableCount} removable worktree(s)${heldBackClause}; re-run with --yes only once ` +
+    `zero sub-agents are live.`
+  );
+}
+
 module.exports = {
   ROOT,
   ackRecheck,
@@ -4977,6 +5020,7 @@ module.exports = {
   findTaskBlockById,
   formatIsoTime,
   formatWorktreeHygieneAdvisory,
+  formatWorktreePruneSuggestion,
   generateProcessStateMd,
   getCommitHashesReachable,
   getCommitHashesReachableFromHead,
