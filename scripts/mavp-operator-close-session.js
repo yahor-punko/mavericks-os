@@ -563,6 +563,222 @@ function printExecutionLogOmissionWarning(completedTaskRecords, executionLogPath
 }
 
 /**
+ * T-718: load `scripts/publish-manifest.json`'s `ship` classification as a
+ * Set of exact repo-relative paths. `ship` is a flat ARRAY, not a dict keyed
+ * by path — verified directly against the shipped manifest before writing
+ * this lookup (per the brief) — so this returns a Set built from that array,
+ * never a bare object membership test that would silently match nothing.
+ *
+ * Degrades to null (never throws) when the manifest is absent, unreadable,
+ * unparseable, or its `ship` field is not an array — callers must treat null
+ * as "nothing to classify against", the same posture as every other input to
+ * this advisory.
+ *
+ * @param {string} root - absolute path to the git working tree
+ * @returns {Set<string>|null}
+ */
+function loadShipManifestSet(root) {
+  try {
+    const manifestPath = path.join(root, 'scripts', 'publish-manifest.json');
+    if (!fs.existsSync(manifestPath)) return null;
+    const parsed = JSON.parse(readUtf8(manifestPath));
+    if (!parsed || !Array.isArray(parsed.ship)) return null;
+    return new Set(parsed.ship);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * T-718: list the files a commit changed, via `git show --name-only`.
+ * Returns null (never throws) when the hash does not resolve locally or git
+ * is unavailable — the caller treats null exactly like "skip this task",
+ * never like "every file changed".
+ *
+ * @param {string} root - absolute path to the git working tree
+ * @param {string} commitHash - a hex hash already validated by the caller
+ * @returns {string[]|null}
+ */
+function getCommitChangedFiles(root, commitHash) {
+  if (!commitHash || !/^[0-9a-f]{5,40}$/i.test(commitHash)) return null;
+  try {
+    const output = execSync(`git show --name-only --pretty=format: ${commitHash}`, {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return output.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * T-721: files exempt from findShipTouchingChangelogOmissions()'s
+ * ship-intersection test even though they are themselves ship-classified.
+ * CHANGELOG.md is the proven case: at wave 94's first live run, T-716
+ * (26970b9) and T-719 (ef1e4bd) each fired as false positives because their
+ * evidence commit touched ONLY CHANGELOG.md — a commit that writes a
+ * release note tripped a check asking whether the release note mentions it,
+ * a self-referential shape that recurses (a note about the note would owe
+ * its own note). T-717 (1de0a72), which touched CLAUDE.md and
+ * docs/PUBLIC_RELEASE_STRATEGY.md with zero CHANGELOG mentions, is the true
+ * positive that stays caught. Exempted at THIS decision point (the some()
+ * membership test below), never inside loadShipManifestSet() — that loader
+ * is a generic manifest reader other callers rely on to mean "the ship
+ * set", and this exemption is this advisory's own semantics only. Do not
+ * pre-populate with unproven candidates (scripts/publish-manifest.json,
+ * README.md, and template files were considered and ruled in scope for the
+ * advisory) — add a path here only after a live false-positive firing
+ * proves it, per DR-009's matcher-sharpening path for info-tier advisories.
+ */
+const CHANGELOG_OMISSION_NOTE_EXEMPT = new Set(['CHANGELOG.md']);
+
+/**
+ * T-724: the release bump-and-fold ritual's own file set, per
+ * docs/PUBLIC_RELEASE_STRATEGY.md §5 — the source of truth for what the
+ * ritual comprises. A commit that touches ONLY these two files plus
+ * CHANGELOG.md IS the ritual (the version bump and its matching
+ * `## [Unreleased]` fold, landed together as §5 requires) rather than a
+ * shipped capability, so findShipTouchingChangelogOmissions() exempts that
+ * exact shape below. This is a SHAPE test, not a path exemption:
+ * package.json also carries dependencies and scripts, so a standalone
+ * dependency-change commit (package.json alone, with no CHANGELOG.md fold)
+ * is a genuine shipped change and must still fire — the architect explicitly
+ * refused adding these paths to CHANGELOG_OMISSION_NOTE_EXEMPT for exactly
+ * this reason. If docs/PUBLIC_RELEASE_STRATEGY.md §5's ritual file set ever
+ * changes, update this set to match.
+ */
+const CHANGELOG_OMISSION_VERSION_RITUAL_SET = new Set(['scripts/mavp-version.js', 'package.json']);
+
+/**
+ * T-718 (see docs/PUBLIC_RELEASE_STRATEGY.md §5 and DR-012's rejection
+ * record): find every COMPLETED task (merged/deployed_dev/deployed_prod/
+ * runtime_verified — the same `completedTaskRecords` shape as
+ * findExecutionLogOmissions() above, already excluding deferred/deprecated by
+ * construction) whose TASK_STATUS evidence commit hash resolves locally,
+ * whose commit's changed files intersect scripts/publish-manifest.json's
+ * `ship` classification (excluding CHANGELOG_OMISSION_NOTE_EXEMPT — see that
+ * constant's comment for the T-716/T-719 self-referential false-positive
+ * class it exists to exclude), and whose literal task id has ZERO
+ * occurrences in CHANGELOG.md.
+ *
+ * T-724: a second, distinct exemption sits alongside the T-721 one above —
+ * the non-exempt ship intersection is also skipped when it is a SUBSET of
+ * CHANGELOG_OMISSION_VERSION_RITUAL_SET (every member of the intersection is
+ * a ritual file, not merely "both ritual files present") AND the commit's
+ * changed files include CHANGELOG.md (the fold is the evidence that the
+ * ritual, not a noteless bump, produced this commit). This is a shape test,
+ * not a path exemption — see that constant's comment for why. A version
+ * bump with no CHANGELOG.md fold still fires (a genuine §5 violation); a
+ * ritual commit that also touches any other ship file still fires (it may
+ * be smuggling in a real shipped change); package.json alone still fires
+ * (the case that proves a path exemption would have been wrong). Bump
+ * completeness itself is test-version-sync.js's job, not this advisory's —
+ * this check only asks whether the CHANGELOG.md fold accompanied the bump.
+ *
+ * Wave 93 is the acceptance shape this reproduces: T-710 was mentioned in
+ * CHANGELOG.md; T-711/T-712/T-713 shipped normative doc changes with none.
+ *
+ * Advisory tier only (DR-009: a rule reaches a blocking tier only once its
+ * matcher is proven not to reject legitimate output) — mirrors
+ * findExecutionLogOmissions()'s degrade-silently posture on every unavailable
+ * input: no manifest, no CHANGELOG.md, git unavailable, or a hash that does
+ * not resolve all produce zero findings for that task, never a throw.
+ *
+ * @param {Array<{id: string, status: string}>} completedTaskRecords
+ * @param {string} taskStatusContent - final TASK_STATUS.md content (post-move)
+ * @param {string} changelogContent - CHANGELOG.md content
+ * @param {string} root - absolute path to the git working tree
+ * @returns {string[]} ids with zero CHANGELOG.md occurrences whose evidence
+ *   commit touched a ship-classified, non-exempt file, de-duplicated, input
+ *   order preserved
+ */
+function findShipTouchingChangelogOmissions(completedTaskRecords, taskStatusContent, changelogContent, root) {
+  if (!completedTaskRecords || completedTaskRecords.length === 0) return [];
+
+  const shipSet = loadShipManifestSet(root);
+  if (!shipSet || shipSet.size === 0) return [];
+
+  const changelog = changelogContent || '';
+  const seen = new Set();
+  const missing = [];
+
+  for (const rec of completedTaskRecords) {
+    const id = rec && rec.id;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+
+    if (changelog.includes(id)) continue; // already mentioned — silent
+
+    let hash = null;
+    try {
+      const evidence = parseTasksEvidence(taskStatusContent, [id]).get(id);
+      hash = evidence && evidence.commit;
+    } catch {
+      continue; // degrade silently — never throw
+    }
+    if (!hash) continue;
+
+    const changedFiles = getCommitChangedFiles(root, hash);
+    if (!changedFiles) continue; // hash unresolved / git unavailable — skip, don't flag
+
+    const nonExemptShipIntersection = changedFiles.filter((f) => shipSet.has(f) && !CHANGELOG_OMISSION_NOTE_EXEMPT.has(f));
+    if (nonExemptShipIntersection.length === 0) continue;
+
+    // T-724: the version-ritual exemption — every non-exempt ship file this
+    // commit touches is a ritual file (subset semantics), AND the commit's
+    // changed files include CHANGELOG.md (the fold). Both conditions must
+    // hold; either failing means this is not the ritual shape and it fires.
+    const isVersionRitual = nonExemptShipIntersection.every((f) => CHANGELOG_OMISSION_VERSION_RITUAL_SET.has(f)) &&
+      changedFiles.includes('CHANGELOG.md');
+    if (isVersionRitual) continue;
+
+    missing.push(id);
+  }
+
+  return missing;
+}
+
+/**
+ * Print the T-718 CHANGELOG-omission warning, if any ids are missing.
+ * Non-blocking by design: never throws, never changes the close's exit code
+ * or the session-commit contract — the T-629 posture exactly. Called BEFORE
+ * printSessionCompletedTable at both close-session call sites, alongside
+ * printExecutionLogOmissionWarning.
+ *
+ * @param {Array<{id: string, status: string}>} completedTaskRecords
+ * @param {string} taskStatusContent - final TASK_STATUS.md content
+ * @param {string} [root] - defaults to ROOT
+ */
+function printChangelogShipOmissionWarning(completedTaskRecords, taskStatusContent, root) {
+  if (!completedTaskRecords || completedTaskRecords.length === 0) return;
+  const gitRoot = root || ROOT;
+
+  let changelogContent = null;
+  try {
+    const changelogPath = path.join(gitRoot, 'CHANGELOG.md');
+    if (fs.existsSync(changelogPath)) changelogContent = readUtf8(changelogPath);
+  } catch {
+    return; // degrade silently — never throw
+  }
+  if (changelogContent === null) return; // CHANGELOG.md absent
+
+  let missing;
+  try {
+    missing = findShipTouchingChangelogOmissions(completedTaskRecords, taskStatusContent, changelogContent, gitRoot);
+  } catch {
+    return; // degrade silently — never throw
+  }
+  if (!missing || missing.length === 0) return;
+
+  console.log(
+    `\n${YELLOW}${BOLD}⚠ CHANGELOG.md has no entry for: ${missing.join(', ')}${RESET}` +
+      `${YELLOW} — evidence commit touched a ship-classified file with no release note (T-718). Non-blocking.${RESET}`
+  );
+}
+
+/**
  * Print a session-completed table for tasks that reached merged/qa_passed/dev_done
  * during this close-session run.
  *
@@ -1938,6 +2154,11 @@ async function runNonInteractive(args) {
   // results table, per the acceptance criteria.
   printExecutionLogOmissionWarning(mergedTaskRecords);
 
+  // T-718: CHANGELOG.md ship-touching omission advisory — complements the
+  // T-629 check above with a different signal (ship-classified files, not
+  // spawn logging). Same placement discipline: before the results table.
+  printChangelogShipOmissionWarning(mergedTaskRecords, updatedContent, ROOT);
+
   // Print completed table BEFORE any push prompt/attempt — mandatory pre-push
   // review artifact (omitted when no tasks completed this session).
   const finalStatusMap = buildTaskStatusMap(updatedContent, sessionCompletedIds);
@@ -2326,6 +2547,11 @@ async function runInteractive() {
   // results table, per the acceptance criteria.
   printExecutionLogOmissionWarning(mergedTaskRecords);
 
+  // T-718: CHANGELOG.md ship-touching omission advisory — complements the
+  // T-629 check above with a different signal (ship-classified files, not
+  // spawn logging). Same placement discipline: before the results table.
+  printChangelogShipOmissionWarning(mergedTaskRecords, updatedContent, ROOT);
+
   // Print completed table BEFORE the "Run git push?" prompt — the table is
   // the mandatory pre-push review artifact the human sees before authorizing
   // push (omitted when no tasks completed this session).
@@ -2389,4 +2615,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE, findExecutionLogOmissions, printExecutionLogOmissionWarning, CI_CHECK_COMMAND, CI_CHECK_POST_PUSH_LINE, CI_CHECK_REMINDER_SUFFIX };
+module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE, findExecutionLogOmissions, printExecutionLogOmissionWarning, loadShipManifestSet, getCommitChangedFiles, findShipTouchingChangelogOmissions, printChangelogShipOmissionWarning, CI_CHECK_COMMAND, CI_CHECK_POST_PUSH_LINE, CI_CHECK_REMINDER_SUFFIX };

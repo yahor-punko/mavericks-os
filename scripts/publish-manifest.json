@@ -129,6 +129,7 @@
     "scripts/test-check-publish-manifest-reset-untracked.js",
     "scripts/test-check-sync-home-drift.js",
     "scripts/test-check-sync-hook-drift.js",
+    "scripts/test-close-session-changelog-ship-omission.js",
     "scripts/test-close-session-execution-log-omission.js",
     "scripts/test-close-session-mode.js",
     "scripts/test-close-session-self-mode-version-stamp.js",
