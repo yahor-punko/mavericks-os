@@ -148,3 +148,7 @@ Blocker report format:
 - **Impact:** [what cannot be completed without it]
 - **Suggested resolution:** [what the Main Agent should do to unblock]
 <!-- /protected -->
+
+## Budget awareness
+
+Your turn budget for this role is `maxTurns: 15` — this spec's own frontmatter value, and the default whenever your brief does not state a different number. If the brief's `Turn budget:` line states a different number, use that instead. Count your own tool calls against whichever number applies as you work — you are the only one who can see this running total before the cap is hit. At roughly 80% of that budget, stop opening new searches and converge on the report: write up the results already retrieved per category, and explicitly note which categories you did not have budget to search rather than continuing to chain more queries in the hope of reaching full coverage. Do not wait until the budget is exhausted to notice — the reactive path (stopping only once the cap is hit) produces a truncated report with no completion token; the self-counted, proactive path always produces partial-but-real findings instead.

@@ -19,7 +19,7 @@ Read current main: [optional — set when the task must READ current-main state;
 Base floor: [target repo's base-branch head hash at spawn time — REQUIRED for cross-repo and branch-based-repo worktree spawns, recommended otherwise; the developer runs `git log --oneline HEAD..<floor>` before any edit and quotes the output. See "Base floor" below.]
 Model: [opus | sonnet]     # optional — only include when escalating a worker away from its sonnet default; see "Model selection" below
 Effort: [medium | high | xhigh | max]   # optional — only include when deviating from the session default; see "Effort selection" below
-Turn budget: [role's maxTurns from the "Per-role maxTurns table" below]   # optional — fill on a retry after a cap-hit, or any spawn at risk of approaching its cap; see "Turn budget selection" below
+Turn budget: [role's maxTurns from the "Per-role maxTurns table" below]   # optional override/retry channel — most roles now self-state their budget (see "Budget awareness" below); fill this on a retry after a cap-hit, or when deviating from the role's own stated number; see "Turn budget selection" below
 Test scope: [worktree developer only — seed a `node scripts/run-tests.js --filter <fragment>` baseline; the developer extends it with its own test files and grep-derived coverage and reports the delta; never instruct the full suite in a worktree — see docs/core/ORCHESTRATION_RULES.md — "Test-execution scope (worktree developers)"]
 Files to modify: [explicit list]
 What NOT to change: [boundaries — other files, other tasks]
@@ -235,8 +235,8 @@ The ×1.5 multiplier converts the highest observed turn count for a role class i
 | product-docs | 70 | Doc-authoring role; a censored cap-hit (T-521, 42 vs the prior cap of 40) drove a third recalibration — see `docs/TURN_BUDGET.md` "T-557 recalibration". |
 | technical-writer | 70 | Same doc-authoring class as product-docs — aligned for consistency (still zero independent observations). |
 | frontend-design | 45 | Implementation role with build/preview verify loops — between docs and developer. |
-| architect | 25 | Read-heavy role; tool-use counts over-count turns for this role class. |
-| qa | 20 | Bounded read → run → verdict; no observed cap pressure. |
+| architect | 50 | Read-heavy role; tool-use counts over-count turns for this role class. Nine-run external table shows truncations at 39/40 vs the prior cap of 25; recalibrated per `docs/TURN_BUDGET.md` "T-727 recalibration" — ceil(40×1.5)=60 → 60, discounted for read-heavy over-count (same precedent as this row's own original basis) → 50. |
+| qa | 40 | Bounded read → run → verdict. Nine-run external table shows truncations at 20/26/30 vs the prior cap of 20, and a local T-710 report truncated at exactly cap 20 with no completion token was likely misclassified `infra_failure` instead of a cap-hit; recalibrated per `docs/TURN_BUDGET.md` "T-727 recalibration" — ceil(30×1.5)=45 → 50, discounted for read-heavy over-count → 40. |
 | ui-designer | 20 | Bounded visual-design role; no observed cap pressure. |
 | analyst | 15 | Read-only research; no observed cap pressure. |
 | exa-researcher | 15 | Bounded retrieval; no observed cap pressure. |
@@ -244,6 +244,22 @@ The ×1.5 multiplier converts the highest observed turn count for a role class i
 | ux | 15 | Read-only review; no observed cap pressure. |
 
 These values are derived from a small, anecdotal evidence set (see `docs/TURN_BUDGET.md` — "Evidence" and "Confidence & recheck"). They are deliberately generous so under-calibration cannot re-orphan work. Recompute and re-derive per role class once historical `tool_uses` data is instrumented, per the recheck plan in `docs/TURN_BUDGET.md`.
+
+### Budget awareness
+
+This section is the **single source of truth** for the budget-awareness mechanism, following the same pattern as "Report completion token" above: this document states the contract once, and the individual role specs under `.claude/agents/` each carry their own operative copy, because agent specs are standalone files the harness reads in isolation — there is **no include mechanism** for them, so the number cannot live in one place and be referenced from the rest. `scripts/test-agent-spec-sync.js` is what stops the copies drifting apart, not discipline.
+
+**Roster — a frontmatter predicate, not a judgment call.** A role is in-roster when its frontmatter `deny-tools:` line denies **both** `Edit` and `Write`. For that role, the sub-agent's final report is its sole deliverable — there is no committed file a checkpoint could have protected if a truncation ate the report's tail — so self-counting against a known ceiling is the only mitigation available. The current roster, derived mechanically rather than hand-maintained: `analyst`, `architect`, `exa-researcher`, `qa`, `security-reviewer`, `ux`. `ui-designer` is capped at 20 turns but stays OUT — it keeps `Write` (it produces file artifacts). `developer`, `product-docs`, `technical-writer`, and `frontend-design` are OUT for the same reason as each other: their deliverable is committed files, and checkpoint commits already protect partial progress against a mid-work truncation. Because the boundary is a predicate the test enforces (`isReportOnlyRole()` in `scripts/test-agent-spec-sync.js`, matched against a `deepStrictEqual` pin of the six names above), no future "sweep every role by hand" judgment call is ever needed again — a new report-only role simply fails the test until it grows the section below.
+
+**The mechanism.** Each roster role's spec file carries a `## Budget awareness` section stating its own turn budget in a machine-readable, backticked `` `maxTurns: N` `` literal, plus a self-count instruction, a convergence trigger at roughly 80% of budget, a note that the brief-line `Turn budget:` field can override it, and a role-tailored target for what "converge" means for that role. `scripts/test-agent-spec-sync.js` asserts, for every roster role, that the section exists and that its stated `N` equals the role's own frontmatter `maxTurns` — so an agent reading only its own spec file always has a live, correct number to converge against, without needing to read `AGENT_SPEC.md`, a brief field, or any other file at all.
+
+**Why the mandatory-brief-line alternative was refused.** The obvious-looking fix — make the `Turn budget:` brief-line field mandatory on every spawn — was considered and rejected, for three reasons:
+
+1. **Unenforceable.** A brief is in-band chat content, not a file or artifact. No hook, script, or validator observes it, which is the identical limit already stated for completion-token checking (see "Report completion token" above) — there is nothing here to add a mechanical check against.
+2. **Already ruled once.** `EXECUTION_LOG.md:640` records an explicit prior refusal of a mechanical forcer for this exact brief line, on this exact ground: the brief is in-band text with the same limit as completion-token checking.
+3. **Redundant now that the number lives in the spec body.** With `maxTurns: N` embedded in the role's own file and `scripts/test-agent-spec-sync.js` asserting it matches frontmatter, the mechanism no longer depends on the Main Agent remembering to fill an optional field on every spawn. The brief line survives — see the reworded description above — as an override/retry channel for a spawn deviating from the role's own default, not as the mechanism's only input.
+
+See `docs/core/DECISIONS.md` — DR-014 for the full ruling record, including the evidence-tier caveat behind the underlying `maxTurns` recalibration this mechanism depends on.
 
 ### Why aliases, not full-ids
 

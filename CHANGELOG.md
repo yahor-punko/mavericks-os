@@ -5,6 +5,17 @@ inspired by [Keep a Changelog](https://keepachangelog.com/). For how the
 framework actually works, see [README.md](README.md) and the core process
 docs in [`docs/core/`](docs/core/).
 
+## [0.48.0] — 2026-08-27
+
+### Added
+
+- **Six report-only role specs — `qa`, `ux`, `analyst`, `exa-researcher`, `architect`, `security-reviewer` — now each state their own turn budget inside their own spec file, and a new automated check keeps that number honest** (T-728) — if you ever change one of these roles' turn-budget cap, you now must change it in two places at once: the frontmatter cap itself, and the matching number written into that same spec's own "Budget awareness" section. `scripts/test-agent-spec-sync.js` now fails the whole test suite the moment those two numbers disagree, or if the set of six covered roles changes without a matching section being added or removed — so a drifted cap or a forgotten section is caught before it ships, not discovered later in a truncated report. Each of these six specs now self-counts its own tool calls against its stated number, converges on a partial-but-real report at roughly 80% of that budget instead of running to the cliff where the report itself gets cut off, and still honours a brief-line `Turn budget:` override when the Main Agent supplies one.
+
+### Changed
+
+- **`qa`'s turn budget rose from 20 to 40 and `architect`'s from 25 to 50, after evidence that both roles were hitting their prior caps mid-report with the write-up lost, not the underlying work** (T-727) — a multi-run evidence table showed truncated runs, when resumed, made zero or almost zero new tool calls before producing their report: the research was already done, and only the final write-up was cut off by the cap. The new caps land below the full formula-derived ceiling, applying the same discount this project has already used for this role class's read-heavy tool-call over-counting, rather than granting the raw formula output unconditionally.
+- **`docs/AGENT_SPEC.md` gains a canonical "Budget awareness" section, the `Turn budget:` brief line is reframed as an override/retry channel rather than the primary source of the number, and the `tool_uses` logging denominator is now spelled out explicitly** (T-729) — the self-stated-budget mechanism T-728 shipped into six role specs now has one documented home explaining the roster rule (which roles are covered and why) and why making the brief-line field mandatory was rejected in favor of embedding the number in each spec instead — recorded as DR-014 in `docs/core/DECISIONS.md`. Because most roles now state their own default budget, the `Turn budget:` brief line is described as a way to override that default or retry after a cap-hit, not as the only place the number can come from. `CLAUDE.md`'s per-spawn logging convention now states plainly that the `tool_uses: N/cap` denominator is the role's own frontmatter `maxTurns` at spawn time, so a logged cap that doesn't match must name its source.
+
 ## [0.47.3] — 2026-08-23
 
 - **The T-718 CHANGELOG-omission advisory no longer fires on a release bump-and-fold commit that touches only `scripts/mavp-version.js` and `package.json` alongside `CHANGELOG.md` itself** (T-724) — a shape-based exemption, not a path exemption: it recognizes the §5 version-ritual file set specifically, so a standalone `package.json` dependency change (no `CHANGELOG.md` fold) still fires, and a ritual commit that also smuggles in another shipped file still fires too.

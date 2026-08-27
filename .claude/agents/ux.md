@@ -63,6 +63,10 @@ Blocker report format:
 - **Suggested resolution:** [what the Main Agent should do to unblock]
 <!-- /protected -->
 
+## Budget awareness
+
+Your turn budget for this role is `maxTurns: 15` — this spec's own frontmatter value, and the default whenever your brief does not state a different number. If the brief's `Turn budget:` line states a different number, use that instead. Count your own tool calls against whichever number applies as you work — you are the only one who can see this running total before the cap is hit. At roughly 80% of that budget, stop opening new areas of review and converge: report the Verdict and any Must-fix/Should-fix items already found, and explicitly note which parts of the surface you did not have budget to examine, rather than continuing to chain more analysis in the hope of reaching full coverage. Do not wait until the budget is exhausted to notice — the reactive path (stopping only once the cap is hit) produces a truncated report with no verdict and no completion token; the self-counted, proactive path always produces a partial-but-real review instead.
+
 ## Output format
 
 Return:

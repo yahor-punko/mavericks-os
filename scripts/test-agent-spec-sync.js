@@ -12,6 +12,19 @@
 //   3. Asserts each spec's values match the corresponding AGENT_SPEC.md
 //      entry, failing loudly (naming role, field, spec value vs table
 //      value) on any mismatch or missing counterpart in either direction.
+//
+// T-728: a report-only role (its deny-tools list denies BOTH Edit and
+// Write — the report is its sole deliverable) needs a spec-embedded
+// "## Budget awareness" section so a self-counting agent has a real number
+// to converge against, instead of a brief-only "Turn budget:" line that no
+// hook or script can force to be present. This test additionally:
+//   4. Derives the report-only roster mechanically from each spec's
+//      frontmatter `deny-tools:` line (both "Edit" and "Write" present).
+//   5. Asserts every roster member's body text has a "## Budget awareness"
+//      section.
+//   6. Asserts that section states the role's turn budget in the chosen
+//      machine-readable form — a backticked `maxTurns: N` literal — and
+//      that N equals the spec's own frontmatter maxTurns.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -146,15 +159,21 @@ function parseFrontmatter(fileText, fileName) {
   const nameMatch = block.match(/^name:\s*(\S+)\s*$/m);
   const modelMatch = block.match(/^model:\s*(\S+)\s*$/m);
   const maxTurnsMatch = block.match(/^maxTurns:\s*(\d+)\s*$/m);
+  const denyToolsMatch = block.match(/^deny-tools:\s*(.+)\s*$/m);
 
   assert.ok(nameMatch, `${fileName}: frontmatter missing "name:" field`);
   assert.ok(modelMatch, `${fileName}: frontmatter missing "model:" field`);
   assert.ok(maxTurnsMatch, `${fileName}: frontmatter missing "maxTurns:" field`);
 
+  const denyTools = denyToolsMatch
+    ? denyToolsMatch[1].trim().split(/\s+/)
+    : [];
+
   return {
     name: nameMatch[1].trim(),
     model: modelMatch[1].trim(),
     maxTurns: Number(maxTurnsMatch[1]),
+    denyTools,
   };
 }
 
@@ -167,8 +186,41 @@ function loadAgentSpecs() {
     const fullPath = path.join(AGENTS_DIR, file);
     const text = fs.readFileSync(fullPath, 'utf8');
     const parsed = parseFrontmatter(text, file);
-    return { file, ...parsed };
+    return { file, text, ...parsed };
   });
+}
+
+// ---------------------------------------------------------------------------
+// T-728: report-only roster + "## Budget awareness" section checks
+// ---------------------------------------------------------------------------
+
+const BUDGET_HEADING = '## Budget awareness';
+
+// A report-only role is one whose deny-tools list denies BOTH Edit and
+// Write — its report is its sole deliverable (e.g. ui-designer keeps Write
+// allowed and is correctly excluded; developer/product-docs/technical-writer
+// /frontend-design keep Edit+Write allowed and are correctly excluded).
+function isReportOnlyRole(spec) {
+  return spec.denyTools.includes('Edit') && spec.denyTools.includes('Write');
+}
+
+// Extract the "## Budget awareness" section body (everything up to the next
+// "## " heading or end of file), or null when the heading is absent.
+function extractBudgetAwarenessSection(fileText) {
+  const headingIdx = fileText.indexOf(BUDGET_HEADING);
+  if (headingIdx === -1) return null;
+  const afterHeading = fileText.slice(headingIdx + BUDGET_HEADING.length);
+  const nextHeadingMatch = afterHeading.match(/\n## /);
+  return nextHeadingMatch
+    ? afterHeading.slice(0, nextHeadingMatch.index)
+    : afterHeading;
+}
+
+// Parse the chosen machine-readable number form: a backticked `maxTurns: N`
+// literal inside the section body.
+function parseBudgetSectionMaxTurns(sectionBody) {
+  const m = sectionBody.match(/`maxTurns:\s*(\d+)`/);
+  return m ? Number(m[1]) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +345,52 @@ function main() {
       failures.push(
         `[${role}] AGENT_SPEC.md's model policy lists this role but no ` +
           `.claude/agents/${role}.md frontmatter was found`
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // T-728: report-only roster Budget-awareness checks
+  // ---------------------------------------------------------------------
+
+  const reportOnlyRoster = agentSpecs.filter(isReportOnlyRole).map((s) => s.name).sort();
+  const EXPECTED_REPORT_ONLY_ROSTER = [
+    'analyst',
+    'architect',
+    'exa-researcher',
+    'qa',
+    'security-reviewer',
+    'ux',
+  ].sort();
+  assert.deepStrictEqual(
+    reportOnlyRoster,
+    EXPECTED_REPORT_ONLY_ROSTER,
+    `[roster] deny-Edit+Write roster derived from frontmatter (${reportOnlyRoster.join(', ')}) ` +
+      `does not match the expected report-only roster (${EXPECTED_REPORT_ONLY_ROSTER.join(', ')})`
+  );
+
+  for (const spec of agentSpecs) {
+    if (!isReportOnlyRole(spec)) continue;
+
+    const sectionBody = extractBudgetAwarenessSection(spec.text);
+    if (sectionBody === null) {
+      failures.push(
+        `[${spec.name}] budget-awareness: ${spec.file} has no "${BUDGET_HEADING}" section ` +
+          `(required — deny-tools denies both Edit and Write, so this role's report is its sole deliverable)`
+      );
+      continue;
+    }
+
+    const bodyMaxTurns = parseBudgetSectionMaxTurns(sectionBody);
+    if (bodyMaxTurns === null) {
+      failures.push(
+        `[${spec.name}] budget-awareness: ${spec.file}'s "${BUDGET_HEADING}" section has no ` +
+          'backticked `maxTurns: N` literal'
+      );
+    } else if (bodyMaxTurns !== spec.maxTurns) {
+      failures.push(
+        `[${spec.name}] budget-awareness: ${spec.file}'s "${BUDGET_HEADING}" section states ` +
+          `maxTurns: ${bodyMaxTurns} but frontmatter maxTurns is ${spec.maxTurns}`
       );
     }
   }
