@@ -39,6 +39,45 @@
 //  14. Unit: a non-git directory (and one that no longer exists) proceeds
 //      without throwing — listGitWorktrees()/checkNeverAProjectRoot() degrade
 //      silently.
+//
+// T-743 additions — discriminator (d), CALLER-side refusal. Discriminators
+// (a)-(c) judge only the write TARGET, and a primary checkout is a perfectly
+// valid target, so a worktree sub-agent invoking a gated operator script by
+// absolute path into the shared primary checkout passed the guard. That is
+// the vector of the one successful worktree escape (a strategy note written
+// into the primary checkout's tracked PROCESS_STATE.json).
+//  15. RED unit + end-to-end: cwd inside a linked worktree while the target
+//      is that repo's primary checkout blocks (discriminator
+//      "caller_in_linked_worktree", both callerWorktreePath and
+//      primaryWorktreePath set); --set-strategy-note (the actual escape
+//      vector) refuses exit 1 BEFORE any write, with the primary's
+//      PROCESS_STATE.json byte-identical, and the refusal naming the caller
+//      worktree path, the targeted primary path, and a one-line remedy.
+//  15b. RED (THE ANTI-INERTNESS CASE): the same block from a nested
+//      SUBDIRECTORY of the linked worktree. `git worktree list` reports
+//      worktree ROOTS while a sub-agent's cwd is frequently a subdirectory,
+//      so an implementation comparing cwd for exact equality against a
+//      worktree-list entry would pass Test 15 and never fire in the field.
+//      This part asserts that no worktree-list entry equals the subdirectory
+//      (i.e. exact equality provably could not have matched) AND that the
+//      guard still blocks.
+//  16. FALSE-POSITIVE 1: cwd at the primary's own root, target = primary —
+//      proceeds unrefused and --set-strategy-note actually writes.
+//  17. FALSE-POSITIVE 2 (cross-repo): cwd inside repo X's linked worktree
+//      while the target is a SEPARATE validly-adopted repo Y — proceeds. Y
+//      carries a real mavericks_version (asserted) so discriminator (a)
+//      cannot mask the result and hand this part a false pass.
+//  18. FALSE-POSITIVE 3: bare-primary layout — cwd inside a worktree off a
+//      bare primary proceeds for any in-repo target (the same exemption
+//      discriminator (c) already makes).
+//  19. FALSE-POSITIVE 4: a real mutating ritual (--set-strategy-note, the
+//      escape script itself) on a validly-adopted primary checkout, run from
+//      that primary's own cwd, proceeds unrefused and writes.
+//  20. Unit: discriminator (d) degrades silently to not-blocked on a non-git
+//      cwd, a removed cwd, and an empty-string cwd.
+//  21. Unit: the MAVERICKS_ALLOW_NEVER_PROJECT_ROOT override still bypasses
+//      discriminator (d) (checked in guardMutatingRoot() BEFORE any
+//      discriminator runs — ordering unchanged by T-743).
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -51,12 +90,18 @@ const {
   guardMutatingRoot,
   printRepoIdentityHeader,
   listGitWorktrees,
+  gitWorktreeToplevel,
   NEVER_PROJECT_ROOT_OVERRIDE_ENV,
   NEVER_PROJECT_VERSION_PLACEHOLDER,
 } = require('./mavp-operator-lib.js');
 
 const SCRIPTS_DIR = __dirname;
 const SET_STATUS_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-set-status.js');
+// T-743: the escape vector was a gated ritual script invoked by absolute path
+// from inside a worktree. --set-strategy-note is that exact script, and it
+// writes PROCESS_STATE.json directly (no validator run, so its exit code is
+// its own), which makes it the faithful end-to-end vehicle for (d).
+const SET_STRATEGY_NOTE_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-set-strategy-note.js');
 const NODE_BIN = process.execPath;
 
 function readUtf8(p) { return fs.readFileSync(p, 'utf8'); }
@@ -117,6 +162,15 @@ function writeFixture(root, taskId, status) {
 
 function runSetStatus(args, cwd, env) {
   const result = spawnSync(NODE_BIN, [SET_STATUS_PATH, ...args], { cwd, env, encoding: 'utf8' });
+  return {
+    status: result.status,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+  };
+}
+
+function runSetStrategyNote(args, cwd, env) {
+  const result = spawnSync(NODE_BIN, [SET_STRATEGY_NOTE_PATH, ...args], { cwd, env, encoding: 'utf8' });
   return {
     status: result.status,
     stdout: result.stdout || '',
@@ -468,4 +522,322 @@ function initGitRepoWithCommit(dir) {
   console.log('Test 14 passed: a non-git directory (and a removed path) proceed without throwing');
 }
 
-console.log('\nAll T-624/T-670 assertions passed.');
+// ===========================================================================
+// T-743 — discriminator (d): the CALLER sits inside a linked worktree and is
+// targeting that same repo's PRIMARY checkout.
+// ===========================================================================
+
+// A validly-adopted primary checkout: a real mavericks_version (so
+// discriminator (a) can never mask a (d) result) plus a NON-NULL
+// wave_strategy_note. The non-null note matters: the escape incident's
+// improvised "restore" re-ran the buggy script with an empty argument, which
+// only worked because `note || null` cleared the field and the prior value
+// happened to already be null. A non-null prior value here makes the
+// byte-identity assertion below a real assertion about a real value.
+function writeAdoptedProcessState(root, initiative) {
+  writeUtf8(
+    path.join(root, 'PROCESS_STATE.json'),
+    JSON.stringify(
+      {
+        mavericks_version: '0.48.0',
+        wave: 1,
+        initiative,
+        wave_strategy_note: 'pre-existing non-null note that must survive a refused run',
+      },
+      null,
+      2
+    ) + '\n'
+  );
+}
+
+function envFor(root, extra) {
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: root, ...(extra || {}) };
+  if (!extra || !(NEVER_PROJECT_ROOT_OVERRIDE_ENV in extra)) {
+    delete env[NEVER_PROJECT_ROOT_OVERRIDE_ENV];
+  }
+  return env;
+}
+
+{
+  const PRIMARY = fs.mkdtempSync(path.join(os.tmpdir(), 't743-primary-'));
+  initGitRepoWithCommit(PRIMARY);
+  writeFixture(PRIMARY, 'T-980', 'in_progress');
+  writeAdoptedProcessState(PRIMARY, 'T-743 primary fixture');
+
+  const LINKED = fs.mkdtempSync(path.join(os.tmpdir(), 't743-linked-'));
+  fs.rmdirSync(LINKED); // `git worktree add` requires the target path not exist yet.
+  runGit(['worktree', 'add', '-q', LINKED, '-b', 't743-linked-branch'], PRIMARY);
+
+  // A nested subdirectory of the linked worktree — the real shape of a
+  // sub-agent's cwd, and the case an exact-equality implementation misses.
+  const LINKED_SUBDIR = path.join(LINKED, 'scripts', 'nested', 'deep');
+  fs.mkdirSync(LINKED_SUBDIR, { recursive: true });
+
+  // -------------------------------------------------------------------------
+  // Part 15 — RED unit + end-to-end: cwd = the linked worktree ROOT.
+  // -------------------------------------------------------------------------
+  {
+    const unit = checkNeverAProjectRoot(PRIMARY, { cwd: LINKED });
+    assert.strictEqual(unit.blocked, true, 'Test 15 FAIL: cwd inside a linked worktree targeting that repo\'s primary must block');
+    assert.strictEqual(unit.discriminator, 'caller_in_linked_worktree', 'Test 15 FAIL: expected discriminator "caller_in_linked_worktree"');
+    assert.strictEqual(fs.realpathSync(unit.primaryWorktreePath), fs.realpathSync(PRIMARY), 'Test 15 FAIL: primaryWorktreePath must name the targeted primary checkout');
+    assert.strictEqual(fs.realpathSync(unit.callerWorktreePath), fs.realpathSync(LINKED), 'Test 15 FAIL: callerWorktreePath must name the caller\'s own linked worktree');
+
+    const beforePs = readUtf8(path.join(PRIMARY, 'PROCESS_STATE.json'));
+    const beforeBacklog = readUtf8(path.join(PRIMARY, 'BACKLOG.md'));
+    assert.ok(beforePs.includes('pre-existing non-null note'), 'Test 15 setup FAIL: the primary\'s wave_strategy_note must be non-null before the refused run');
+
+    const r = runSetStrategyNote(['escaped note from a worktree'], LINKED, envFor(PRIMARY));
+    assert.strictEqual(r.status, 1, `Test 15 FAIL: expected exit 1, got ${r.status}. stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+
+    const afterPs = readUtf8(path.join(PRIMARY, 'PROCESS_STATE.json'));
+    assert.strictEqual(afterPs, beforePs, 'Test 15 FAIL: the primary\'s PROCESS_STATE.json must be byte-identical after a refused run');
+    assert.strictEqual(readUtf8(path.join(PRIMARY, 'BACKLOG.md')), beforeBacklog, 'Test 15 FAIL: the primary\'s BACKLOG.md must be byte-identical after a refused run');
+    assert.ok(!afterPs.includes('escaped note from a worktree'), 'Test 15 FAIL: the escaping note must never reach the primary checkout');
+
+    for (const stream of ['stdout', 'stderr']) {
+      const text = r[stream];
+      assert.ok(text.includes('REFUSED'), `Test 15 FAIL: ${stream} must contain the refusal message. ${stream}:\n${text}`);
+      assert.ok(text.includes(LINKED) || text.includes(fs.realpathSync(LINKED)), `Test 15 FAIL: ${stream} must name the caller's worktree path. ${stream}:\n${text}`);
+      assert.ok(text.includes(PRIMARY) || text.includes(fs.realpathSync(PRIMARY)), `Test 15 FAIL: ${stream} must name the targeted primary path. ${stream}:\n${text}`);
+      assert.ok(/\n\s*remedy: /.test(text), `Test 15 FAIL: ${stream} must carry a one-line remedy. ${stream}:\n${text}`);
+      assert.ok(text.includes(NEVER_PROJECT_ROOT_OVERRIDE_ENV), `Test 15 FAIL: ${stream} must still name the override env var`);
+    }
+
+    console.log('Test 15 (RED) passed: cwd at a linked-worktree ROOT targeting that repo\'s primary blocks with discriminator "caller_in_linked_worktree"; --set-strategy-note refuses exit 1 before any write; the primary\'s PROCESS_STATE.json is byte-identical; the refusal names the caller worktree, the primary, and a remedy');
+  }
+
+  // -------------------------------------------------------------------------
+  // Part 15b — RED, THE ANTI-INERTNESS CASE: cwd = a nested SUBDIRECTORY of
+  // the linked worktree. An implementation comparing cwd for exact equality
+  // against a `git worktree list` entry would pass Part 15 and never fire in
+  // the field, because a sub-agent's cwd is frequently a subdirectory.
+  // -------------------------------------------------------------------------
+  {
+    // First, prove exact equality provably could NOT have matched here.
+    const entries = listGitWorktrees(LINKED);
+    const resolvedSubdir = fs.realpathSync(LINKED_SUBDIR);
+    assert.notStrictEqual(resolvedSubdir, fs.realpathSync(LINKED), 'Test 15b setup FAIL: the subdirectory must not equal the worktree root');
+    assert.ok(
+      entries.every((wt) => fs.realpathSync(wt.path) !== resolvedSubdir),
+      'Test 15b setup FAIL: no worktree-list entry may equal the subdirectory — otherwise this part would not distinguish exact-equality from top-level resolution'
+    );
+    // And prove the caller-side resolution step recovers the worktree root
+    // from that subdirectory (the boundary-correct step (d) depends on).
+    assert.strictEqual(
+      fs.realpathSync(gitWorktreeToplevel(LINKED_SUBDIR)),
+      fs.realpathSync(LINKED),
+      'Test 15b FAIL: gitWorktreeToplevel() must resolve a nested subdirectory back to its worktree root'
+    );
+
+    const unit = checkNeverAProjectRoot(PRIMARY, { cwd: LINKED_SUBDIR });
+    assert.strictEqual(unit.blocked, true, 'Test 15b FAIL: a cwd in a SUBDIRECTORY of the linked worktree must still block');
+    assert.strictEqual(unit.discriminator, 'caller_in_linked_worktree', 'Test 15b FAIL: expected discriminator "caller_in_linked_worktree" from a subdirectory cwd');
+    assert.strictEqual(fs.realpathSync(unit.callerWorktreePath), fs.realpathSync(LINKED), 'Test 15b FAIL: callerWorktreePath must be the worktree ROOT, not the subdirectory');
+
+    const beforePs = readUtf8(path.join(PRIMARY, 'PROCESS_STATE.json'));
+    const r = runSetStrategyNote(['escaped note from a worktree subdirectory'], LINKED_SUBDIR, envFor(PRIMARY));
+    assert.strictEqual(r.status, 1, `Test 15b FAIL: expected exit 1 from a subdirectory cwd, got ${r.status}. stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    const afterPs = readUtf8(path.join(PRIMARY, 'PROCESS_STATE.json'));
+    assert.strictEqual(afterPs, beforePs, 'Test 15b FAIL: the primary\'s PROCESS_STATE.json must be byte-identical after a refused subdirectory run');
+    assert.ok(r.stderr.includes('REFUSED'), 'Test 15b FAIL: stderr must contain the refusal message');
+    assert.ok(r.stderr.includes(LINKED) || r.stderr.includes(fs.realpathSync(LINKED)), 'Test 15b FAIL: stderr must name the caller\'s worktree ROOT');
+
+    console.log('Test 15b (RED, anti-inertness) passed: a cwd in a nested SUBDIRECTORY of the linked worktree still blocks — no worktree-list entry equals that subdirectory, so exact equality could not have matched; --set-strategy-note refuses exit 1 and the primary\'s PROCESS_STATE.json is byte-identical');
+  }
+
+  // -------------------------------------------------------------------------
+  // Part 21 — the override still bypasses (d). Run here, while the fixture
+  // exists, but BEFORE the false-positive parts so the write it permits does
+  // not confuse their assertions.
+  // -------------------------------------------------------------------------
+  {
+    const overridden = guardMutatingRoot(PRIMARY, '--set-strategy-note', {
+      cwd: LINKED,
+      env: { [NEVER_PROJECT_ROOT_OVERRIDE_ENV]: '1' },
+    });
+    assert.strictEqual(overridden.blocked, false, 'Test 21 FAIL: the override env var must bypass discriminator (d)');
+    assert.strictEqual(overridden.overridden, true, 'Test 21 FAIL: expected overridden:true, proving the override is checked BEFORE any discriminator runs');
+
+    const withoutOverride = guardMutatingRoot(PRIMARY, '--set-strategy-note', { cwd: LINKED, env: {} });
+    assert.strictEqual(withoutOverride.blocked, true, 'Test 21 FAIL: without the override, (d) must still block');
+    assert.strictEqual(withoutOverride.discriminator, 'caller_in_linked_worktree', 'Test 21 FAIL: expected discriminator "caller_in_linked_worktree"');
+
+    const r = runSetStrategyNote(['note permitted by the override'], LINKED, envFor(PRIMARY, { [NEVER_PROJECT_ROOT_OVERRIDE_ENV]: '1' }));
+    assert.strictEqual(r.status, 0, `Test 21 FAIL: the override must let the write proceed, got exit ${r.status}. stderr:\n${r.stderr}`);
+    assert.ok(!r.stdout.includes('REFUSED'), 'Test 21 FAIL: the override must suppress the refusal');
+    assert.ok(readUtf8(path.join(PRIMARY, 'PROCESS_STATE.json')).includes('note permitted by the override'), 'Test 21 FAIL: the override must permit the actual write');
+
+    console.log('Test 21 passed: MAVERICKS_ALLOW_NEVER_PROJECT_ROOT still bypasses discriminator (d), and is checked before any discriminator runs');
+  }
+
+  // -------------------------------------------------------------------------
+  // Part 16 — FALSE-POSITIVE 1: cwd at the primary's own root, target =
+  // primary. This is the Main Agent's own legitimate invocation shape.
+  // -------------------------------------------------------------------------
+  {
+    const unit = checkNeverAProjectRoot(PRIMARY, { cwd: PRIMARY });
+    assert.strictEqual(unit.blocked, false, 'Test 16 FAIL: the Main Agent shape (cwd = primary, target = primary) must NOT be blocked');
+    assert.strictEqual(unit.discriminator, null, 'Test 16 FAIL: expected no discriminator match at the primary\'s own cwd');
+
+    const r = runSetStrategyNote(['a legitimate note written from the primary cwd'], PRIMARY, envFor(PRIMARY));
+    assert.strictEqual(r.status, 0, `Test 16 FAIL: expected exit 0, got ${r.status}. stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.ok(!r.stdout.includes('REFUSED'), `Test 16 FAIL: the primary cwd must not print the refusal message. stdout:\n${r.stdout}`);
+    assert.ok(readUtf8(path.join(PRIMARY, 'PROCESS_STATE.json')).includes('a legitimate note written from the primary cwd'), 'Test 16 FAIL: the write must actually land');
+
+    console.log('Test 16 (FALSE-POSITIVE 1) passed: cwd at the primary\'s own root targeting the primary proceeds unrefused and --set-strategy-note actually writes');
+  }
+
+  // -------------------------------------------------------------------------
+  // Part 17 — FALSE-POSITIVE 2 (cross-repo): cwd inside repo X's linked
+  // worktree while the target is a SEPARATE validly-adopted repo Y.
+  // -------------------------------------------------------------------------
+  {
+    const REPO_Y = fs.mkdtempSync(path.join(os.tmpdir(), 't743-repo-y-'));
+    initGitRepoWithCommit(REPO_Y);
+    writeFixture(REPO_Y, 'T-981', 'in_progress');
+    writeAdoptedProcessState(REPO_Y, 'T-743 separate adopted repo Y');
+
+    // Guard the guard: Y must carry a REAL mavericks_version, otherwise
+    // discriminator (a) would block Y and hand this part a false pass.
+    const yState = JSON.parse(readUtf8(path.join(REPO_Y, 'PROCESS_STATE.json')));
+    assert.notStrictEqual(yState.mavericks_version, NEVER_PROJECT_VERSION_PLACEHOLDER, 'Test 17 setup FAIL: repo Y must carry a real mavericks_version so discriminator (a) cannot mask the result');
+    // And Y must be a genuinely separate repo, not a worktree of X.
+    assert.ok(
+      listGitWorktrees(REPO_Y).every((wt) => fs.realpathSync(wt.path) !== fs.realpathSync(PRIMARY)),
+      'Test 17 setup FAIL: repo Y must be a separate repository, not a worktree sharing X\'s worktree list'
+    );
+
+    for (const [label, callerCwd] of [['worktree root', LINKED], ['worktree subdirectory', LINKED_SUBDIR]]) {
+      const unit = checkNeverAProjectRoot(REPO_Y, { cwd: callerCwd });
+      assert.strictEqual(unit.blocked, false, `Test 17 FAIL: a cross-repo call (cwd in X's ${label}, target = repo Y) must NOT be blocked`);
+      assert.strictEqual(unit.discriminator, null, `Test 17 FAIL: expected no discriminator match for the cross-repo case from the ${label}`);
+    }
+
+    const r = runSetStrategyNote(['a legitimate cross-repo note'], LINKED, envFor(REPO_Y));
+    assert.strictEqual(r.status, 0, `Test 17 FAIL: expected exit 0, got ${r.status}. stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.ok(!r.stdout.includes('REFUSED'), `Test 17 FAIL: the cross-repo case must not print the refusal message. stdout:\n${r.stdout}`);
+    assert.ok(readUtf8(path.join(REPO_Y, 'PROCESS_STATE.json')).includes('a legitimate cross-repo note'), 'Test 17 FAIL: the cross-repo write must actually land in repo Y');
+    // X's primary must be untouched by a write aimed at Y.
+    assert.ok(!readUtf8(path.join(PRIMARY, 'PROCESS_STATE.json')).includes('a legitimate cross-repo note'), 'Test 17 FAIL: the cross-repo write must not touch repo X\'s primary');
+
+    console.log('Test 17 (FALSE-POSITIVE 2, cross-repo) passed: cwd inside repo X\'s linked worktree (root AND subdirectory) targeting a separate validly-adopted repo Y proceeds unrefused; the write lands in Y and X\'s primary is untouched');
+    fs.rmSync(REPO_Y, { recursive: true, force: true });
+  }
+
+  fs.rmSync(LINKED, { recursive: true, force: true });
+  runGit(['worktree', 'prune'], PRIMARY);
+  fs.rmSync(PRIMARY, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// Part 18 — FALSE-POSITIVE 3: bare-primary layout. Every checkout is linked
+// and there is no primary checkout to name, so (d) never fires there — the
+// same exemption discriminator (c) already makes.
+// ---------------------------------------------------------------------------
+{
+  const SRC = fs.mkdtempSync(path.join(os.tmpdir(), 't743-bare-src-'));
+  initGitRepoWithCommit(SRC);
+
+  const BARE = fs.mkdtempSync(path.join(os.tmpdir(), 't743-bare-'));
+  fs.rmdirSync(BARE);
+  runGit(['clone', '-q', '--bare', SRC, BARE]);
+
+  const WT_A = fs.mkdtempSync(path.join(os.tmpdir(), 't743-bare-wt-a-'));
+  fs.rmdirSync(WT_A);
+  runGit(['worktree', 'add', '-q', WT_A, '-b', 't743-bare-a'], BARE);
+  const WT_B = fs.mkdtempSync(path.join(os.tmpdir(), 't743-bare-wt-b-'));
+  fs.rmdirSync(WT_B);
+  runGit(['worktree', 'add', '-q', WT_B, '-b', 't743-bare-b'], BARE);
+
+  const worktrees = listGitWorktrees(WT_A);
+  assert.strictEqual(worktrees[0].bare, true, 'Test 18 setup FAIL: expected the first (primary) entry to be reported bare');
+
+  writeFixture(WT_B, 'T-982', 'in_progress');
+  writeAdoptedProcessState(WT_B, 'T-743 bare-layout sibling worktree');
+
+  const WT_A_SUBDIR = path.join(WT_A, 'nested', 'deep');
+  fs.mkdirSync(WT_A_SUBDIR, { recursive: true });
+
+  // Target = the bare primary itself, and target = a sibling worktree, from
+  // both the worktree root and a subdirectory of it: none may block via (d).
+  for (const target of [BARE, WT_B]) {
+    for (const [label, callerCwd] of [['worktree root', WT_A], ['worktree subdirectory', WT_A_SUBDIR]]) {
+      const unit = checkNeverAProjectRoot(target, { cwd: callerCwd });
+      assert.notStrictEqual(unit.discriminator, 'caller_in_linked_worktree', `Test 18 FAIL: the bare-primary layout must never block via discriminator (d) (target=${target}, cwd=${label})`);
+      assert.strictEqual(unit.blocked, false, `Test 18 FAIL: the bare-primary layout must proceed (target=${target}, cwd=${label})`);
+    }
+  }
+
+  const r = runSetStrategyNote(['a legitimate note in a bare-primary layout'], WT_A_SUBDIR, envFor(WT_B));
+  assert.strictEqual(r.status, 0, `Test 18 FAIL: expected exit 0, got ${r.status}. stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+  assert.ok(!r.stdout.includes('REFUSED'), `Test 18 FAIL: the bare-primary layout must not be refused. stdout:\n${r.stdout}`);
+  assert.ok(readUtf8(path.join(WT_B, 'PROCESS_STATE.json')).includes('a legitimate note in a bare-primary layout'), 'Test 18 FAIL: the write must actually land in the bare layout');
+
+  console.log('Test 18 (FALSE-POSITIVE 3) passed: a bare-primary layout proceeds for every in-repo target from both a worktree root and a subdirectory (bare-primary exemption), and --set-strategy-note actually writes');
+
+  fs.rmSync(WT_A, { recursive: true, force: true });
+  fs.rmSync(WT_B, { recursive: true, force: true });
+  runGit(['worktree', 'prune'], BARE);
+  fs.rmSync(BARE, { recursive: true, force: true });
+  fs.rmSync(SRC, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// Part 19 — FALSE-POSITIVE 4: one real mutating ritual on a validly-adopted
+// primary checkout, run from that primary's own cwd, proceeds unrefused. Uses
+// --set-strategy-note (the escape script itself) and --set-status (a
+// full BACKLOG/TASK_STATUS-writing ritual), both against a repo whose primary
+// is its ONLY worktree — the ordinary single-checkout shape.
+// ---------------------------------------------------------------------------
+{
+  const REPO = fs.mkdtempSync(path.join(os.tmpdir(), 't743-canonical-shape-'));
+  initGitRepoWithCommit(REPO);
+  writeFixture(REPO, 'T-983', 'in_progress');
+  writeAdoptedProcessState(REPO, 'T-743 single-checkout adopted repo');
+
+  const unit = checkNeverAProjectRoot(REPO, { cwd: REPO });
+  assert.strictEqual(unit.blocked, false, 'Test 19 FAIL: an ordinary single-checkout repo operated on from its own cwd must not be blocked');
+
+  const noteResult = runSetStrategyNote(['a real ritual run from the primary cwd'], REPO, envFor(REPO));
+  assert.strictEqual(noteResult.status, 0, `Test 19 FAIL: --set-strategy-note expected exit 0, got ${noteResult.status}. stderr:\n${noteResult.stderr}`);
+  assert.ok(!noteResult.stdout.includes('REFUSED'), `Test 19 FAIL: --set-strategy-note must not be refused. stdout:\n${noteResult.stdout}`);
+  assert.ok(readUtf8(path.join(REPO, 'PROCESS_STATE.json')).includes('a real ritual run from the primary cwd'), 'Test 19 FAIL: --set-strategy-note must actually write');
+
+  const statusResult = runSetStatus(['T-983', 'dev_done'], REPO, envFor(REPO));
+  assert.ok(!statusResult.stdout.includes('REFUSED'), `Test 19 FAIL: --set-status must not be refused from the primary cwd. stdout:\n${statusResult.stdout}`);
+  assert.ok(readUtf8(path.join(REPO, 'BACKLOG.md')).includes('**Status:** dev_done'), 'Test 19 FAIL: --set-status must actually update Status from the primary cwd');
+
+  console.log('Test 19 (FALSE-POSITIVE 4) passed: real mutating rituals (--set-strategy-note and --set-status) on an adopted primary checkout, run from that primary\'s own cwd, proceed unrefused and write');
+  fs.rmSync(REPO, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// Part 20 — unit: discriminator (d) degrades silently to not-blocked on a
+// non-git cwd, a removed cwd, and an empty-string cwd.
+// ---------------------------------------------------------------------------
+{
+  const target = fs.mkdtempSync(path.join(os.tmpdir(), 't743-degrade-target-'));
+  writeAdoptedProcessState(target, 'T-743 degrade-path target');
+
+  const nonGitCwd = fs.mkdtempSync(path.join(os.tmpdir(), 't743-degrade-cwd-'));
+  assert.strictEqual(gitWorktreeToplevel(nonGitCwd), null, 'Test 20 FAIL: gitWorktreeToplevel() must return null for a non-git directory');
+  let r1;
+  assert.doesNotThrow(() => { r1 = checkNeverAProjectRoot(target, { cwd: nonGitCwd }); }, 'Test 20 FAIL: a non-git cwd must never throw');
+  assert.strictEqual(r1.blocked, false, 'Test 20 FAIL: a non-git cwd must degrade to not-blocked');
+
+  fs.rmSync(nonGitCwd, { recursive: true, force: true });
+  assert.strictEqual(gitWorktreeToplevel(nonGitCwd), null, 'Test 20 FAIL: gitWorktreeToplevel() must return null for a removed directory');
+  let r2;
+  assert.doesNotThrow(() => { r2 = checkNeverAProjectRoot(target, { cwd: nonGitCwd }); }, 'Test 20 FAIL: a removed cwd must never throw');
+  assert.strictEqual(r2.blocked, false, 'Test 20 FAIL: a removed cwd must degrade to not-blocked');
+
+  let r3;
+  assert.doesNotThrow(() => { r3 = checkNeverAProjectRoot(target, { cwd: '' }); }, 'Test 20 FAIL: an empty-string cwd must never throw');
+  assert.strictEqual(r3.blocked, false, 'Test 20 FAIL: an empty-string cwd must degrade to not-blocked');
+
+  console.log('Test 20 passed: discriminator (d) degrades silently to not-blocked on a non-git cwd, a removed cwd, and an empty-string cwd');
+  fs.rmSync(target, { recursive: true, force: true });
+}
+
+console.log('\nAll T-624/T-670/T-743 assertions passed.');

@@ -120,7 +120,21 @@ function gitHeadPathExists(root, name) {
 function main() {
   printRepoIdentityHeader(ROOT, { mutating: true });
 
-  const rootGuard = guardMutatingRoot(ROOT, '--integrate');
+  // T-743 round 2: `--integrate` is the single adjudicated exemption from
+  // discriminator (d) (the caller-in-linked-worktree refusal). It satisfies
+  // all three conjuncts of the exemption predicate documented on
+  // checkNeverAProjectRoot(): (i) every git subprocess below is explicitly
+  // cwd-pinned to ROOT, so this command has no exposure to the vector (d)
+  // targets; (ii) it writes no state artifacts (see `.claude/rules/scripts.md`,
+  // which already records that --integrate "is NOT an artifact writer in the
+  // same sense"); (iii) the worktree-integration ritual actively MANDATES
+  // worktree-proximate invocation (inspect the worktree, then integrate), so
+  // refusing a worktree cwd would break a legitimate invocation rather than
+  // catch an escape. The exemption disables (d) ONLY — discriminators (a),
+  // (b) and (c) still apply, so a resolved ROOT that IS a linked worktree
+  // continues to refuse via (c). A second exemption requires a
+  // docs/core/GATE_LEDGER.md amendment, not just another call site.
+  const rootGuard = guardMutatingRoot(ROOT, '--integrate', { skipCallerWorktreeCheck: true });
   if (rootGuard.blocked) {
     process.exitCode = 1;
     return;

@@ -224,6 +224,28 @@ function parseBudgetSectionMaxTurns(sectionBody) {
 }
 
 // ---------------------------------------------------------------------------
+// T-733: architect "Model self-report" section extraction
+// ---------------------------------------------------------------------------
+
+const MODEL_SELF_REPORT_HEADING_ARCHITECT = '## Model self-report';
+const MODEL_SELF_REPORT_HEADING_SPEC = '### Model self-report';
+const MODEL_SELF_REPORT_PHRASE_RE = /`(Model self-report:[^`]+)`/;
+
+// Extract the body of a named heading's section (everything up to the next
+// heading matching boundaryRe, or end of file), or null when the heading is
+// absent. Generalizes extractBudgetAwarenessSection() to an arbitrary
+// heading string and boundary pattern, since AGENT_SPEC.md nests its
+// "Model self-report" copy one level deeper (### under ## Model selection)
+// than the architect spec's own (## top-level).
+function extractSectionByHeading(fileText, heading, boundaryRe) {
+  const headingIdx = fileText.indexOf(heading);
+  if (headingIdx === -1) return null;
+  const afterHeading = fileText.slice(headingIdx + heading.length);
+  const boundaryMatch = afterHeading.match(boundaryRe);
+  return boundaryMatch ? afterHeading.slice(0, boundaryMatch.index) : afterHeading;
+}
+
+// ---------------------------------------------------------------------------
 // Parse docs/AGENT_SPEC.md per-role model + maxTurns policy
 // ---------------------------------------------------------------------------
 
@@ -391,6 +413,68 @@ function main() {
       failures.push(
         `[${spec.name}] budget-awareness: ${spec.file}'s "${BUDGET_HEADING}" section states ` +
           `maxTurns: ${bodyMaxTurns} but frontmatter maxTurns is ${spec.maxTurns}`
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // T-733: architect "Model self-report" section + phrase-parity check
+  // ---------------------------------------------------------------------
+
+  const architectSpec = agentSpecs.find((s) => s.name === 'architect');
+  assert.ok(
+    architectSpec,
+    'No .claude/agents/architect.md frontmatter found (name: architect)'
+  );
+
+  const architectModelSelfReportSection = extractSectionByHeading(
+    architectSpec.text,
+    MODEL_SELF_REPORT_HEADING_ARCHITECT,
+    /\n## /
+  );
+
+  if (architectModelSelfReportSection === null) {
+    failures.push(
+      `[architect] model-self-report: ${architectSpec.file} has no ` +
+        `"${MODEL_SELF_REPORT_HEADING_ARCHITECT}" section (required — see ` +
+        'docs/AGENT_SPEC.md "Model self-report")'
+    );
+  } else {
+    const specModelSelfReportSection = extractSectionByHeading(
+      specText,
+      MODEL_SELF_REPORT_HEADING_SPEC,
+      /\n### |\n## /
+    );
+    assert.ok(
+      specModelSelfReportSection !== null,
+      `AGENT_SPEC.md: no "${MODEL_SELF_REPORT_HEADING_SPEC}" section found`
+    );
+
+    const architectPhraseMatch = architectModelSelfReportSection.match(
+      MODEL_SELF_REPORT_PHRASE_RE
+    );
+    const specPhraseMatch = specModelSelfReportSection.match(
+      MODEL_SELF_REPORT_PHRASE_RE
+    );
+
+    if (!architectPhraseMatch) {
+      failures.push(
+        `[architect] model-self-report: ${architectSpec.file}'s ` +
+          `"${MODEL_SELF_REPORT_HEADING_ARCHITECT}" section has no backticked ` +
+          '`Model self-report: <model-name>` literal'
+      );
+    } else if (!specPhraseMatch) {
+      failures.push(
+        'AGENT_SPEC.md: model-self-report: ' +
+          `"${MODEL_SELF_REPORT_HEADING_SPEC}" section has no backticked ` +
+          '`Model self-report: <model-name>` literal'
+      );
+    } else if (architectPhraseMatch[1].trim() !== specPhraseMatch[1].trim()) {
+      failures.push(
+        `[architect] model-self-report: ${architectSpec.file} states ` +
+          `"${architectPhraseMatch[1].trim()}" but AGENT_SPEC.md's ` +
+          `"${MODEL_SELF_REPORT_HEADING_SPEC}" section states ` +
+          `"${specPhraseMatch[1].trim()}"`
       );
     }
   }

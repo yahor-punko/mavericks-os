@@ -24,6 +24,8 @@ If the block above contained text, read it carefully — it carries mid-session 
 ---
 
 Read the JSON above. Key fields:
+- `initiative` — the current top-level goal this work serves
+- `wave_goal` — one-line definition of done for the current wave (may be absent or null)
 - `stage` — where the initiative currently stands
 - `active_slices` — what is in flight and who owns it
 - `next_action` — what to do next
@@ -77,6 +79,18 @@ If `UPDATE_AVAILABLE` is present, surface a callout immediately after the permis
 ```
 
 Render the value verbatim — it is a self-describing sentence covering both the update-available and version-divergence cases, so no case-specific logic is needed. Render nothing when the field is absent.
+
+If `initiative` is present, show it as one line of context after the wave digest header and any permission-mode/version callouts already rendered above:
+
+```
+Initiative: {initiative}
+```
+
+If `wave_goal` is present and non-null, show it as one line of context immediately after the initiative line (or in its place if `initiative` is absent):
+
+```
+Wave goal: {wave_goal}
+```
 
 If `wave_summary` is present, show it as one line of context:
 

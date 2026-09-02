@@ -222,7 +222,42 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
-MAVERICKS="\${MAVERICKS_HOME:-$( [ -d "$HOME/.mavericks" ] && printf %s "$HOME/.mavericks" || printf %s "$HOME/Documents/mavericks" )}/scripts"
+# Framework-root resolution order (T-736):
+#   1. MAVERICKS_HOME env — unconditional override.
+#   2. The install-time hint baked in below (the framework directory this
+#      wrapper was actually generated from), used only when it still probes
+#      framework-shaped (a scripts/mavp-validator.js under it) — matching the
+#      hook command templates' project-local probe idiom.
+#   3. $HOME/.mavericks, if it exists.
+#   4. $HOME/Documents/mavericks, if it exists.
+# A single terminal check on the resolved root covers all four branches
+# (including the env override) and refuses loudly, naming every candidate
+# tried, instead of letting "set -euo pipefail" surface a raw node
+# module-loader stack trace for a path the operator may never have had.
+MAVERICKS_HINT="${mavericksDirHint}"
+if [ -n "\${MAVERICKS_HOME:-}" ]; then
+  MAVERICKS_ROOT="$MAVERICKS_HOME"
+elif [ -f "$MAVERICKS_HINT/scripts/mavp-validator.js" ]; then
+  MAVERICKS_ROOT="$MAVERICKS_HINT"
+elif [ -d "$HOME/.mavericks" ]; then
+  MAVERICKS_ROOT="$HOME/.mavericks"
+elif [ -d "$HOME/Documents/mavericks" ]; then
+  MAVERICKS_ROOT="$HOME/Documents/mavericks"
+else
+  MAVERICKS_ROOT=""
+fi
+
+if [ -z "$MAVERICKS_ROOT" ] || [ ! -d "$MAVERICKS_ROOT" ]; then
+  echo "mavp-operator: could not resolve the mavericks framework directory. Tried:" >&2
+  echo "  MAVERICKS_HOME env:        \${MAVERICKS_HOME:-<unset>}" >&2
+  echo "  install-time hint:        $MAVERICKS_HINT" >&2
+  echo "  \$HOME/.mavericks:          $HOME/.mavericks" >&2
+  echo "  \$HOME/Documents/mavericks: $HOME/Documents/mavericks" >&2
+  echo "Set MAVERICKS_HOME to the mavericks framework directory and retry." >&2
+  exit 1
+fi
+
+MAVERICKS="$MAVERICKS_ROOT/scripts"
 
 export MAVERICKS_PROJECT_ROOT="$PROJECT_ROOT"
 export MAVERICKS_SCRIPTS="$MAVERICKS"
@@ -338,6 +373,10 @@ elif [[ "\${1-}" == "--integrate" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-integrate.js" "$@"
 elif [[ "\${1-}" == "--reflect-skill" ]]; then
+  if [[ -z "\${2-}" ]]; then
+    echo "Usage: mavp-operator --reflect-skill <role>" >&2
+    exit 1
+  fi
   ROLE="\$2"
   shift 2
   node "$MAVERICKS/mavp-skill-reflect.js" "\$ROLE"
@@ -1437,7 +1476,7 @@ async function main() {
         if (existedWrapper && isCanonicalSelfReferentialWrapperContent(existingWrapperContent)) {
           console.log(`  ${RED}${BOLD}WARNING:${RESET} ${RED}scripts/${BASH_FILE} is in canonical self-referential form (dispatches via $SCRIPT_DIR, no MAVERICKS_PROJECT_ROOT export) — refusing to downgrade it to the adopter form. If this directory is really meant to be an adopter project, remove the existing wrapper first.${RESET}`);
         } else {
-          writeExecutableAtomicSync(wrapperDst, buildBashWrapper(FRAMEWORK_DIR));
+          writeExecutableAtomicSync(wrapperDst, buildBashWrapper(path.join(FRAMEWORK_DIR, '..')));
           const label = existedWrapper ? `${YELLOW}updated${RESET}` : `${GREEN}new${RESET}   `;
           console.log(`  ${label}  scripts/${BASH_FILE} ${DIM}(bash wrapper)${RESET}`);
           updatedCount++;
@@ -1761,7 +1800,7 @@ async function main() {
     console.log(`  ${DIM}skipped${RESET}  ${BASH_FILE} ${DIM}(self-install — this IS the canonical wrapper)${RESET}`);
   } else if (needsBash) {
     const destPath = path.join(targetScripts, BASH_FILE);
-    writeExecutableAtomicSync(destPath, buildBashWrapper(FRAMEWORK_DIR));
+    writeExecutableAtomicSync(destPath, buildBashWrapper(path.join(FRAMEWORK_DIR, '..')));
     console.log(`  ${GREEN}✓${RESET} ${BASH_FILE}`);
   }
 
@@ -2030,4 +2069,5 @@ module.exports = {
   mergeVscodeWorktreeExclusions,
   VSCODE_WORKTREES_EXCLUDE_PATTERN,
   VSCODE_WORKTREES_WATCHER_EXCLUDE_PATTERN,
+  buildBashWrapper,
 };

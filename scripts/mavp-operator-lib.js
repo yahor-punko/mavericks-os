@@ -99,7 +99,7 @@ const NEVER_PROJECT_ROOT_OVERRIDE_ENV = 'MAVERICKS_ALLOW_NEVER_PROJECT_ROOT';
  * (non-primary) git worktree of a real project — so mutating ritual commands
  * can refuse before writing to it.
  *
- * Three independent discriminators, any one is sufficient:
+ * Four independent discriminators, any one is sufficient:
  *   (a) <root>/PROCESS_STATE.json EXISTS and its `mavericks_version` field is
  *       exactly the literal shipped placeholder (NEVER_PROJECT_VERSION_PLACEHOLDER).
  *       A MISSING or unparsable PROCESS_STATE.json never triggers (a) — only
@@ -116,18 +116,77 @@ const NEVER_PROJECT_ROOT_OVERRIDE_ENV = 'MAVERICKS_ALLOW_NEVER_PROJECT_ROOT';
  *       adopter layout). A root that is not a git repo, or where git itself
  *       fails, degrades to listGitWorktrees() returning `[]` (never throws),
  *       so (c) silently does not fire.
+ *   (d) T-743: the CALLER's own worktree top-level realpath-equals a NON-FIRST
+ *       entry of listGitWorktrees() (i.e. the caller is sitting inside a
+ *       linked worktree) of a repo whose first (primary) entry is not bare,
+ *       AND that primary's realpath equals `resolvedRoot`. Discriminators
+ *       (a)-(c) judge only the write TARGET, and a primary checkout is a
+ *       perfectly valid target — it is exactly what the Main Agent
+ *       legitimately writes to. The distinguishing fact for this vector is
+ *       the CALLER's location: a worktree sub-agent invoking a gated operator
+ *       script by absolute path into the shared primary checkout. That
+ *       escaped once (a strategy note written into the primary checkout's
+ *       tracked PROCESS_STATE.json), caught only by the agent's own
+ *       post-edit self-verification.
  *
- * Both the home directory and the resolved root are injectable via `options`
- * so tests never need a real ~/.mavericks or a real never-installed tree
- * outside a temp fixture.
+ *       THE CALLER SIDE MUST RESOLVE ITS OWN TOP-LEVEL, never compare `cwd`
+ *       for exact equality against a worktree-list entry: `git worktree list`
+ *       reports worktree ROOTS, while a sub-agent's cwd is frequently a
+ *       SUBDIRECTORY of its worktree, so exact equality would ship a
+ *       discriminator that passes its own happy-path test and never fires in
+ *       the field. `gitWorktreeToplevel()` runs `git rev-parse
+ *       --show-toplevel` from the caller's cwd, which is exact (no prefix
+ *       matching, so no sibling directory sharing a name prefix can ever
+ *       match) and boundary-correct for any depth of subdirectory.
+ *
+ *       Deliberately NOT fired for: a caller at the primary's own cwd (the
+ *       primary is the FIRST entry, never a linked match); a cross-repo call
+ *       (cwd inside repo X's linked worktree while the target is a separate
+ *       repo Y — X's primary never realpath-equals Y); a bare-primary layout
+ *       (same exemption (c) makes). Any git failure or a non-repo cwd
+ *       degrades silently to not-blocked.
+ *
+ *       ACCEPTED FRICTION, and its one adjudicated exception. The friction
+ *       case: the Main Agent inspects a worktree, its shell cwd persists, and
+ *       the next mutating command targets the primary by absolute path — (d)
+ *       fires on a correctly-targeted write, and recovery is one `cd` or the
+ *       documented override. That acceptance stands for the 17 gated commands
+ *       that are state-artifact rituals: those are Main-Agent-only by rule, a
+ *       worktree sub-agent's cwd is inside a linked worktree 100% of the time
+ *       by construction, so ANY worktree-cwd invocation of them targeting the
+ *       primary is unauthorized per se — a structural population, not a drift
+ *       event. `--integrate` is the single adjudicated EXEMPTION (T-743 round
+ *       2), opted out via `options.skipCallerWorktreeCheck` at its own call
+ *       site because refusing it would break a legitimate cwd-independent
+ *       invocation that the worktree-integration ritual actively mandates.
+ *
+ *       THE EXEMPTION PREDICATE — the growth control. A gated command may
+ *       pass `skipCallerWorktreeCheck` only if ALL THREE conjuncts hold:
+ *         (i)   every git subprocess it spawns is explicitly cwd-pinned to
+ *               ROOT (so it has no exposure to the vector (d) targets);
+ *         (ii)  it writes no state artifacts; and
+ *         (iii) its documented ritual mandates worktree-proximate invocation.
+ *       Exactly one command satisfies this today. Membership is a call-site
+ *       declaration, enumerable by `grep -n skipCallerWorktreeCheck scripts/`,
+ *       and a second member requires a `docs/core/GATE_LEDGER.md` amendment.
+ *       The exemption disables ONLY (d): a resolved ROOT that IS a linked
+ *       worktree still refuses via (c), even for an exempt command.
+ *
+ * The home directory, the resolved root, and the caller's cwd are all
+ * injectable via `options` so tests never need a real ~/.mavericks, a real
+ * never-installed tree, or a real process-wide chdir outside a temp fixture.
  *
  * @param {string} root - Absolute path to the project root being checked.
- * @param {{homeDir?: string}} [options] - homeDir override for tests (defaults
- *   to os.homedir()).
- * @returns {{blocked: boolean, discriminator: ('placeholder'|'dot_mavericks'|'linked_worktree'|null), resolvedRoot: string, primaryWorktreePath?: string}}
+ * @param {{homeDir?: string, cwd?: string, skipCallerWorktreeCheck?: boolean}} [options] -
+ *   homeDir override for tests (defaults to os.homedir()), cwd override for
+ *   tests (defaults to process.cwd()), and skipCallerWorktreeCheck to disable
+ *   ONLY discriminator (d) — see the exemption predicate above; it never
+ *   affects (a), (b) or (c).
+ * @returns {{blocked: boolean, discriminator: ('placeholder'|'dot_mavericks'|'linked_worktree'|'caller_in_linked_worktree'|null), resolvedRoot: string, primaryWorktreePath?: string, callerWorktreePath?: string}}
  */
 function checkNeverAProjectRoot(root, options = {}) {
   const homeDir = options && options.homeDir !== undefined ? options.homeDir : os.homedir();
+  const callerCwd = options && options.cwd !== undefined ? options.cwd : process.cwd();
   const resolvedRoot = safeRealpath(root);
 
   // Discriminator (b): root resolves to $HOME/.mavericks (or injected homeDir).
@@ -181,7 +240,80 @@ function checkNeverAProjectRoot(root, options = {}) {
     // degrade silently - never let the guard itself throw
   }
 
+  // Discriminator (d) — T-743: the CALLER sits inside a linked worktree and
+  // is targeting that same repo's PRIMARY checkout. Evaluated last so the
+  // three target-side discriminators keep reporting their own, more specific
+  // diagnosis when they also apply. Every step degrades to not-blocked:
+  // gitWorktreeToplevel() returns null on any git failure or non-repo cwd,
+  // and listGitWorktrees() returns [] on the same.
+  //
+  // skipCallerWorktreeCheck opts a call site out of (d) ONLY — the three
+  // target-side discriminators above have already run unconditionally by this
+  // point, so an exempt command still refuses a ROOT that is itself a linked
+  // worktree via (c). Admission is governed by the three-conjunct exemption
+  // predicate in this function's doc comment, not by a name list.
+  if (options && options.skipCallerWorktreeCheck) {
+    return { blocked: false, discriminator: null, resolvedRoot };
+  }
+
+  try {
+    const callerToplevel = gitWorktreeToplevel(callerCwd);
+    if (callerToplevel) {
+      const callerWorktrees = listGitWorktrees(callerToplevel);
+      if (callerWorktrees.length > 1) {
+        const primary = callerWorktrees[0];
+        if (!primary.bare) {
+          const resolvedCallerToplevel = safeRealpath(callerToplevel);
+          const callerIsLinked = callerWorktrees
+            .slice(1)
+            .some((wt) => safeRealpath(wt.path) === resolvedCallerToplevel);
+          if (callerIsLinked && safeRealpath(primary.path) === resolvedRoot) {
+            return {
+              blocked: true,
+              discriminator: 'caller_in_linked_worktree',
+              resolvedRoot,
+              primaryWorktreePath: primary.path,
+              callerWorktreePath: callerToplevel,
+            };
+          }
+        }
+      }
+    }
+  } catch {
+    // degrade silently - never let the guard itself throw
+  }
+
   return { blocked: false, discriminator: null, resolvedRoot };
+}
+
+/**
+ * T-743: resolve the top-level directory of the git worktree containing
+ * `dir`, via `git rev-parse --show-toplevel`. Returns null (never throws) on
+ * any git failure, a non-repo directory, a directory that does not exist, or
+ * an empty answer (e.g. inside a bare repo's git dir, which has no worktree).
+ *
+ * This is the caller-side resolution step discriminator (d) depends on. It
+ * exists as its own function precisely because the naive alternative — using
+ * `process.cwd()` directly and comparing it for equality against a
+ * `git worktree list` entry — is silently wrong: worktree-list entries are
+ * worktree ROOTS, and a caller's cwd is frequently a SUBDIRECTORY of its
+ * worktree, so the equality check would essentially never match in the field.
+ *
+ * @param {string} dir - Absolute path to any directory (need not be a repo).
+ * @returns {string|null} The worktree top-level path, or null.
+ */
+function gitWorktreeToplevel(dir) {
+  try {
+    const output = cp.execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: dir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const trimmed = (output || '').trim();
+    return trimmed ? trimmed : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -191,13 +323,19 @@ function checkNeverAProjectRoot(root, options = {}) {
  * string. On refusal, prints the refusal message to BOTH stdout and stderr
  * (a stdout-only pipe must not be able to cut it) naming the resolved path,
  * the matched discriminator (for discriminator (c), also the primary
- * checkout path), and the override env var.
+ * checkout path; for discriminator (d), the caller's worktree path, the
+ * targeted primary path, and a one-line remedy), and the override env var.
+ *
+ * The override check stays FIRST, before any discriminator runs — T-743 added
+ * discriminator (d) behind it without touching that ordering.
  *
  * @param {string} root - Absolute path to the project root being operated on.
  * @param {string} commandName - The mutating command's flag name (e.g. "--set-status"),
  *   used only in the refusal message.
- * @param {{homeDir?: string, env?: Record<string,string>}} [options] - injectable
- *   homeDir (see checkNeverAProjectRoot) and env (defaults to process.env) for tests.
+ * @param {{homeDir?: string, cwd?: string, skipCallerWorktreeCheck?: boolean, env?: Record<string,string>}} [options] -
+ *   injectable homeDir, cwd and skipCallerWorktreeCheck (all forwarded to
+ *   checkNeverAProjectRoot — see its exemption predicate before passing the
+ *   last one) and env (defaults to process.env) for tests.
  * @returns {{blocked: boolean, overridden?: boolean, discriminator?: string, resolvedRoot?: string}}
  */
 function guardMutatingRoot(root, commandName, options = {}) {
@@ -216,14 +354,24 @@ function guardMutatingRoot(root, commandName, options = {}) {
     ? `root resolves to $HOME/.mavericks (the adopter-resolved framework-source clone)`
     : check.discriminator === 'linked_worktree'
     ? `root is a linked (non-primary) git worktree; the primary checkout is at ${check.primaryWorktreePath}`
+    : check.discriminator === 'caller_in_linked_worktree'
+    ? `caller is inside the linked (non-primary) git worktree at ${check.callerWorktreePath}, targeting that repo's primary checkout at ${check.primaryWorktreePath}`
     : `PROCESS_STATE.json's mavericks_version is the shipped placeholder "${NEVER_PROJECT_VERSION_PLACEHOLDER}" (never installed/adopted)`;
 
-  const message = [
+  const messageLines = [
     `REFUSED: ${commandName} refuses to run against a never-a-project repo root.`,
     `  resolved path: ${check.resolvedRoot}`,
     `  matched discriminator: ${discriminatorText}`,
-    `  override: set ${NEVER_PROJECT_ROOT_OVERRIDE_ENV}=1 to permit this write for the rare sanctioned case.`,
-  ].join('\n');
+  ];
+  if (check.discriminator === 'caller_in_linked_worktree') {
+    messageLines.push(
+      `  remedy: cd into ${check.primaryWorktreePath} and re-run ${commandName} there, or re-target the command at your own worktree.`
+    );
+  }
+  messageLines.push(
+    `  override: set ${NEVER_PROJECT_ROOT_OVERRIDE_ENV}=1 to permit this write for the rare sanctioned case.`
+  );
+  const message = messageLines.join('\n');
 
   console.log(message);
   try {
@@ -5042,6 +5190,7 @@ module.exports = {
   isTaskHeadingFor,
   isValidHashFormat,
   isWorktreeDirty,
+  gitWorktreeToplevel,
   listGitWorktrees,
   locateTaskBlock,
   lookupTaskTitle,

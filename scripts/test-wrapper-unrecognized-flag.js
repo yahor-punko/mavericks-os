@@ -95,12 +95,52 @@ function assertWrapperBehavior(wrapperPath, label) {
   console.log(`Assertion 3 passed (${label}): --nonexistent-flag exit=1, names it, no dashboard`);
 }
 
+// Regression test: T-737 — both wrappers' `--reflect-skill` dispatch reads
+// $2 bare, immediately before `shift 2`, under `set -euo pipefail`. Omitting
+// the role argument previously aborted with bash's own "unbound variable"
+// message instead of a usage line. Assert the guard runs BEFORE the shift
+// (a `shift 2` with fewer than 2 positional args left is itself fatal under
+// `set -e`, so a guard placed after it could never execute) and that the
+// unbound-variable text is gone from the refusal output.
+function assertReflectSkillGuard(wrapperPath, label) {
+  // No-role invocation: must exit 1 with a usage message on stderr, and
+  // must NOT surface bash's unbound-variable abort text anywhere.
+  const noRole = run(wrapperPath, ['--reflect-skill'], { cwd: path.dirname(path.dirname(wrapperPath)) });
+  assert.strictEqual(noRole.code, 1, `FAIL (${label}): --reflect-skill with no role exited ${noRole.code}, expected 1. stdout:\n${noRole.stdout}\nstderr:\n${noRole.stderr}`);
+  assert.ok(
+    noRole.stderr.includes('--reflect-skill') && noRole.stderr.includes('<role>'),
+    `FAIL (${label}): usage message missing or does not name --reflect-skill/<role>. stderr:\n${noRole.stderr}`
+  );
+  assert.ok(
+    !(noRole.stdout + noRole.stderr).includes('unbound variable'),
+    `FAIL (${label}): refusal output still contains bash's unbound-variable text:\n${noRole.stdout}${noRole.stderr}`
+  );
+  console.log(`Assertion 4 passed (${label}): --reflect-skill with no role exits 1, usage on stderr, no unbound-variable text`);
+
+  // With-role invocation: must get PAST the guard and reach the node
+  // dispatch (which then fails downstream on a bogus role — that failure
+  // is fine and expected; the point is it is no longer the guard itself,
+  // and no unbound-variable text appears here either).
+  const withRole = run(wrapperPath, ['--reflect-skill', 'nonexistent-role'], { cwd: path.dirname(path.dirname(wrapperPath)) });
+  assert.ok(
+    !(withRole.stdout + withRole.stderr).includes('unbound variable'),
+    `FAIL (${label}): --reflect-skill <role> path still contains bash's unbound-variable text:\n${withRole.stdout}${withRole.stderr}`
+  );
+  assert.notStrictEqual(
+    withRole.stderr.trim(),
+    'Usage: mavp-operator --reflect-skill <role>',
+    `FAIL (${label}): --reflect-skill <role> was incorrectly rejected by the no-role guard`
+  );
+  console.log(`Assertion 5 passed (${label}): --reflect-skill <role> dispatches past the guard (no unbound-variable text, not rejected as missing)`);
+}
+
 function makeScratchDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
 // --- Canonical wrapper (scripts/mavp-operator, run in place) ---
 assertWrapperBehavior(CANONICAL_WRAPPER, 'canonical');
+assertReflectSkillGuard(CANONICAL_WRAPPER, 'canonical');
 
 // --- Adopter wrapper (freshly generated via mavp-install.js) ---
 const scratch = makeScratchDir('mavp-wrapper-unrecognized-flag-');
@@ -109,8 +149,10 @@ try {
   const adopterWrapper = path.join(scratch, 'scripts', 'mavp-operator');
   assert.ok(fs.existsSync(adopterWrapper), 'FAIL: fresh install did not create scripts/mavp-operator');
   assertWrapperBehavior(adopterWrapper, 'adopter');
+  assertReflectSkillGuard(adopterWrapper, 'adopter');
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
 console.log('\nAll T-679 wrapper-unrecognized-flag assertions passed.');
+console.log('All T-737 --reflect-skill no-role guard assertions passed.');

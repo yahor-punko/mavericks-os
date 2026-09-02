@@ -146,6 +146,10 @@ elif [[ "${1-}" == "--unpark-wave" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-park-wave.js" --unpark-wave "$@"
 elif [[ "${1-}" == "--reflect-skill" ]]; then
+  if [[ -z "${2-}" ]]; then
+    echo "Usage: mavp-operator --reflect-skill <role>" >&2
+    exit 1
+  fi
   ROLE="$2"
   shift 2
   node "$SCRIPT_DIR/mavp-skill-reflect.js" "$ROLE"

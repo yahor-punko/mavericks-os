@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { printRepoIdentityHeader, guardMutatingRoot } = require('./mavp-operator-lib.js');
 
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
 
 printRepoIdentityHeader(ROOT, { mutating: true });

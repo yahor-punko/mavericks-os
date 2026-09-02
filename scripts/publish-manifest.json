@@ -217,6 +217,7 @@
     "scripts/test-wave-summary-scope.js",
     "scripts/test-worktree-hygiene.js",
     "scripts/test-wrapper-flag-parity.js",
+    "scripts/test-wrapper-framework-root-resolution.js",
     "scripts/test-wrapper-unrecognized-flag.js",
     "skills-lock.json",
     "skills/frontend-design",

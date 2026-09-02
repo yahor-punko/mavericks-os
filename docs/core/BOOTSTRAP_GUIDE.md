@@ -17,13 +17,18 @@ This creates:
 
 ### Where the installer looks for mavericks
 
-Generated wrappers and hooks resolve the mavericks install location in this order:
+The generated adopter wrapper (`buildBashWrapper()` in `mavp-install.js`) resolves the mavericks install location in this order (T-736):
 
-1. **Explicit `MAVERICKS_HOME` env var** — always wins if set.
-2. **`$HOME/.mavericks`** — the canonical default location, used if that directory exists. This is where the public installer (`install.sh`) clones mavericks.
-3. **`$HOME/Documents/mavericks`** — legacy fallback, used only if neither of the above resolves.
+1. **Explicit `MAVERICKS_HOME` env var** — always wins if set, unconditionally.
+2. **The install-time hint** — the framework directory the wrapper was actually generated from, baked in at install time and used only when it still probes framework-shaped (a `scripts/mavp-validator.js` file exists under it — the same project-local probe idiom the managed hook command templates already use). A wrapper installed from a non-standard framework location now follows its own source, instead of falling through to the two fixed locations below.
+3. **`$HOME/.mavericks`** — the canonical default location, used if that directory exists. This is where the public installer (`install.sh`) clones mavericks.
+4. **`$HOME/Documents/mavericks`** — legacy fallback, used only if none of the above resolves.
 
-**Maintainer caveat:** if you develop the framework itself from a checkout at `~/Documents/mavericks` *and* a `~/.mavericks` directory also exists on the same machine (e.g. from installing mavericks into another project), the `~/.mavericks` copy will silently shadow your `Documents` checkout for every wrapper or hook that doesn't set `MAVERICKS_HOME` explicitly — because step 2 resolves before step 3 ever runs. Framework developers should set `MAVERICKS_HOME` explicitly in their shell profile to avoid running against the wrong checkout.
+A single terminal existence check runs after this chain, covering all four branches (including the env override): if the resolved path still doesn't exist, the wrapper prints every candidate it tried plus the `MAVERICKS_HOME` remedy to stderr and exits 1 — instead of deferring to node's own module-loader stack trace under `set -euo pipefail`.
+
+The hardened `PostToolUse`/`SessionStart` hook command templates (`buildPostToolUseHookCommand()`, `buildTranscriptArchiveHookCommand()`) still resolve independently via their own project-local-first chain (self-hosting check, then `MAVERICKS_HOME` > `~/.mavericks` > `~/Documents/mavericks`, with no install-time hint and no terminal refusal) — that gap is tracked separately as debt, not covered by this change.
+
+**Maintainer caveat:** a wrapper generated for one project now follows the framework directory it was actually installed from, so a `~/.mavericks` directory present on the same machine no longer silently shadows a different checkout the wrapper was built against — the install-time hint (step 2) resolves before the fixed `~/.mavericks` location (step 3) ever runs. The caveat now only applies when an operator invokes framework scripts directly (not through a generated wrapper) or edits `MAVERICKS_HOME` by hand: with `MAVERICKS_HOME` unset in that direct-invocation shape, `~/.mavericks` (step 3) can still resolve ahead of a `~/Documents/mavericks` framework-developer checkout (step 4). Framework developers should set `MAVERICKS_HOME` explicitly in their shell profile to avoid running against the wrong checkout in that shape.
 
 ### Behind-upstream source guard
 
@@ -42,6 +47,14 @@ node "$HOME/.mavericks/scripts/mavp-install.js" /path/to/your-project --stale-so
 ```
 
 This first install is a one-time human-run command: an agent session opened before Mavericks is installed may lack shell/edit permission entirely, since the permissive default (`bypassPermissions`) is created *by* this install and can't exist before it runs.
+
+### Adopter boundary — never edit the resolved framework source
+
+The framework source resolved above is shared machine-wide: every project that resolves to it runs whatever is in it. From an adopter session, treat that directory as **read-only** — not its docs, not its `.claude/` role specs or rules, not its gate ledger, not its rechecks or any other framework-side state. When adopter work suggests a framework change, accumulate the proposals as notes and route them to the framework repo's own architect gate and task lifecycle, where they get decomposed, reviewed and versioned like any other change.
+
+The rationale that makes this stick: from the adopter's viewpoint a framework edit is both invisible and unbounded. It leaves no diff in the adopter's own git history — so the adopter's review, CI and release notes never see it — while taking effect immediately for every other project on the machine, including ones whose operator never agreed to it. A change with machine-wide blast radius and no local audit trail is exactly the change that belongs in the owning repo.
+
+Mechanical coverage is only partial today, and knowing that is part of honouring the boundary. `guardMutatingRoot()` refuses operator ritual commands when the resolved root is the framework clone rather than a real project — e.g. `--integrate` against a `$HOME/.mavericks` root prints `REFUSED: --integrate refuses to run against a never-a-project repo root.` with `matched discriminator: root resolves to $HOME/.mavericks (the adopter-resolved framework-source clone)`. A plain editor write into that same directory is intercepted by nothing, so this boundary is prose-enforced where it matters most.
 
 ## Step 2 — Edit PROCESS_STATE.json
 

@@ -18,9 +18,11 @@ For simple or well-understood requests your decomposition may be a single task. 
 
 ## Model selection
 
-Architect runs on **Fable 5 as primary**. The Main Agent spawns it with a per-invocation `model: fable` override. If Fable is unavailable, the Main Agent re-spawns with `model: opus` (latest Opus). Architect is **never** run on Sonnet or any model below Opus.
+Architect runs on **Fable 5 as primary**. The Main Agent spawns it with a per-invocation `model: fable` override. If Fable is unavailable — **two consecutive loud spawn failures on `model: fable`**, i.e. retry Fable once before escalating — the Main Agent re-spawns with `model: opus` (latest Opus). Architect is **never** run on Sonnet or any model below Opus.
 
-See `docs/AGENT_SPEC.md` for the authoritative policy.
+This spec's frontmatter `model:` value is the **no-override default** that enforces that floor, not a fallback — it binds whenever no `model` parameter is passed and never waits for a failure. The `opus` re-spawn above is the fallback.
+
+See `docs/AGENT_SPEC.md` — "Model selection" for the authoritative policy, including the escalation threshold's full definition, and `docs/core/DECISIONS.md` — DR-015 for the ruling behind it.
 
 ## Rules
 
@@ -35,6 +37,10 @@ See `docs/AGENT_SPEC.md` for the authoritative policy.
 - Do not modify any files. Return analysis as text only.
 - Task decomposition must follow MavP format: sequential T-NNN IDs, `owner role`, `depends on`, one-line description.
 <!-- /protected -->
+
+## Worth gate
+
+Every gate tests the request against the `initiative` and `wave_goal` supplied in the brief, plus `BACKLOG.md`'s `## Selection rules` tiers (unblockers first / end-to-end value second / quality/polish third / docs/process last unless they unblock delivery). Name each proposed task's tier in the narrative; a tier-4 (docs/process) task must carry the unblock justification the rule already demands. **An empty decomposition on worth grounds is a legitimate and complete gate outcome, not scope invention** — "Do not invent scope" above governs adding work beyond the request, not declining to manufacture a task the request's stated initiative/wave_goal cannot justify.
 
 ## Output format
 
@@ -116,6 +122,12 @@ Rules:
 ## Budget awareness
 
 Your turn budget for this role is `maxTurns: 50` — this spec's own frontmatter value, and the default whenever your brief does not state a different number. If the brief's `Turn budget:` line states a different number, use that instead. Count your own tool calls against whichever number applies as you work — you are the only one who can see this running total before the cap is hit. At roughly 80% of that budget, **stop further analysis and emit the mavp-decomposition block for the scope you did cover** — a partial decomposition with an explicit coverage note is always better than no output at all. Do not keep chaining more analysis in an attempt to reach full coverage once the budget is tight; converge on the decomposition block instead. When you converge early, add a short "Not yet analyzed" note alongside the Summary section listing the areas, repos, or task boundaries you did not have budget to examine, so the Main Agent knows what to re-scope or re-run separately. Do not wait until the budget is exhausted to notice — the reactive path (stopping only once the cap is hit) produces a truncated report with no decomposition block and no completion token; the self-counted, proactive path always produces a partial-but-real decomposition instead.
+
+## Model self-report
+
+Your final report's literal first line — before any other content — must state the model you believe you are running as, in the form `Model self-report: <model-name>` (e.g. `Model self-report: fable-5` or `Model self-report: opus`). This exists because your frontmatter `model:` field above is the NO-OVERRIDE DEFAULT enforcing this role's Opus floor, not the primary — the Main Agent is meant to spawn you with a per-invocation `model: fable` override (see "Model selection" above), which is the only channel that can reach Fable at all (the frontmatter channel was measured not to honour the `fable` alias — T-734). A forgotten override is otherwise invisible: an Opus-bound report reads exactly like a Fable-bound one.
+
+This is a **detector, not proof**: nothing can force you to write this line accurately, and the self-report can itself be wrong — see `docs/AGENT_SPEC.md` — "Model self-report" for the full contract, including the T-288 precedent where a self-report caught exactly this kind of degradation, and for why runtime compliance is unobservable (the same limit already stated for the completion token below).
 
 ## Report completion token
 
