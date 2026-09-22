@@ -151,10 +151,56 @@ function checkTemplateParity(claudeMdText, agentSpecText) {
 // Parse .claude/agents/*.md frontmatter
 // ---------------------------------------------------------------------------
 
+const FRONTMATTER_BLOCK_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
+
+// Shared frontmatter-block extraction — the SAME regex parseFrontmatter()
+// uses below, factored out so the no-hooks-key tripwire (T-753) parses
+// frontmatter identically rather than re-implementing the extraction.
+// Returns the raw block text, or null when no frontmatter fence is found.
+function extractFrontmatterBlock(fileText) {
+  const match = fileText.match(FRONTMATTER_BLOCK_RE);
+  return match ? match[1] : null;
+}
+
+// ---------------------------------------------------------------------------
+// T-753: no-frontmatter-hooks tripwire
+//
+// Measured 2026-09-21: a detector .claude/agents spec whose ONLY hook
+// unconditionally blocked every Bash call — pure shell, no node, no regex —
+// registered successfully and did NOT fire. Frontmatter `PreToolUse` hooks
+// do not execute in this harness at all (see T-752/T-753 BACKLOG entries).
+// A `hooks:` block is therefore dead weight at best, and a false sense of
+// protection at worst (T-752 removed exactly this from developer.md after
+// discovering its destructive-git guard had never once executed).
+//
+// This is a SHAPE-ABSENCE check, not a shape-correctness check: it asserts
+// no top-level `hooks:` key exists at all. Do NOT extend this into a
+// shape-validity assertion for a `hooks:` block's contents — that would
+// have certified T-752's inert block as "correctly formed," which is
+// exactly the defect this tripwire exists to prevent.
+const TOP_LEVEL_HOOKS_KEY_RE = /^hooks:/m;
+
+function checkNoTopLevelHooksKey(fileText, fileLabel) {
+  const block = extractFrontmatterBlock(fileText);
+  if (block === null) {
+    return `[no-hooks-tripwire] ${fileLabel}: no YAML frontmatter block found (cannot check for a "hooks:" key)`;
+  }
+  if (TOP_LEVEL_HOOKS_KEY_RE.test(block)) {
+    return (
+      `[no-hooks-tripwire] ${fileLabel}: frontmatter carries a top-level "hooks:" key. ` +
+      'Measured 2026-09-21: a detector hook that unconditionally blocked every Bash call ' +
+      'registered successfully and did NOT fire — frontmatter PreToolUse hooks do not execute ' +
+      'in this harness. Re-adding a "hooks:" block requires a quoted LIVE-FIRE observation ' +
+      'proving it actually executes under the current harness, plus removal of THIS assertion ' +
+      'with that evidence attached (see BACKLOG.md T-752/T-753).'
+    );
+  }
+  return null;
+}
+
 function parseFrontmatter(fileText, fileName) {
-  const match = fileText.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  assert.ok(match, `${fileName}: no YAML frontmatter block found`);
-  const block = match[1];
+  const block = extractFrontmatterBlock(fileText);
+  assert.ok(block, `${fileName}: no YAML frontmatter block found`);
 
   const nameMatch = block.match(/^name:\s*(\S+)\s*$/m);
   const modelMatch = block.match(/^model:\s*(\S+)\s*$/m);
@@ -321,6 +367,12 @@ function main() {
 
   const claudeMdText = fs.readFileSync(CLAUDE_MD_PATH, 'utf8');
   failures.push(...checkTemplateParity(claudeMdText, specText));
+
+  // T-753: no-frontmatter-hooks tripwire — runs across every agent spec.
+  for (const spec of agentSpecs) {
+    const hooksKeyFailure = checkNoTopLevelHooksKey(spec.text, spec.file);
+    if (hooksKeyFailure) failures.push(hooksKeyFailure);
+  }
 
   for (const spec of agentSpecs) {
     const role = spec.name;
@@ -498,4 +550,15 @@ function main() {
   );
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+// Additive-only export (T-753): lets a one-off historical-reproduction
+// script feed arbitrary text (e.g. `git show <hash>:.claude/agents/developer.md`)
+// through the EXACT SAME no-hooks-key check this test runs, without
+// re-implementing the regex. Guarded by the require.main check above —
+// requiring this file never runs main() or touches the filesystem.
+module.exports = {
+  checkNoTopLevelHooksKey,
+};

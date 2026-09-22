@@ -1,5 +1,21 @@
 # Roles
 
+| Role | Responsibility | Model | Spec |
+|---|---|---|---|
+| Developer | Narrow, self-contained implementation slices | Sonnet | [`.claude/agents/developer.md`](../../.claude/agents/developer.md) |
+| QA | Functional validation against acceptance criteria — `qa_passed` or `needs_fix` | Sonnet | [`.claude/agents/qa.md`](../../.claude/agents/qa.md) |
+| UX | Flows, microcopy, feedback states, accessibility — `ux_passed` or `ux_needs_fix` (optional per task) | Sonnet | [`.claude/agents/ux.md`](../../.claude/agents/ux.md) |
+| Security reviewer | Security review for new inputs/outputs, auth flows, integrations — `security_passed` or `security_needs_fix` (optional per task) | Sonnet | [`.claude/agents/security-reviewer.md`](../../.claude/agents/security-reviewer.md) |
+| Product/docs | Backlog clarity, process docs, artifact sync | Sonnet | [`.claude/agents/product-docs.md`](../../.claude/agents/product-docs.md) |
+| Technical writer | User-facing docs — README, getting-started guides, API reference, changelog | Sonnet | [`.claude/agents/technical-writer.md`](../../.claude/agents/technical-writer.md) |
+| Architect | Pre-task design brief and task decomposition (mandatory gate for every task, sole exception the XS fast lane — see [`docs/core/ORCHESTRATION_RULES.md`](ORCHESTRATION_RULES.md)) | Fable 5 | [`.claude/agents/architect.md`](../../.claude/agents/architect.md) |
+| Analyst | External technology and landscape research, ahead of architect review | Sonnet | [`.claude/agents/analyst.md`](../../.claude/agents/analyst.md) |
+| Frontend design | Visual/interaction design for frontend surfaces | Sonnet | [`.claude/agents/frontend-design.md`](../../.claude/agents/frontend-design.md) |
+| UI designer | UI component and layout design | Sonnet | [`.claude/agents/ui-designer.md`](../../.claude/agents/ui-designer.md) |
+| Exa researcher | Web research via the Exa search tool | Sonnet | [`.claude/agents/exa-researcher.md`](../../.claude/agents/exa-researcher.md) |
+
+Model and effort escalation policy — including per-role fallback and effort selection — lives in [`docs/AGENT_SPEC.md`](../AGENT_SPEC.md) — "Model selection", the single source of truth; the column above is not it.
+
 Each role has a corresponding agent prompt in [`.claude/agents/`](../../.claude/agents/) — pass it to the sub-agent as context when spawning.
 
 | Role | Prompt file |

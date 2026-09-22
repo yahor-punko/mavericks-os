@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Mavericks pre-push hook — refuses pushes issued from a linked git worktree
+# (T-753). Pushes belong to the Main Agent, from the primary checkout, after
+# integrating a sub-agent's commits by cherry-pick/merge — never straight
+# from the worktree that produced them.
+#
+# Scope note: this is the ONLY destructive git command that needs a hook
+# here. `git reset --hard`, `git clean -f`, and `git checkout -- <path>`
+# only destroy disposable worktree state (the worktree itself is the blast
+# radius boundary for those); `push` is the one command whose blast radius
+# escapes the worktree and reaches shared history.
+#
+# Discriminator: `git rev-parse --git-dir` and `git rev-parse --git-common-dir`
+# resolve to the SAME physical path in the primary checkout, and to
+# DIFFERENT physical paths in a linked worktree. Confirmed 2026-09-21 on a
+# live developer sub-agent worktree:
+#   --git-dir        -> <repo>/.git/worktrees/agent-<id>
+#   --git-common-dir -> <repo>/.git
+# Compare RESOLVED PHYSICAL paths, not raw strings — in the primary
+# checkout both commands can print relative values (e.g. ".git"), and a
+# naive string comparison of two different-looking-but-equal relative forms
+# would misclassify the primary checkout as a worktree.
+#
+# Escape hatch: MAVP_ALLOW_WORKTREE_PUSH=1 skips this refusal entirely. This
+# exists for a real layout — a bare-primary setup where every checkout on
+# the machine is a linked worktree and no single "primary" exists to push
+# from. Set it deliberately, not as a routine bypass.
+
+set -euo pipefail
+
+if [[ -n "${MAVP_ALLOW_WORKTREE_PUSH:-}" ]]; then
+  exit 0
+fi
+
+GIT_DIR_RAW="$(git rev-parse --git-dir 2>/dev/null || true)"
+GIT_COMMON_DIR_RAW="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+
+if [[ -z "$GIT_DIR_RAW" || -z "$GIT_COMMON_DIR_RAW" ]]; then
+  # Not resolvable (unexpected) — fail open rather than block a push we
+  # cannot classify.
+  exit 0
+fi
+
+RESOLVED_GIT_DIR="$(cd "$GIT_DIR_RAW" 2>/dev/null && pwd -P || true)"
+RESOLVED_COMMON_DIR="$(cd "$GIT_COMMON_DIR_RAW" 2>/dev/null && pwd -P || true)"
+
+if [[ -z "$RESOLVED_GIT_DIR" || -z "$RESOLVED_COMMON_DIR" ]]; then
+  exit 0
+fi
+
+if [[ "$RESOLVED_GIT_DIR" != "$RESOLVED_COMMON_DIR" ]]; then
+  echo "" >&2
+  echo "PUSH REFUSED: this is a linked git worktree ($RESOLVED_GIT_DIR)." >&2
+  echo "Pushes belong to the Main Agent, from the primary checkout — not a" >&2
+  echo "linked worktree. Integrate this worktree's commits into main via" >&2
+  echo "cherry-pick/merge instead of pushing directly from here." >&2
+  echo "Set MAVP_ALLOW_WORKTREE_PUSH=1 to override (e.g. a bare-primary" >&2
+  echo "layout where every checkout is a linked worktree)." >&2
+  exit 1
+fi
+
+exit 0

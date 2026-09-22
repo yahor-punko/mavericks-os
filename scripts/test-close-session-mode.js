@@ -681,6 +681,148 @@ function makeAlreadyMergedFixtureRepo(waveNumber) {
   return dir;
 }
 
+// --- T-749: deployed_dev prod-promotion advisory ---
+//
+// Fixtures for the two required cases: (A) a deployed_dev block already
+// archived into "## Recently completed tasks" with nothing left in Active
+// tasks — the advisory must NOT fire (this is exactly the "announced
+// forever" bug: a whole-file scan would still find it there); (B) a
+// deployed_dev block genuinely sitting in "## Active tasks" — the advisory
+// MUST fire, worded with "deployed_dev" and never "deploy_queue".
+
+function makeDeployedDevArchivedFixtureRepo(deployContours) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t749-archived-fixture-'));
+
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
+
+  fs.writeFileSync(
+    path.join(dir, 'BACKLOG.md'),
+    ['# Backlog', '', '## Active Wave — Wave 1', '', 'Nothing scheduled.', ''].join('\n')
+  );
+  fs.writeFileSync(
+    path.join(dir, 'TASK_STATUS.md'),
+    [
+      '# Task Status',
+      '',
+      '## Active tasks',
+      '',
+      '## Recently completed tasks',
+      '',
+      '### T-401 — Already promoted, archived long ago',
+      '- **Status:** deployed_dev',
+      '- **Owner role:** developer',
+      '- **Verification type:** runtime',
+      '- **Last verified by:** qa',
+      '- **Evidence:** commit: ddddddd branch: main',
+      '- **Notes:** —',
+      '',
+    ].join('\n')
+  );
+  fs.writeFileSync(
+    path.join(dir, 'PROCESS_STATE.json'),
+    JSON.stringify(
+      {
+        initiative: 'T-749 archived-deployed_dev fixture',
+        stage: 'execution',
+        wave: 1,
+        wave_status: 'execution',
+        wave_goal: 'fixture wave goal',
+        parked_waves: [],
+        active_slices: [],
+        next_action: null,
+        blocker: null,
+        stage_owner: 'main_agent',
+        last_task_id: 401,
+        last_updated: '2020-01-01',
+        deploy_contours: deployContours,
+        wave_summary: null,
+        rechecks: [],
+      },
+      null,
+      2
+    ) + '\n'
+  );
+
+  execFileSync('git', ['add', '-A'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'fixture: initial state'], { cwd: dir });
+
+  return dir;
+}
+
+function makeDeployedDevActiveFixtureRepo(deployContours) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t749-active-fixture-'));
+
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 'demo@example.invalid'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'Fixture User'], { cwd: dir });
+
+  fs.writeFileSync(
+    path.join(dir, 'BACKLOG.md'),
+    [
+      '# BACKLOG',
+      '',
+      '## Active Wave',
+      '',
+      '### T-402 — Deployed to dev, not yet promoted',
+      '- **Status:** deployed_dev',
+      '- **Owner role:** developer',
+      '- **Repo:** mavericks',
+      '- **Verification type:** runtime',
+      '',
+    ].join('\n')
+  );
+  fs.writeFileSync(
+    path.join(dir, 'TASK_STATUS.md'),
+    [
+      '# TASK_STATUS',
+      '',
+      '## Active tasks',
+      '',
+      '### T-402 — Deployed to dev, not yet promoted',
+      '- **Status:** deployed_dev',
+      '- **Owner role:** developer',
+      '- **Verification type:** runtime',
+      '- **Last verified by:** qa',
+      '- **Evidence:** commit: eeeeeee branch: main',
+      '- **Notes:** —',
+      '',
+      '## Recently completed tasks',
+      '',
+    ].join('\n')
+  );
+  fs.writeFileSync(
+    path.join(dir, 'PROCESS_STATE.json'),
+    JSON.stringify(
+      {
+        initiative: 'T-749 active-deployed_dev fixture',
+        stage: 'execution',
+        wave: 1,
+        wave_status: 'execution',
+        wave_goal: 'fixture wave goal',
+        parked_waves: [],
+        active_slices: [],
+        next_action: null,
+        blocker: null,
+        stage_owner: 'main_agent',
+        last_task_id: 402,
+        last_updated: '2020-01-01',
+        deploy_contours: deployContours,
+        wave_summary: null,
+        rechecks: [],
+      },
+      null,
+      2
+    ) + '\n'
+  );
+
+  execFileSync('git', ['add', '-A'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'fixture: initial state'], { cwd: dir });
+
+  return dir;
+}
+
 // Case 14: empty Active tasks section, wave=3 — non-interactive completes the
 // wave and prints the explicit announcement.
 {
@@ -1615,6 +1757,74 @@ console.log('All T-542 assertions passed.');
 }
 
 console.log('All T-689 assertions passed.');
+
+// Case 30 (T-749): a deployed_dev block already archived into "## Recently
+// completed tasks", nothing left in Active tasks, deploy_contours=2 — the
+// advisory must not fire. This is the "announced forever" defect: before the
+// fix, the whole-file count kept finding this block after every close.
+{
+  const repoDir = makeDeployedDevArchivedFixtureRepo(2);
+
+  const result = runCloseSessionCli(repoDir, __dirname, ['--non-interactive']);
+
+  assert.ok(
+    !/awaiting prod promotion/.test(result.stdout),
+    `Case 30 FAIL: an archived-only deployed_dev block must not print the advisory, got:\n${result.stdout}`
+  );
+
+  console.log('Case 30 passed: a deployed_dev block already in Recently completed tasks does not re-trigger the advisory');
+
+  cleanup(repoDir);
+}
+
+// Case 31 (T-749): a deployed_dev block genuinely sitting in "## Active
+// tasks", deploy_contours=2 — the advisory must fire, must name
+// "deployed_dev", and must never say "deploy_queue" (that name belongs to a
+// different set entirely — buildDeployQueue() in mavp-operator-lib.js).
+{
+  const repoDir = makeDeployedDevActiveFixtureRepo(2);
+
+  const result = runCloseSessionCli(repoDir, __dirname, ['--non-interactive']);
+
+  assert.ok(
+    /awaiting prod promotion/.test(result.stdout),
+    `Case 31 FAIL: an active deployed_dev block with deploy_contours=2 must print the advisory, got:\n${result.stdout}`
+  );
+  assert.ok(
+    /1 task\(s\) at deployed_dev awaiting prod promotion/.test(result.stdout),
+    `Case 31 FAIL: expected the exact "at deployed_dev" wording, got:\n${result.stdout}`
+  );
+  assert.ok(
+    !/deploy_queue/.test(result.stdout),
+    `Case 31 FAIL: the advisory must never use the term "deploy_queue", got:\n${result.stdout}`
+  );
+
+  console.log('Case 31 passed: an active deployed_dev block with deploy_contours=2 prints the advisory, worded "at deployed_dev" and never "deploy_queue"');
+
+  cleanup(repoDir);
+}
+
+// Case 32 (T-749): same active-deployed_dev fixture as Case 31, but
+// deploy_contours 0 and 1 — the advisory must be suppressed entirely, since
+// neither contour has a prod-promotion step for it to describe.
+{
+  for (const contours of [0, 1]) {
+    const repoDir = makeDeployedDevActiveFixtureRepo(contours);
+
+    const result = runCloseSessionCli(repoDir, __dirname, ['--non-interactive']);
+
+    assert.ok(
+      !/awaiting prod promotion/.test(result.stdout),
+      `Case 32 FAIL: deploy_contours=${contours} must suppress the advisory entirely, got:\n${result.stdout}`
+    );
+
+    cleanup(repoDir);
+  }
+
+  console.log('Case 32 passed: deploy_contours 0 and 1 both suppress the deployed_dev advisory entirely');
+}
+
+console.log('All T-749 assertions passed.');
 
 }
 

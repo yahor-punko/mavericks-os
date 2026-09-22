@@ -9,7 +9,7 @@ allowed-tools: Bash(./scripts/mavp-operator --agent), Bash(!test -f ONBOARDING.m
 
 !`test -f ONBOARDING.md && cat ONBOARDING.md || true`
 
-If the block above contained text, this is the first session of a freshly bootstrapped project — present the orientation to the operator, then delete the file with the Bash tool: `rm ONBOARDING.md`. The file must not persist into the next session. The `|| true` makes this a no-op on projects without the file (including mavericks itself).
+If the block above contained text, this is the first session of a freshly bootstrapped project — render the orientation to the operator verbatim (do not summarize or paraphrase it), then delete the file with the Bash tool: `rm ONBOARDING.md`. The file must not persist into the next session. The `|| true` makes this a no-op on projects without the file (including mavericks itself).
 
 ## Mid-session handoff (if present)
 
@@ -123,6 +123,12 @@ Must read:
 ```
 
 This is the set of files changed since the previous close-session commit plus context_docs declared by any in-flight task — read them before making changes this session. Omit this block entirely when `must_read` is absent.
+
+**First-run goal prompt:** if the onboarding block at the top of this skill contained text (this is the project's first session) and `next_action` is null, skip both branches below and end the brief by asking the operator what they are building, instead of showing "Next action: null":
+
+> What are you building? Tell me your goal and I can set it as this wave's goal, or just start describing the first thing you want built.
+
+Do not show `Next action: null` in this case. If `next_action` is non-null even on a first run, ignore this special case and follow the branches below as normal.
 
 **If `active_slices` is non-empty OR `planned_tasks` is non-empty:**
 

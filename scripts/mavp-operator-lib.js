@@ -4136,6 +4136,47 @@ function setBlockField(block, fieldName, value) {
 }
 
 /**
+ * Detect a TOP-LEVEL (non-indented) `- **<fieldLabel> (...):**` bullet in a
+ * raw task block — an ANNOTATED variant of the canonical `- **<fieldLabel>:**`
+ * field key (T-745), e.g. `- **Evidence (2026-09-20, QA):** commit: abc1234`.
+ *
+ * extractBlockField()/setBlockField() above (and getFieldMultiline() in
+ * mavp-validator.js) match the exact label `- **<fieldLabel>:**` only — an
+ * annotated top-level key is invisible to every one of those exact-match
+ * readers, and setBlockField() INSERTS a brand-new canonical field next to
+ * it rather than recognizing the annotated one as "the field", silently
+ * forking a second field on write.
+ *
+ * Distinct from the SANCTIONED way to carry a dated/annotated note: an
+ * INDENTED sub-bullet under the canonical field (`- **Evidence:** ...`
+ * followed by `  - **Evidence (2026-09-20, QA):** ...`). getFieldMultiline()
+ * already reads that shape correctly (inline value plus every following
+ * sub-bullet, at any indentation depth, until the next top-level bullet) —
+ * this function only matches the TOP-LEVEL, non-indented form (anchored on
+ * `^- ` with no leading whitespace), which acts as its own field boundary
+ * and is therefore invisible to every reader above, not the sanctioned
+ * sub-bullet form.
+ *
+ * @param {string|null} block - Raw task block text
+ * @param {string} fieldLabel - e.g. "Evidence" or "Notes"
+ * @returns {{key: string, canonicalExists: boolean}|null}
+ *   `key` is the exact annotated label text as written, verbatim (e.g.
+ *   "Evidence (2026-09-20, QA)") — quotable as-is in a diagnostic message.
+ *   `canonicalExists` is true when a top-level `- **<fieldLabel>:**` bullet
+ *   ALSO exists elsewhere in the same block. Returns null when no top-level
+ *   annotated variant is found.
+ */
+function findAnnotatedFieldVariant(block, fieldLabel) {
+  if (!block) return null;
+  const escaped = fieldLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const annotatedRe = new RegExp(`^- \\*\\*(${escaped}\\s*\\([^)]*\\))\\s*:\\*\\*`, 'm');
+  const m = block.match(annotatedRe);
+  if (!m) return null;
+  const canonicalRe = new RegExp(`^- \\*\\*${escaped}:\\*\\*`, 'm');
+  return { key: m[1], canonicalExists: canonicalRe.test(block) };
+}
+
+/**
  * Read a single `- **Field:** value` bullet from within a specific task's
  * block in a BACKLOG.md/TASK_STATUS.md-shaped markdown document, bounded by
  * locateTaskBlock()'s boundary — so this can never read a value from a
@@ -4179,6 +4220,72 @@ function updateTaskField(markdown, taskId, fieldName, value) {
   const updatedBlock = setBlockField(loc.rawBlock, fieldName, value);
   const updated = markdown.slice(0, loc.startIndex) + updatedBlock + markdown.slice(loc.endIndex);
   return { ok: true, updated, reason: null };
+}
+
+/**
+ * T-748: prune stale IDs out of PROCESS_STATE.json's `active_slices` against
+ * BACKLOG.md's current task statuses, using the validator's OWN
+ * ACTIVE_SLICES_STATUSES set (mavp-validator.js) as the single source of
+ * truth for what counts as "still active". The stale set is deliberately the
+ * COMPLEMENT of that set, derived at call time — never a second hand-written
+ * list — so an id is kept only when its BACKLOG.md task block resolves to a
+ * status inside ACTIVE_SLICES_STATUSES; every other case (qa_passed, merged,
+ * deferred, deprecated, deployed_dev/deployed_prod, an unresolvable/missing
+ * block, or a duplicate heading) is pruned. This is exactly the set
+ * checkActiveSlices() itself would flag as `active_slices_mismatch`, so a
+ * caller that runs this immediately before the validator sees no warning for
+ * any id it just pruned.
+ *
+ * Reads/writes PROCESS_STATE.json directly at `processStateJsonPath` — this
+ * is the canonical replacement for --close-session's former local
+ * `filterStaleSlices`/`syncActiveSlicesPreValidator` pair (whose stale set
+ * was hand-maintained as only {qa_passed, merged}) and for
+ * --archive-merged's missing prune step. A no-op (no read, no write) when
+ * the file is absent, unparsable, or `active_slices` is empty/not an array.
+ *
+ * The require() of mavp-validator.js is deliberately LAZY (inside the
+ * function body, not at this module's top) — mavp-validator.js requires
+ * THIS module at its own top-level, so a top-level require() here would
+ * hand validator.js a partially-populated exports object mid-load the first
+ * time either module is loaded first. By call time both modules are always
+ * already fully loaded.
+ *
+ * @param {string} processStateJsonPath - Absolute path to PROCESS_STATE.json
+ * @param {string} backlogMdPath - Absolute path to BACKLOG.md
+ * @returns {{activeSlices: Array, changed: boolean}} The resulting
+ *   (already-written-if-changed) active_slices array and whether it differs
+ *   from what was read.
+ */
+function pruneStaleActiveSlices(processStateJsonPath, backlogMdPath) {
+  let current;
+  try {
+    if (!fs.existsSync(processStateJsonPath)) return { activeSlices: [], changed: false };
+    current = JSON.parse(readUtf8(processStateJsonPath));
+  } catch {
+    return { activeSlices: [], changed: false };
+  }
+
+  const activeSlices = Array.isArray(current.active_slices) ? current.active_slices : [];
+  if (activeSlices.length === 0) return { activeSlices, changed: false };
+
+  const backlogMarkdown = fs.existsSync(backlogMdPath) ? readUtf8(backlogMdPath) : '';
+  // eslint-disable-next-line global-require
+  const { ACTIVE_SLICES_STATUSES } = require('./mavp-validator.js');
+
+  const filtered = activeSlices.filter((entry) => {
+    const id = typeof entry === 'string' ? entry : (entry && typeof entry === 'object' ? entry.id : null);
+    if (!id) return false;
+    const block = findTaskBlockById(backlogMarkdown, id);
+    const status = extractBlockField(block, 'Status');
+    return ACTIVE_SLICES_STATUSES.has(status);
+  });
+
+  const changed = filtered.length !== activeSlices.length;
+  if (changed) {
+    current.active_slices = filtered;
+    fs.writeFileSync(processStateJsonPath, JSON.stringify(current, null, 2) + '\n', 'utf8');
+  }
+  return { activeSlices: filtered, changed };
 }
 
 /**
@@ -5164,6 +5271,7 @@ module.exports = {
   extractHeadingIds,
   extractTrajectories,
   FAILURE_CONTRAST_FLOOR,
+  findAnnotatedFieldVariant,
   findPreviousCloseSessionCommit,
   findTaskBlockById,
   formatIsoTime,
@@ -5216,6 +5324,7 @@ module.exports = {
   parseTouchesConflicts,
   parseWaveTasks,
   printRepoIdentityHeader,
+  pruneStaleActiveSlices,
   readPermissionMode,
   readPersistedPermissionMode,
   readUserGlobalPermissionMode,

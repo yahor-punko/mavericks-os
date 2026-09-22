@@ -46,7 +46,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, formatWorktreePruneSuggestion, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, resolvePermissionMode, printRepoIdentityHeader, guardMutatingRoot, getCommitHashesReachable, isShallowRepository, extractCommitHashesFromEvidence, buildReachableHashIndex, isHashReachable, isSelfHostedRoot, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, formatWorktreePruneSuggestion, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, resolvePermissionMode, printRepoIdentityHeader, guardMutatingRoot, getCommitHashesReachable, isShallowRepository, extractCommitHashesFromEvidence, buildReachableHashIndex, isHashReachable, isSelfHostedRoot, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError, pruneStaleActiveSlices } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 // T-530: checkVersionBump()'s release-awareness reads the public mirror's
 // tags EXCLUSIVELY through these check-changelog-frozen.js exports — never
@@ -130,8 +130,12 @@ function readUtf8(p) { return fs.readFileSync(p, 'utf8'); }
 function writeUtf8(p, content) { fs.writeFileSync(p, content, 'utf8'); }
 
 /**
- * Count tasks with a given status across the entire TASK_STATUS content.
- * Used for deploy_queue warning (deployed_dev tasks awaiting prod promotion).
+ * Count tasks with a given status across the entire TASK_STATUS content
+ * (both `## Active tasks` and `## Recently completed tasks`). Kept as a
+ * general-purpose whole-file counter; NOT used by the deployed_dev advisory
+ * below (T-749) — that advisory must count Active tasks only, since a
+ * deployed_dev task archived into "Recently completed" is done, not
+ * "awaiting prod promotion" anymore.
  */
 function countTasksByStatus(markdown, targetStatus) {
   const lines = markdown.split(/\r?\n/);
@@ -153,6 +157,33 @@ function countTasksByStatus(markdown, targetStatus) {
   }
 
   return count;
+}
+
+/**
+ * T-749: print the deployed_dev prod-promotion advisory. Two defects fixed
+ * here: (1) the count is scoped to the `## Active tasks` section only (the
+ * caller passes the `activeTasks` array already parsed via parseActiveTasks()
+ * from the AS-READ TASK_STATUS.md, before this same run's own archival sweep
+ * moves any already-terminal (incl. deployed_dev) task out of Active tasks —
+ * see ALREADY_TERMINAL_STATUSES), never the whole TASK_STATUS.md file, so a
+ * deployed_dev block already archived into "Recently completed tasks" (by a
+ * PRIOR close-session run) stops being announced forever; (2) the message
+ * never says "deploy_queue" — that name belongs to a different set entirely
+ * (buildDeployQueue() in mavp-operator-lib.js: merged-but-not-deployed tasks,
+ * surfaced via --agent), and reusing it here is what let an operator see "1
+ * task in deploy_queue" while the --agent field itself was empty. Suppressed
+ * entirely below deploy_contours 2 — deploy_contours 0 (no deploy pipeline)
+ * and 1 (auto-deploy-on-merge) have no prod-promotion step for this line to
+ * describe.
+ *
+ * @param {Array<{id: string, title: string, status: string}>} activeTasks
+ */
+function printDeployedDevAdvisory(activeTasks, deployContours) {
+  if (deployContours < 2) return;
+  const deployedDevCount = activeTasks.filter(t => t.status === 'deployed_dev').length;
+  if (deployedDevCount > 0) {
+    console.log(`\n${YELLOW}⚠ ${deployedDevCount} task(s) at deployed_dev awaiting prod promotion${RESET}`);
+  }
 }
 
 /**
@@ -1232,19 +1263,7 @@ function parseBacklogStatuses(markdown) {
 }
 
 /**
- * Remove task IDs from active_slices that have already reached qa_passed or merged
- * status in BACKLOG.md.  Returns the filtered array.
- */
-function filterStaleSlices(activeSlices, backlogStatuses) {
-  const staleStatuses = new Set(['qa_passed', 'merged']);
-  return activeSlices.filter(id => {
-    const status = backlogStatuses.get(id);
-    return !staleStatuses.has(status);
-  });
-}
-
-/**
- * T-438: PROCESS_STATE.json's `active_slices` must reflect BACKLOG.md's
+ * T-438/T-748: PROCESS_STATE.json's `active_slices` must reflect BACKLOG.md's
  * current state BEFORE the validator runs — otherwise a task just merged
  * (and archived out of BACKLOG's Active Wave) but still listed in
  * `active_slices` trips checkActiveSlices()'s WARNING-severity
@@ -1255,19 +1274,18 @@ function filterStaleSlices(activeSlices, backlogStatuses) {
  * reintroduce the "PROCESS_STATE mutated before the validator gate" problem
  * the wave/wave_session bump (see updateProcessStateJson call sites below)
  * is being fixed for.
+ *
+ * T-748: this used to be a locally hand-maintained stale set
+ * ({qa_passed, merged} only, via the former local filterStaleSlices()) that
+ * disagreed with the validator's own (wider) ACTIVE_SLICES_STATUSES — so
+ * deferred/deprecated/deployed_* ids were never pruned here yet still
+ * tripped the validator's warning. Now a thin wrapper over
+ * pruneStaleActiveSlices() (mavp-operator-lib.js), which derives the stale
+ * set as the complement of the validator's own active-status set — one
+ * shared implementation, not two.
  */
 function syncActiveSlicesPreValidator() {
-  if (!fs.existsSync(PROCESS_STATE_JSON) || !fs.existsSync(BACKLOG_MD)) return;
-  try {
-    const current = JSON.parse(readUtf8(PROCESS_STATE_JSON));
-    if (!Array.isArray(current.active_slices) || current.active_slices.length === 0) return;
-    const backlogStatuses = parseBacklogStatuses(readUtf8(BACKLOG_MD));
-    const filtered = filterStaleSlices(current.active_slices, backlogStatuses);
-    if (filtered.length !== current.active_slices.length) {
-      current.active_slices = filtered;
-      writeUtf8(PROCESS_STATE_JSON, JSON.stringify(current, null, 2) + '\n');
-    }
-  } catch { /* leave PROCESS_STATE.json untouched on any parse/read error */ }
+  pruneStaleActiveSlices(PROCESS_STATE_JSON, BACKLOG_MD);
 }
 
 /**
@@ -1444,14 +1462,13 @@ function updateProcessStateJson(nextAction, waveComplete, summaryValue, { summar
     }
   } catch { /* start fresh */ }
 
-  // Clean stale active_slices: remove tasks that are qa_passed or merged in BACKLOG.md
-  let activeSlices = Array.isArray(current.active_slices) ? current.active_slices : [];
-  try {
-    if (fs.existsSync(BACKLOG_MD)) {
-      const backlogStatuses = parseBacklogStatuses(readUtf8(BACKLOG_MD));
-      activeSlices = filterStaleSlices(activeSlices, backlogStatuses);
-    }
-  } catch { /* skip on error — leave active_slices unchanged */ }
+  // T-748: prune stale active_slices ids against BACKLOG.md's current
+  // statuses via the shared pruneStaleActiveSlices() helper
+  // (mavp-operator-lib.js) — the same helper syncActiveSlicesPreValidator()
+  // above now wraps. Reading PROCESS_STATE_JSON here is safe: `current` was
+  // just read from this exact path above and nothing has been written to it
+  // since, so the on-disk content still matches.
+  let activeSlices = pruneStaleActiveSlices(PROCESS_STATE_JSON, BACKLOG_MD).activeSlices;
 
   const currentWave = Number(current.wave) || 1;
   const newWave = waveComplete ? currentWave + 1 : currentWave;
@@ -2216,11 +2233,10 @@ async function runNonInteractive(args) {
     if (pathsLine) console.log(pathsLine);
   }
 
-  // Deploy queue warning — informational only, does not block session close
-  const deployedDevCount = countTasksByStatus(updatedContent, 'deployed_dev');
-  if (deployedDevCount > 0) {
-    console.log(`\n${YELLOW}⚠ ${deployedDevCount} task(s) in deploy_queue awaiting prod promotion${RESET}`);
-  }
+  // Deployed_dev prod-promotion advisory — informational only, does not
+  // block session close. See printDeployedDevAdvisory() (T-749) for the
+  // Active-tasks-only scoping and deploy_contours gating.
+  printDeployedDevAdvisory(activeTasks, deployContours);
 
   console.log(`${BOLD}Session closed.${RESET}`);
 
@@ -2507,11 +2523,20 @@ async function runInteractive() {
     if (pathsLine) console.log(pathsLine);
   }
 
-  // Deploy queue warning — informational only, does not block session close
-  const deployedDevCount = countTasksByStatus(updatedContent, 'deployed_dev');
-  if (deployedDevCount > 0) {
-    console.log(`\n${YELLOW}⚠ ${deployedDevCount} task(s) in deploy_queue awaiting prod promotion${RESET}`);
-  }
+  // Read deploy_contours for deploy status column — moved ahead of the
+  // deployed_dev advisory below (T-749) so that advisory can gate on it.
+  let deployContours = 0;
+  try {
+    if (fs.existsSync(PROCESS_STATE_JSON)) {
+      const ps = JSON.parse(readUtf8(PROCESS_STATE_JSON));
+      deployContours = ps.deploy_contours != null ? Number(ps.deploy_contours) : 0;
+    }
+  } catch { /* use default */ }
+
+  // Deployed_dev prod-promotion advisory — informational only, does not
+  // block session close. See printDeployedDevAdvisory() (T-749) for the
+  // Active-tasks-only scoping and deploy_contours gating.
+  printDeployedDevAdvisory(activeTasks, deployContours);
 
   // Build list of tasks completed this session:
   //   - tasks the operator marked merged during the interactive loop
@@ -2533,15 +2558,6 @@ async function runInteractive() {
   for (const t of midWaveArchivedTasks) {
     if (t.id && !sessionCompletedIds.includes(t.id)) sessionCompletedIds.push(t.id);
   }
-
-  // Read deploy_contours for deploy status column
-  let deployContours = 0;
-  try {
-    if (fs.existsSync(PROCESS_STATE_JSON)) {
-      const ps = JSON.parse(readUtf8(PROCESS_STATE_JSON));
-      deployContours = ps.deploy_contours != null ? Number(ps.deploy_contours) : 0;
-    }
-  } catch { /* use default */ }
 
   // T-629 (RC-2): prominently placed, non-blocking — prints BEFORE the
   // results table, per the acceptance criteria.

@@ -30,21 +30,35 @@
 // its own purpose), which is exactly why no shipped CI test can catch this
 // class — only a canonical-repo-local mechanism can.
 //
-// Inertness is FREE, not something this script builds extra gating for:
-// `core.hooksPath` is a relative path, so worktree commits DO run the
-// tracked hook, but no worktree, adopter repo, or mirror clone ever has the
-// untracked names file (or the env var set) — absent names source means
-// zero usable names, buildCategories() adds no "Private repo name" category
-// beyond the always-on shape-based ones, and... actually: even the
-// always-on categories (EXA token, AWS key, /Users/ path, email, etc.) would
-// still run and could theoretically fire in a non-canonical repo. That is
-// intentional, not a gap — those categories are equally valid secret/PII
-// hygiene in ANY repo, canonical or not, and a real finding there is never a
-// false positive worth suppressing. What "inert" means here, precisely, is:
-// this guard cannot itself be the difference between "safe to commit" and
-// "not" when its very reason for existing (a private-name collision) has no
-// names to detect against — which is exactly the case when the untracked
-// names source is absent.
+// Two independent gates decide whether this guard has anything to scan, and
+// they are NOT the same gate:
+//
+//   1. scripts/publish-manifest.json (the ship-classification list) is the
+//      ONLY thing that makes this guard fully inert. Without it there is no
+//      way to know which staged files are ship-classified, so there is
+//      nothing to scan against — SKIP.
+//   2. The gitignored names source (.mavp/private-names, or the
+//      MAVP_PRIVATE_NAMES env var fallback) controls ONE category only —
+//      the runtime-supplied "Private repo name" category. Its absence never
+//      skips the run: buildCategories() with an empty name list still
+//      returns every always-on, shape-based category — a token-shape
+//      category, a credential-header category, a category describing an
+//      absolute user-home-directory filesystem path (never spelled out here
+//      as a literal pattern — see .claude/rules/scripts.md "Shipped
+//      secret-string discipline"; the pattern itself lives only in
+//      mavp-publish-scan.js), and an email-address category — and this
+//      guard runs all of them against every staged ship-classified file
+//      regardless of whether any private name is known.
+//
+// This matters precisely because the names file is gitignored and therefore
+// absent from every linked worktree: worktrees are where all developer
+// content is authored. A guard that stood down entirely for that reason
+// would scan nothing at the one place scanning matters most. With a
+// manifest present (checked into every clone, worktree included) and no
+// names source, this guard is NOT inert — it scans staged ship-classified
+// files against every always-on category; only the private-name category is
+// unavailable. The OK/BLOCKED lines below name exactly which categories ran
+// on a given commit, so that scope is never left implicit.
 //
 // Failure mode — CONSERVATIVE. This guard runs inside a blocking pre-commit
 // hook on THIS repo's own commits, including this task's own commits. A bug
@@ -141,24 +155,20 @@ function readStagedContent(relPath) {
 }
 
 function runGuard() {
-  const rawNames = readNamesFileRaw();
-  const privateNames = resolvePrivateNames(rawNames);
-
-  if (privateNames.length === 0) {
-    console.log(
-      'SKIP: mavp-private-names-guard — no names source (.mavp/private-names ' +
-        'or MAVP_PRIVATE_NAMES) — inert.'
-    );
-    return 0;
-  }
-
+  // The manifest is the ONLY thing that makes this guard fully inert — see
+  // the file header. Checked first so the always-on categories below get a
+  // chance to run even when the names source is absent.
   const shipList = loadShipList();
   if (shipList === null) {
     console.log('SKIP: mavp-private-names-guard — no scripts/publish-manifest.json — inert.');
     return 0;
   }
 
+  const rawNames = readNamesFileRaw();
+  const privateNames = resolvePrivateNames(rawNames);
   const categories = buildCategories(privateNames);
+  const categoryNames = categories.map((c) => c.name).join(', ');
+
   const staged = getStagedFiles();
   const shipStaged = staged.filter((relPath) => isShipClassified(relPath, shipList));
 
@@ -180,17 +190,19 @@ function runGuard() {
   if (findings.length === 0) {
     console.log(
       `OK: mavp-private-names-guard — scanned ${shipStaged.length} staged ship-classified ` +
-        'file(s) — zero findings.'
+        `file(s) against [${categoryNames}] — zero findings.`
     );
     return 0;
   }
 
-  console.error(`FOUND ${findings.length} finding(s) in staged file(s):\n`);
+  console.error(
+    `FOUND ${findings.length} finding(s) in staged file(s) (categories scanned: ${categoryNames}):\n`
+  );
   for (const f of findings) {
     const loc = f.line === PATH_LOCATION_MARKER ? `${f.file} (${PATH_LOCATION_MARKER})` : `${f.file}:${f.line}`;
     console.error(`  [${f.category}] ${loc}  ${f.match}`);
   }
-  console.error('\nBLOCKED: private-name collision detected in staged ship-classified file(s) — see above.');
+  console.error('\nBLOCKED: secret/private-reference finding in staged ship-classified file(s) — see above.');
   return 1;
 }
 

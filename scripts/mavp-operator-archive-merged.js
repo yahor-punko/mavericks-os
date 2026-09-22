@@ -42,7 +42,7 @@ const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
 const VALIDATOR = path.join(__dirname, 'mavp-validator.js');
 
-const { archiveMergedTasksFromActiveWave, printRepoIdentityHeader, guardMutatingRoot } = require('./mavp-operator-lib.js');
+const { archiveMergedTasksFromActiveWave, printRepoIdentityHeader, guardMutatingRoot, pruneStaleActiveSlices } = require('./mavp-operator-lib.js');
 const { moveTaskToCompleted } = require('./mavp-operator-close-session.js');
 
 const RESET = '\x1b[0m';
@@ -133,6 +133,16 @@ function main() {
   }
 
   console.log(`${DIM}Remaining in-flight tasks untouched: ${result.remainingIds.length ? result.remainingIds.join(', ') : '(none)'}${RESET}`);
+
+  // T-748: prune active_slices of any id this archival just moved out of an
+  // active BACKLOG.md status (merged/deployed_*), so checkActiveSlices()
+  // never sees the drift a sanctioned mid-wave archival would otherwise
+  // routinely produce. Runs after the TASK_STATUS mirror above and before
+  // the single validator run below.
+  const pruneResult = pruneStaleActiveSlices(PROCESS_STATE_JSON, BACKLOG_MD);
+  if (pruneResult.changed) {
+    console.log(`${GREEN}✓ PROCESS_STATE.json — pruned stale active_slices: ${pruneResult.activeSlices.length ? pruneResult.activeSlices.join(', ') : '(none remaining)'}${RESET}`);
+  }
 
   const validatorExitCode = runValidatorOnce();
   process.exitCode = validatorExitCode;

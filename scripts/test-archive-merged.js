@@ -309,4 +309,127 @@ function writeUtf8(p, c) { fs.writeFileSync(p, c, 'utf8'); }
   fs.rmSync(TMP, { recursive: true, force: true });
 }
 
-console.log('\nAll T-420 assertions passed.');
+// ---------------------------------------------------------------------------
+// Part 5 — T-748: --archive-merged prunes PROCESS_STATE.json's active_slices
+// through pruneStaleActiveSlices() (mavp-operator-lib.js), which derives its
+// stale set as the COMPLEMENT of the validator's own ACTIVE_SLICES_STATUSES
+// — not a hand-maintained {qa_passed, merged} list. A deferred id (T-003)
+// must be pruned too, alongside the merged id (T-001); the in_progress id
+// (T-002) must survive. After the run, the validator must report no
+// active_slices_mismatch finding for any of the ids that were just pruned.
+// ---------------------------------------------------------------------------
+{
+  const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 't748-prune-'));
+  const BACKLOG_PATH = path.join(TMP, 'BACKLOG.md');
+  const TASK_STATUS_PATH = path.join(TMP, 'TASK_STATUS.md');
+  const PROCESS_STATE_JSON_PATH = path.join(TMP, 'PROCESS_STATE.json');
+
+  writeUtf8(BACKLOG_PATH, `# BACKLOG
+
+## Active Wave
+
+### T-001 — Merged task
+- **Status:** merged
+- **Owner role:** developer
+- **Repo:** mavericks
+- **Verification type:** artifact
+
+**Problem:** test fixture.
+
+**Acceptance criteria:** test fixture.
+
+**Evidence expected:** commit: <hash>
+
+### T-002 — In flight task
+- **Status:** in_progress
+- **Owner role:** developer
+- **Repo:** mavericks
+- **Verification type:** runtime
+
+**Problem:** test fixture.
+
+**Acceptance criteria:** test fixture.
+
+**Evidence expected:** commit: <hash>
+
+## Deferred Tasks
+
+### T-003 — Deferred task
+- **Status:** deferred
+- **Owner role:** developer
+- **Repo:** mavericks
+- **Verification type:** runtime
+`);
+
+  writeUtf8(TASK_STATUS_PATH, `# TASK_STATUS
+
+## Active tasks
+
+### T-001 — Merged task
+- **Status:** merged
+- **Owner role:** developer
+- **Verification type:** artifact
+- **Last verified by:** qa
+- **Evidence:** commit: aaaaaaa branch: main
+- **Notes:** —
+
+### T-002 — In flight task
+- **Status:** in_progress
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** —
+- **Evidence:** —
+- **Notes:** —
+
+## Recently completed tasks
+
+## Deferred tasks
+
+### T-003 — Deferred task
+- **Status:** deferred
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** —
+- **Evidence:** —
+- **Notes:** —
+`);
+
+  writeUtf8(PROCESS_STATE_JSON_PATH, JSON.stringify({
+    initiative: 'T-748 test fixture',
+    stage: 'execution',
+    wave: 9,
+    wave_status: 'execution',
+    wave_goal: null,
+    parked_waves: [],
+    active_slices: ['T-001', 'T-002', 'T-003'],
+    next_action: 'T-002 → developer → do the thing',
+    blocker: null,
+    stage_owner: 'main_agent',
+    last_task_id: 3,
+    last_updated: '2026-01-01',
+    deploy_contours: 0,
+    wave_summary: null,
+    rechecks: [],
+  }, null, 2) + '\n');
+
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: TMP, MAVERICKS_SCRIPTS: SCRIPTS_DIR };
+
+  const archiveOutput = execFileSync('node', [ARCHIVE_MERGED_PATH], { cwd: TMP, env, encoding: 'utf8' });
+
+  const processStateAfter = JSON.parse(readUtf8(PROCESS_STATE_JSON_PATH));
+  assert.deepStrictEqual(
+    processStateAfter.active_slices,
+    ['T-002'],
+    `Test 6 FAIL: expected active_slices pruned to ["T-002"] (merged T-001 and deferred T-003 both dropped), got: ${JSON.stringify(processStateAfter.active_slices)}`
+  );
+  assert.ok(
+    !/active_slices_mismatch/.test(archiveOutput),
+    `Test 6 FAIL: expected no active_slices_mismatch finding after pruning, got:\n${archiveOutput}`
+  );
+
+  console.log('Test 6 passed: --archive-merged prunes active_slices to ["T-002"] via pruneStaleActiveSlices() (merged AND deferred ids dropped); no active_slices_mismatch finding');
+
+  fs.rmSync(TMP, { recursive: true, force: true });
+}
+
+console.log('\nAll T-420/T-748 assertions passed.');

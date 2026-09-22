@@ -15,6 +15,8 @@ This creates:
 - `BACKLOG.md`, `TASK_STATUS.md`, `PROCESS_STATE.md` — from templates
 - `PROCESS_STATE.json` — machine-readable state
 
+A fresh install into a project that had no `.claude/` directory before this command ran requires restarting the editor before `/session-start` is available — the editor's skill discovery reads `.claude/skills/` at startup, and a directory that did not exist yet is not picked up mid-session. Restart the editor rather than trying to work around it.
+
 ### Where the installer looks for mavericks
 
 The generated adopter wrapper (`buildBashWrapper()` in `mavp-install.js`) resolves the mavericks install location in this order (T-736):

@@ -350,6 +350,53 @@ try {
     );
   }
 
+  // --- (e) T-753: pre-commit AND pre-push both land in .claude/hooks/ on
+  // fresh install AND on --update. Uses the REAL mavp-install.js (not a
+  // fixture copy) against a plain scratch adopter target, so HOOK_SOURCE
+  // resolves to this repo's own real .claude/hooks/{pre-commit,pre-push} —
+  // exactly the source a real adopter install draws from. Measured (T-753):
+  // no existing test asserted the pre-commit copy at all (grep -ln
+  // pre-commit scripts/test-*.js hit only a comment in this file), so this
+  // is new coverage, not an extension of an existing assertion.
+  {
+    const adopterRoot = scratch('mavp-selfdetect-hookcopy-');
+    const adopterHooksDir = path.join(adopterRoot, '.claude', 'hooks');
+
+    // Fresh install (no --update flag): non-interactive stdin auto-proceeds.
+    execFileSync(
+      'node',
+      [REAL_INSTALL_SCRIPT, adopterRoot, '--stale-source-ok'],
+      { encoding: 'utf8' }
+    );
+    check(
+      fs.existsSync(path.join(adopterHooksDir, 'pre-commit')),
+      '(e) fresh install: .claude/hooks/pre-commit landed'
+    );
+    check(
+      fs.existsSync(path.join(adopterHooksDir, 'pre-push')),
+      '(e) fresh install: .claude/hooks/pre-push landed'
+    );
+
+    // Remove both to prove --update is what re-creates them (not leftover
+    // state from the fresh-install step above).
+    fs.rmSync(path.join(adopterHooksDir, 'pre-commit'), { force: true });
+    fs.rmSync(path.join(adopterHooksDir, 'pre-push'), { force: true });
+
+    execFileSync(
+      'node',
+      [REAL_INSTALL_SCRIPT, '--update', adopterRoot, '--stale-source-ok'],
+      { encoding: 'utf8' }
+    );
+    check(
+      fs.existsSync(path.join(adopterHooksDir, 'pre-commit')),
+      '(e) --update: .claude/hooks/pre-commit landed'
+    );
+    check(
+      fs.existsSync(path.join(adopterHooksDir, 'pre-push')),
+      '(e) --update: .claude/hooks/pre-push landed'
+    );
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} assertion(s) failed.`);
     process.exitCode = 1;

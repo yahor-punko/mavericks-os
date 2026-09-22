@@ -56,6 +56,7 @@ const {
   setBlockField,
   readTaskField,
   updateTaskField,
+  findAnnotatedFieldVariant,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -318,6 +319,34 @@ function main() {
 
   let backlog = readUtf8(BACKLOG_MD);
   let taskStatus = readUtf8(TASK_STATUS_MD);
+
+  // Writer refusal (T-745): when --commit is provided, refuse the ENTIRE run
+  // — write nothing — if any target task's TASK_STATUS.md block carries a
+  // top-level, non-indented annotated Evidence key (e.g.
+  // "- **Evidence (2026-09-20, QA):**") with NO canonical "- **Evidence:**"
+  // field anywhere in the block. Without this refusal, updateTaskEvidence()
+  // below would silently INSERT a brand-new canonical Evidence field next to
+  // the annotated one (setBlockField()'s insert-if-missing behavior), fork-
+  // ing a second field the task now carries forever. This check runs against
+  // the file as read (before any mutation in this run), so a batch that
+  // fails here has made zero writes.
+  if (commitHash) {
+    for (const taskId of normalisedIds) {
+      const loc = locateTaskBlock(taskStatus, taskId);
+      if (loc.count !== 1) continue;
+      const variant = findAnnotatedFieldVariant(loc.rawBlock, 'Evidence');
+      if (variant && !variant.canonicalExists) {
+        console.error(
+          `${RED}Error: ${taskId} has a top-level \`- **${variant.key}:**\` field but no canonical - **Evidence:** field — refusing to write.${RESET}`
+        );
+        console.error(
+          `${DIM}Create a - **Evidence:** field first (none exists on this task), then demote \`- **${variant.key}:**\` to an indented sub-bullet under it, before re-running --set-status --commit.${RESET}`
+        );
+        process.exitCode = 1;
+        return;
+      }
+    }
+  }
 
   const updated = [];
   const skipped = [];

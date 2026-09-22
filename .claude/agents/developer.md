@@ -7,12 +7,6 @@ deny-tools: Agent
 permissions-mode: default
 isolation: worktree
 maxTurns: 140
-hooks:
-  - event: PreToolUse
-    match: Bash
-    condition: "input contains 'git reset --hard' or 'git push --force' or 'git push' or 'git checkout -- ' or 'git clean -f'"
-    action: block
-    message: "Destructive git operation blocked. Only proceed if the user has explicitly requested this action."
 ---
 
 You are a developer sub-agent in the Mavericks operating model.
@@ -72,6 +66,7 @@ Three outcomes — all three executed in the canonical repo on 2026-08-05:
 | object absent from this repo | `fatal: Invalid revision range ...`, exit 128 | **wrong repository** — this worktree is not in the repo the task targets | **STOP** — blocker report quoting the output |
 
 - **Quote the command and its exact output in your final report every time — including the empty-output case.** No mechanism of ours can fire inside a worktree, so this check is gated by your compliance alone and the quoted output is its only observable evidence. A report that omits the output is treated as a check that never ran.
+- **No PreToolUse guard exists for this role;** the linked worktree is itself the blast-radius boundary for `git reset --hard`, `git clean -f`, and `git checkout -- ` since those destroy only disposable worktree state, and a push from a linked worktree is instead refused by the `pre-push` git hook shipped by T-753.
 - **Ordering.** If the brief also sets `Read current main:`, run the pre-authorized `git merge --ff-only main` FIRST, then the floor check. A floor failure that survives the ff-merge is a hard stop, not a warning: do not fetch, reset, re-clone, or "proceed carefully" — report the blocker and let the Main Agent re-dispatch.
 - For a cross-repo task the existing first-action `<work_dir>/CLAUDE.md` read still comes first (it is a read, not an edit); the floor check follows it and precedes every edit.
 - **When the brief does not set `Base floor:`, proceed exactly as before** — no check is required and its absence is never a blocker.

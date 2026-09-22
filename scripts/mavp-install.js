@@ -274,6 +274,11 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "  --handoff        Write HANDOFF.md context file for cross-session continuity"
   echo "  --close-session  Run end-of-session ritual (summarise, bump wave, commit)"
   echo "  --set-strategy-note  Set wave strategy context note (persists until --close-session)"
+  echo "  --set-next-action    Sanctioned write path for PROCESS_STATE.json's next_action field, gated by"
+  echo "                       classifyNextAction(): refuses (exit 1, no write) when the value contains a"
+  echo "                       volatile fact; a value not beginning with T-NNN is written with a non-blocking"
+  echo "                       advisory; regenerates PROCESS_STATE.md after a successful write"
+  echo "                       Usage: --set-next-action \"text\" (empty string clears)"
   echo "  --new-task       Interactively create and register a new task"
   echo "  --quick-task     Quickly register a task skeleton (title + problem only)"
   echo "  --apply-decomposition [FILE]  Parse architect decomposition block and register tasks"
@@ -327,6 +332,9 @@ elif [[ "\${1-}" == "--close-session" ]]; then
 elif [[ "\${1-}" == "--set-strategy-note" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-set-strategy-note.js" "$@"
+elif [[ "\${1-}" == "--set-next-action" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-set-next-action.js" "$@"
 elif [[ "\${1-}" == "--new-task" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-new-task.js" "$@"
@@ -994,29 +1002,51 @@ function emitDeployCiFragment(targetDir) {
   return 'added';
 }
 
+// Git hooks copied into .claude/hooks/ and wired via core.hooksPath.
+// pre-commit validates artifact sync on every commit; pre-push (T-753)
+// refuses a push issued from a linked git worktree — see the hook's own
+// header comment for the discriminator and the MAVP_ALLOW_WORKTREE_PUSH
+// escape hatch (for a bare-primary layout where every checkout is linked).
+const HOOK_NAMES = ['pre-commit', 'pre-push'];
+
 /**
- * Copy the pre-commit hook to .claude/hooks/ and configure git core.hooksPath.
- * Returns 'installed', 'updated', or 'skipped' (if source hook not found).
+ * Copy each of HOOK_NAMES into .claude/hooks/ and configure git
+ * core.hooksPath once. Returns a map of hookName -> 'installed' | 'updated'
+ * | 'skipped' (skipped when that hook's source is not found in this
+ * framework checkout — degrades per-hook, not all-or-nothing, so an older
+ * framework source missing pre-push still installs pre-commit).
  */
 function installHook(targetDir) {
-  const HOOK_SOURCE = path.join(FRAMEWORK_DIR, '..', '.claude', 'hooks', 'pre-commit');
-  if (!fs.existsSync(HOOK_SOURCE)) return 'skipped';
-
   const hooksDir = path.join(targetDir, '.claude', 'hooks');
-  if (!fs.existsSync(hooksDir)) fs.mkdirSync(hooksDir, { recursive: true });
+  const results = {};
+  let copiedAny = false;
 
-  const hookDst = path.join(hooksDir, 'pre-commit');
-  const existed = fs.existsSync(hookDst);
-  fs.copyFileSync(HOOK_SOURCE, hookDst);
-  fs.chmodSync(hookDst, 0o755);
+  for (const hookName of HOOK_NAMES) {
+    const hookSource = path.join(FRAMEWORK_DIR, '..', '.claude', 'hooks', hookName);
+    if (!fs.existsSync(hookSource)) {
+      results[hookName] = 'skipped';
+      continue;
+    }
 
-  try {
-    execSync('git config core.hooksPath .claude/hooks/', { cwd: targetDir, stdio: 'ignore' });
-  } catch {
-    // not a git repo or git not available — hook is still copied, user can configure manually
+    if (!fs.existsSync(hooksDir)) fs.mkdirSync(hooksDir, { recursive: true });
+
+    const hookDst = path.join(hooksDir, hookName);
+    const existed = fs.existsSync(hookDst);
+    fs.copyFileSync(hookSource, hookDst);
+    fs.chmodSync(hookDst, 0o755);
+    results[hookName] = existed ? 'updated' : 'installed';
+    copiedAny = true;
   }
 
-  return existed ? 'updated' : 'installed';
+  if (copiedAny) {
+    try {
+      execSync('git config core.hooksPath .claude/hooks/', { cwd: targetDir, stdio: 'ignore' });
+    } catch {
+      // not a git repo or git not available — hooks are still copied, user can configure manually
+    }
+  }
+
+  return results;
 }
 
 /**
@@ -1415,14 +1445,17 @@ async function main() {
       }
     }
 
-    // Re-sync .claude/hooks/
-    const hookResult = installHook(targetDir);
-    if (hookResult === 'updated') {
-      console.log(`  ${YELLOW}updated${RESET}  .claude/hooks/pre-commit`);
-      updatedCount++;
-    } else if (hookResult === 'installed') {
-      console.log(`  ${GREEN}new${RESET}     .claude/hooks/pre-commit`);
-      updatedCount++;
+    // Re-sync .claude/hooks/ (pre-commit + pre-push, T-753)
+    const hookResults = installHook(targetDir);
+    for (const hookName of HOOK_NAMES) {
+      const status = hookResults[hookName];
+      if (status === 'updated') {
+        console.log(`  ${YELLOW}updated${RESET}  .claude/hooks/${hookName}`);
+        updatedCount++;
+      } else if (status === 'installed') {
+        console.log(`  ${GREEN}new${RESET}     .claude/hooks/${hookName}`);
+        updatedCount++;
+      }
     }
 
     // Sync project-specific scripts from mavericks (agent, close-session).
@@ -2035,20 +2068,24 @@ async function main() {
     copyDirRecursive(srcDir, dstDir, '');
   }
 
-  // Install pre-commit hook into .claude/hooks/ and configure git
-  const hookResult = installHook(targetDir);
-  if (hookResult === 'installed') {
-    console.log(`  ${GREEN}✓${RESET} .claude/hooks/pre-commit ${DIM}(pre-commit hook)${RESET}`);
+  // Install pre-commit + pre-push hooks into .claude/hooks/ and configure git (T-753)
+  const hookResults = installHook(targetDir);
+  let anyHookInstalled = false;
+  for (const hookName of HOOK_NAMES) {
+    if (hookResults[hookName] === 'installed') {
+      const label = hookName === 'pre-push' ? 'pre-push hook — refuses pushes from a linked worktree' : 'pre-commit hook';
+      console.log(`  ${GREEN}✓${RESET} .claude/hooks/${hookName} ${DIM}(${label})${RESET}`);
+      anyHookInstalled = true;
+    }
+  }
+  if (anyHookInstalled) {
     console.log(`  ${GREEN}✓${RESET} git config core.hooksPath .claude/hooks/`);
   }
 
   console.log(`\n${GREEN}✓ Mavericks is installed in this project.${RESET}\n`);
-  console.log(`Open this folder with your agent (Claude Code) and tell it what you want`);
-  console.log(`to build — it drives the rest from here.\n`);
-  if (fs.existsSync(path.join(targetDir, 'ONBOARDING.md'))) {
-    console.log(`New here? There's a short ONBOARDING.md at the project root — your agent`);
-    console.log(`walks you through it on your first session, then it removes itself.\n`);
-  }
+  console.log(`${BOLD}Next steps:${RESET}`);
+  console.log(`1. Restart your editor (Claude Code or VS Code) so it picks up the new setup.`);
+  console.log(`2. Type ${BOLD}/session-start${RESET} to begin. Your agent takes it from there.\n`);
 }
 
 if (require.main === module) {

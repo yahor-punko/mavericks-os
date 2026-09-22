@@ -50,6 +50,7 @@ const {
   extractCommitHashesFromEvidence,
   buildReachableHashIndex,
   isHashReachable,
+  findAnnotatedFieldVariant,
 } = require('./mavp-operator-lib');
 
 /**
@@ -377,6 +378,7 @@ function getSeverityForCheck(checkName) {
     merged_missing_needs_fix_rounds: 'info',
     conflicting_needs_fix_rounds: 'warning',
     conflicting_validator_blocked: 'warning',
+    evidence_label_variant: 'warning',
     overdue_recheck: 'info',
     // T-628 (RC-1, docs/rca/2026-08-operator-channel-state-artifacts.md):
     // escalated from 'info' — an info-severity advisory on a mechanically
@@ -1251,44 +1253,107 @@ function checkDevDoneBranch(taskStatusRecords) {
 }
 
 /**
- * docs_refs: docs ref validator.
- * For merged tasks, scan Notes and Evidence fields in TASK_STATUS.md for
- * patterns matching docs/[A-Z_]+.md. Warn if the file does not exist.
- * AC and Proposed solution fields are NOT scanned.
+ * Resolve a docs-ref citation token (e.g. "docs/API_CONTRACT.md" or
+ * "repo-a/docs/API_CONTRACT.md") against the project root and, when the
+ * token's first path segment names a repo-map id, against that repo's own
+ * root (T-747).
+ *
+ * Three outcomes:
+ *   - the token resolves at the project root exactly as written -> resolved
+ *   - it doesn't, but its first segment is a repo-map id whose own path
+ *     exists locally, and `<entry.path>/<rest>` resolves -> resolved
+ *   - it doesn't, but its first segment is a repo-map id whose own path does
+ *     NOT exist locally -> treated as resolved (skipped): another repo's
+ *     file is not this ledger's claim to verify
+ *   - none of the above -> unresolved (genuinely missing)
+ *
+ * @param {string} token - The full cited path token, as written.
+ * @param {string} projectRoot - This repo's project root.
+ * @param {object} repoMap - parseRepoMap() output.
+ * @returns {boolean} true when the citation should NOT be reported.
+ */
+function isDocsRefResolved(token, projectRoot, repoMap) {
+  const fullPath = path.join(projectRoot, token);
+  if (fs.existsSync(fullPath)) return true;
+
+  const slashIdx = token.indexOf('/');
+  if (slashIdx === -1) return false;
+
+  const firstSegment = token.slice(0, slashIdx);
+  const rest = token.slice(slashIdx + 1);
+  const entry = repoMap[firstSegment];
+  if (!entry || !entry.path) return false;
+
+  const entryRoot = path.isAbsolute(entry.path) ? entry.path : path.join(projectRoot, entry.path);
+  if (!fs.existsSync(entryRoot)) return true; // another repo's file, not locally checkable — skip
+
+  return fs.existsSync(path.join(entryRoot, rest));
+}
+
+/**
+ * docs_refs: docs ref validator (T-747).
+ * For terminal-status tasks, scan Notes and Evidence fields in
+ * TASK_STATUS.md for citations matching
+ * `(?:[A-Za-z0-9_.-]+\/)*docs\/[A-Z_]+\.md` — the WHOLE path token, not just
+ * its trailing `docs/X.md` suffix (the pre-T-747 pattern stripped any repo
+ * prefix and then resolved the invented, suffix-only path, reporting a
+ * citation of a real sub-product doc as missing). AC and Proposed solution
+ * fields are NOT scanned.
+ *
+ * Findings are grouped per distinct unresolved token across ALL scanned
+ * records: a token cited by multiple tasks produces exactly one finding
+ * naming every citing task id, rather than one finding per task per field.
  */
 function checkDocsRefs(taskStatusRecords) {
   const projectRoot = getProjectRoot();
-  const findings = [];
-  const DOCS_REF_PATTERN = /docs\/[A-Z_]+\.md/g;
+  const repoMap = parseRepoMap(projectRoot);
+  const DOCS_REF_PATTERN = /(?:[A-Za-z0-9_.-]+\/)*docs\/[A-Z_]+\.md/g;
+  const fieldsToScan = ['Evidence', 'Notes'];
+
+  // token -> Set of citing task ids
+  const unresolved = new Map();
 
   for (const record of taskStatusRecords) {
     if (!TERMINAL_TASK_STATUSES.has(record.status)) continue;
 
-    const fieldsToScan = ['Evidence', 'Notes'];
+    // Dedup within a single record across both fields — citing the same
+    // token in both Evidence and Notes counts once for that task.
+    const seenInRecord = new Set();
+
     for (const fieldLabel of fieldsToScan) {
       const fieldValue = getFieldMultiline(record.rawBlock, fieldLabel);
       if (!fieldValue) continue;
 
       const matches = fieldValue.match(DOCS_REF_PATTERN) || [];
-      const seen = new Set();
       for (const match of matches) {
-        if (seen.has(match)) continue;
-        seen.add(match);
-        const fullPath = path.join(projectRoot, match);
-        if (!fs.existsSync(fullPath)) {
-          findings.push(
-            createFinding({
-              checkName: 'docs_ref_not_found',
-              taskId: record.taskId,
-              message: `${record.taskId} references ${match} in ${fieldLabel} but the file does not exist`,
-              repairTarget: 'TASK_STATUS.md',
-              suggestedAction: `Create ${match} or update the reference to an existing file.`,
-              details: { referencedPath: match, resolvedPath: fullPath, field: fieldLabel },
-            })
-          );
-        }
+        if (seenInRecord.has(match)) continue;
+        seenInRecord.add(match);
+
+        if (isDocsRefResolved(match, projectRoot, repoMap)) continue;
+
+        if (!unresolved.has(match)) unresolved.set(match, new Set());
+        unresolved.get(match).add(record.taskId);
       }
     }
+  }
+
+  const findings = [];
+  for (const [token, taskIdSet] of unresolved) {
+    const taskIds = Array.from(taskIdSet);
+    const idList = taskIds.join(', ');
+    findings.push(
+      createFinding({
+        checkName: 'docs_ref_not_found',
+        taskId: idList,
+        message:
+          taskIds.length > 1
+            ? `${idList} reference ${token} but the file does not exist`
+            : `${idList} references ${token} but the file does not exist`,
+        repairTarget: 'TASK_STATUS.md',
+        suggestedAction: `Create ${token} or update the reference to an existing file.`,
+        details: { referencedPath: token, taskIds },
+      })
+    );
   }
   return findings;
 }
@@ -1471,6 +1536,68 @@ function checkConflictingValidatorBlocked(taskStatusAllTasksAnySection) {
     checkName: 'conflicting_validator_blocked',
     fieldLabel: 'validator_blocked',
   });
+}
+
+// Scoped to the two labels the tooling actually reads or writes: Evidence
+// (getFieldMultiline/extractBlockField/setBlockField — including the
+// --set-status --commit write path) and Notes (checkDocsRefs above, and
+// close-session's terminal-status sweep writes it through the same
+// exact-match path). A third label like "Deferred reason (...)" has no
+// reader at all — firing on it would be noise, not signal.
+const EVIDENCE_LABEL_VARIANT_LABELS = ['Evidence', 'Notes'];
+
+/**
+ * evidence_label_variant (T-745): warning-severity check that fires when a
+ * task's TASK_STATUS.md block carries a TOP-LEVEL (non-indented) Evidence or
+ * Notes bullet whose bold key carries a parenthetical annotation, e.g.
+ * `- **Evidence (2026-09-20, QA):** commit: abc1234`.
+ *
+ * getFieldMultiline() above and extractBlockField()/setBlockField()
+ * (mavp-operator-lib.js) match the exact label `- **Evidence:**` /
+ * `- **Notes:**` only — an annotated top-level key is invisible to every one
+ * of those readers, and setBlockField() (reached by --set-status --commit)
+ * INSERTS a brand-new canonical field next to it, silently forking a second
+ * field. This check turns that into a diagnosable, named authoring error
+ * instead of a silent "missing content" misdiagnosis (e.g.
+ * merged_missing_commit_field reporting the field as absent when it is only
+ * mislabeled).
+ *
+ * The SANCTIONED way to carry a dated/annotated note is an INDENTED
+ * sub-bullet UNDER the canonical field — getFieldMultiline() already reads
+ * that shape correctly (inline value plus every following sub-bullet, at any
+ * indentation depth), so this check never fires on it: findAnnotatedFieldVariant()
+ * (mavp-operator-lib.js) only matches the top-level, non-indented form.
+ *
+ * Uses taskStatusAllTasksAnySection (whole-file, section-agnostic), matching
+ * the scope of the sibling conflicting_needs_fix_rounds/
+ * conflicting_validator_blocked checks above, since an annotated variant can
+ * just as easily land in an archived/recently-completed section.
+ */
+function checkEvidenceLabelVariant(taskStatusAllTasksAnySection) {
+  const findings = [];
+
+  for (const record of taskStatusAllTasksAnySection) {
+    for (const label of EVIDENCE_LABEL_VARIANT_LABELS) {
+      const variant = findAnnotatedFieldVariant(record.rawBlock, label);
+      if (!variant) continue;
+
+      const remedy = variant.canonicalExists
+        ? `Demote \`- **${variant.key}:**\` to an indented sub-bullet under the existing - **${label}:** field.`
+        : `Create a - **${label}:** field first (none exists on this task), then demote \`- **${variant.key}:**\` to an indented sub-bullet under it.`;
+
+      findings.push(
+        createFinding({
+          checkName: 'evidence_label_variant',
+          taskId: record.taskId,
+          message: `${record.taskId} has a top-level \`- **${variant.key}:**\` field — annotated ${label} keys are not read by getFieldMultiline/extractBlockField/setBlockField, which match the exact "- **${label}:**" label only.`,
+          repairTarget: 'TASK_STATUS.md',
+          suggestedAction: remedy,
+        })
+      );
+    }
+  }
+
+  return findings;
 }
 
 /**
@@ -1763,6 +1890,35 @@ function extractCommitEntriesFromEvidence(evidence) {
 }
 
 /**
+ * (T-746) Resolve the effective Repo:/Repos: value for a TASK_STATUS.md
+ * record. `Repo:`/`Repos:` is a BACKLOG-owned field — the sync-status mirror
+ * (mavp-operator-sync-status.js) only ever propagates Status, the heading
+ * title, and skeleton creation, never Repo: — so a TASK_STATUS record's own
+ * `.repo` field is populated only where a human happened to hand-copy it.
+ * Returns `tsRecord.repo` when present; otherwise falls back to the matching
+ * BACKLOG record's `.repo` (any section, including archived waves) via
+ * `backlogAnySectionIndex` (a taskId -> record[] map built with
+ * createTaskRecordIndex() over parseBacklogAllTasksAnySection() output).
+ * Returns null when neither side declares a repo, or when the index is
+ * absent/empty for this task id. Pure in-memory lookup — adds no git
+ * subprocess call.
+ *
+ * @param {object} tsRecord - A TASK_STATUS.md record (has .taskId, .repo).
+ * @param {Map} [backlogAnySectionIndex] - taskId -> BACKLOG record(s), any section.
+ * @returns {string|null}
+ */
+function resolveTaskStatusRecordRepo(tsRecord, backlogAnySectionIndex) {
+  if (tsRecord.repo) return tsRecord.repo;
+  if (!backlogAnySectionIndex) return null;
+
+  const backlogRecords = backlogAnySectionIndex.get(tsRecord.taskId);
+  if (!backlogRecords || backlogRecords.length === 0) return null;
+
+  const withRepo = backlogRecords.find((r) => r.repo);
+  return withRepo ? withRepo.repo : null;
+}
+
+/**
  * Resolve the repo id (from docs/REPO_MAP.md) that corresponds to `root`
  * itself — i.e. the entry whose `path:` field resolves to the same directory
  * being validated. Returns null when no entry matches (including when the
@@ -1862,9 +2018,16 @@ function resolveSelfRepoId(root, repoMap) {
  * @param {Array} options.recentlyCompletedRecords - TASK_STATUS.md "## Recently completed tasks" records.
  * @param {string} options.root - Absolute path to the git working tree being validated.
  * @param {Object} [options.repoMap] - Pre-parsed repo map (test injection); defaults to parseRepoMap(root).
+ * @param {Map} [options.backlogAnySectionIndex] - taskId -> BACKLOG record(s)
+ *   index (any section, including archived — see createTaskRecordIndex() /
+ *   parseBacklogAllTasksAnySection()), used by resolveTaskStatusRecordRepo()
+ *   to fall back to the BACKLOG-owned Repo:/Repos: field when a TASK_STATUS
+ *   record's own field is empty (T-746 — the sync-status mirror never
+ *   propagates Repo: onto TASK_STATUS.md, so most records only have it via
+ *   this fallback).
  * @returns {Array} findings
  */
-function checkCommitReachable({ activeRecords, recentlyCompletedRecords, root, repoMap }) {
+function checkCommitReachable({ activeRecords, recentlyCompletedRecords, root, repoMap, backlogAnySectionIndex }) {
   const reachableFromHeadHashes = getCommitHashesReachableFromHead(root);
   if (reachableFromHeadHashes === null) return []; // git unavailable — degrade silently
 
@@ -1930,8 +2093,9 @@ function checkCommitReachable({ activeRecords, recentlyCompletedRecords, root, r
     for (const record of records || []) {
       if (!TERMINAL_TASK_STATUSES.has(record.status)) continue;
 
-      if (selfRepoId && record.repo) {
-        const repoIds = record.repo.split(',').map((r) => r.trim().toLowerCase()).filter(Boolean);
+      const effectiveRepo = resolveTaskStatusRecordRepo(record, backlogAnySectionIndex);
+      if (selfRepoId && effectiveRepo) {
+        const repoIds = effectiveRepo.split(',').map((r) => r.trim().toLowerCase()).filter(Boolean);
         if (repoIds.length > 0 && !repoIds.includes(selfRepoId.toLowerCase())) continue; // cross-repo — skip
       }
 
@@ -2749,6 +2913,12 @@ const CHECKS = [
   // artifact lived in an archived/recently-completed section.
   { name: 'conflicting_needs_fix_rounds', run: (ctx) => checkConflictingNeedsFixRounds(ctx.taskStatusAllTasksAnySection) },
   { name: 'conflicting_validator_blocked', run: (ctx) => checkConflictingValidatorBlocked(ctx.taskStatusAllTasksAnySection) },
+  // evidence_label_variant (T-745): warning for a top-level, non-indented
+  // annotated Evidence/Notes key (e.g. "- **Evidence (2026-09-20, QA):**")
+  // — invisible to every exact-match reader/writer; names the remedy and
+  // quotes the offending key verbatim. Never fires on the sanctioned
+  // indented-sub-bullet form.
+  { name: 'evidence_label_variant', run: (ctx) => checkEvidenceLabelVariant(ctx.taskStatusAllTasksAnySection) },
   // overdue recheck advisory: info-level nudge for rechecks past their due date.
   { name: 'overdue_rechecks', run: (ctx) => checkOverdueRechecks(ctx.processStatePath) },
   // next_action volatile-facts advisory: info-level nudge when next_action embeds
@@ -2784,6 +2954,7 @@ const CHECKS = [
         activeRecords: ctx.taskStatusRecords,
         recentlyCompletedRecords: ctx.taskStatusRecentlyCompletedRecords,
         root: ctx.root,
+        backlogAnySectionIndex: createTaskRecordIndex(ctx.backlogAllTasksAnySection),
       }),
   },
   // cross-section terminal-status disagreement (T-543, failure): a BACKLOG
@@ -3090,6 +3261,7 @@ module.exports = {
   checkMergedNeedsFixRounds,
   checkConflictingNeedsFixRounds,
   checkConflictingValidatorBlocked,
+  checkEvidenceLabelVariant,
   checkOverdueRechecks,
   checkNextActionVolatileFacts,
   checkArtifactSizeBudget,
@@ -3099,6 +3271,7 @@ module.exports = {
   applyHoldDowngrade,
   recomputeComparisonAggregates,
   checkCommitReachable,
+  resolveTaskStatusRecordRepo,
   extractCommitHashesFromEvidence,
   extractCommitEntriesFromEvidence,
   ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD,

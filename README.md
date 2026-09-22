@@ -118,6 +118,15 @@ node "$HOME/.mavericks/scripts/mavp-install.js" /path/to/your-project
 
 See **Manual install** below (or **[`docs/core/BOOTSTRAP_GUIDE.md`](docs/core/BOOTSTRAP_GUIDE.md)** for the full step-by-step) for what this creates and how to configure it.
 
+### Your first session
+
+1. Restart your editor (Claude Code or VS Code) so it picks up what was just installed.
+2. Type /session-start and let your agent take it from there.
+
+A session is one sitting: you tell your agent where things stand or what you'd like to do next, it does the work, and when you're ready to stop for the day you ask it to close up — it remembers where things left off for next time.
+
+A wave is the bigger container: a batch of work aimed at one goal you set together with your agent. Once that goal is met, you close the wave together and move on to the next one.
+
 ### Requirements
 
 - Node.js 20+
@@ -178,21 +187,6 @@ export MAVERICKS_HOME=<path-to-mavericks>
 The wrapper also exports `MAVERICKS_PROJECT_ROOT` automatically when it runs, pointing framework scripts at *your* project's artifacts rather than the Mavericks checkout itself — you don't need to set this one yourself.
 
 For the full step-by-step, including editing `PROCESS_STATE.json`, adding your first tasks, and setting up the pre-commit validator hook, see **[`docs/core/BOOTSTRAP_GUIDE.md`](docs/core/BOOTSTRAP_GUIDE.md)**.
-
-### Step 3 — Run operator commands (from your bootstrapped project)
-
-```bash
-./scripts/mavp-operator --agent          # session-start JSON summary
-./scripts/mavp-operator                  # operator dashboard
-./scripts/mavp-operator --watch          # dashboard with auto-refresh (r refresh, s snapshot, q quit)
-./scripts/mavp-operator --snapshot       # text snapshot for agent context
-./scripts/mavp-operator --close-session  # end-of-session ritual (results review + optional git push)
-./scripts/mavp-operator --handoff        # capture context for the next session
-./scripts/mavp-operator --new-task       # interactive task creation
-./scripts/mavp-operator --archive-merged # archive merged tasks mid-wave
-./scripts/mavp-operator --version        # framework version
-./scripts/mavp-operator --help           # show all flags
-```
 
 ### Updating Mavericks
 
@@ -378,69 +372,15 @@ sibling repo A      sibling repo B      sibling repo C      sibling repo N
                     AWS deployment (15 active Lambdas)
 ```
 
-## Project artifacts
+## Under the hood
 
-For why these files are treated as the truth rather than notes about
-it, see [A status that isn't written down isn't real](#a-status-that-isnt-written-down-isnt-real) above.
+Reference material for readers who want the details — none of this is required to get started.
 
-| File | Purpose |
-|---|---|
-| `BACKLOG.md` | All tasks — status, owner, dependencies, acceptance criteria |
-| `TASK_STATUS.md` | Active tasks detail + recently completed |
-| `PROCESS_STATE.md` | Current initiative, stage, blockers, next handoff (auto-generated from `PROCESS_STATE.json`) |
-| `PROCESS_STATE.json` | Machine-readable state overlay for operator tools |
-
-## Task lifecycle
-
-```
-planned → in_progress → dev_done → [ux_review →] ready_for_qa → qa_passed → merged → [runtime_verified] → [deployed_dev →] [deployed_prod]
-```
-
-With UX review (task sets `requires_ux: true`):
-
-```
-dev_done → ux_review → ux_passed → ready_for_qa → ...
-                     ↘ ux_needs_fix → developer
-```
-
-With security review (task sets `requires_security_review: true`):
-
-```
-dev_done → security_review → security_passed → ready_for_qa → ...
-                            ↘ security_needs_fix → developer
-```
-
-Deploy statuses (`deployed_dev`, `deployed_prod`) are optional — projects without an explicit deploy pipeline stay on `merged` as their final state. See **[`docs/core/TASK_LIFECYCLE.md`](docs/core/TASK_LIFECYCLE.md)** for the full state machine, verification types, and evidence rules.
-
-## Roles
-
-Every sub-agent role has a spec in [`.claude/agents/`](.claude/agents/) — pass the relevant file to the sub-agent as context when spawning it. The main orchestrator agent (plans, coordinates, accepts/rejects sub-agent work, drives momentum) does not have its own spec file — it *is* the session you're running, on the `opus` alias (resolves to the latest Opus generation).
-
-| Role | Responsibility | Model | Prompt |
-|---|---|---|---|
-| **Developer** | Narrow, self-contained implementation slices | Sonnet (→ Opus for complex slices) | [`.claude/agents/developer.md`](.claude/agents/developer.md) |
-| **QA** | Functional validation against acceptance criteria — `qa_passed` or `needs_fix` | Sonnet (→ Opus for complex slices) | [`.claude/agents/qa.md`](.claude/agents/qa.md) |
-| **UX** | Flows, microcopy, feedback states, accessibility — `ux_passed` or `ux_needs_fix` (optional per task) | Sonnet (→ Opus for complex slices) | [`.claude/agents/ux.md`](.claude/agents/ux.md) |
-| **Security reviewer** | Security review for new inputs/outputs, auth flows, integrations — `security_passed` or `security_needs_fix` (optional per task) | Sonnet (→ Opus for a full, non-checklist review) | [`.claude/agents/security-reviewer.md`](.claude/agents/security-reviewer.md) |
-| **Product/docs** | Backlog clarity, process docs, artifact sync | Sonnet (→ Opus for complex slices) | [`.claude/agents/product-docs.md`](.claude/agents/product-docs.md) |
-| **Technical writer** | User-facing docs — README, getting-started guides, API reference, changelog | Sonnet (→ Opus for complex slices) | [`.claude/agents/technical-writer.md`](.claude/agents/technical-writer.md) |
-| **Architect** | Pre-task design brief and task decomposition (mandatory gate for every task, sole exception the XS fast lane — see [`docs/core/ORCHESTRATION_RULES.md`](docs/core/ORCHESTRATION_RULES.md)) | Fable 5 (primary) → Opus (fallback) | [`.claude/agents/architect.md`](.claude/agents/architect.md) |
-| **Analyst** | External technology and landscape research, ahead of architect review | Sonnet (→ Opus for complex slices) | [`.claude/agents/analyst.md`](.claude/agents/analyst.md) |
-| **Frontend design** | Visual/interaction design for frontend surfaces | Sonnet (→ Opus for complex slices) | [`.claude/agents/frontend-design.md`](.claude/agents/frontend-design.md) |
-| **UI designer** | UI component and layout design | Sonnet (→ Opus for complex slices) | [`.claude/agents/ui-designer.md`](.claude/agents/ui-designer.md) |
-| **Exa researcher** | Web research via the Exa search tool | Sonnet (→ Opus for complex slices) | [`.claude/agents/exa-researcher.md`](.claude/agents/exa-researcher.md) |
-
-Model and effort selection policy (including the exact escalation signals) lives in [`docs/AGENT_SPEC.md`](docs/AGENT_SPEC.md) — "Model selection" — the single source of truth.
-
-## Validator
-
-```bash
-node scripts/mavp-validator.js
-```
-
-Exit codes: `0` healthy · `1` drifting · `2` repair required (blocks commit via the pre-commit hook)
-
-Run after every `BACKLOG.md` or `TASK_STATUS.md` change. The pre-commit hook at `.claude/hooks/pre-commit` runs it automatically on every `git commit` once wired up (see `docs/core/BOOTSTRAP_GUIDE.md` — "Pre-commit hook").
+- **What files a bootstrapped project has, and why.** See [`docs/core/BOOTSTRAP_GUIDE.md`](docs/core/BOOTSTRAP_GUIDE.md) — "What gets installed".
+- **How a task moves from idea to shipped.** See [`docs/core/TASK_LIFECYCLE.md`](docs/core/TASK_LIFECYCLE.md).
+- **Who does what — developer, QA, architect, and the rest.** See the summary table in [`docs/core/ROLES.md`](docs/core/ROLES.md).
+- **How drift gets caught before it reaches a commit.** See [`docs/core/BOOTSTRAP_GUIDE.md`](docs/core/BOOTSTRAP_GUIDE.md) — "Pre-commit hook".
+- **The full list of operator commands.** Run `./scripts/mavp-operator --help` from your bootstrapped project.
 
 ## Security model
 

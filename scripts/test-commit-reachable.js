@@ -80,6 +80,17 @@
 //      in full — otherwise a shallow clone of a repo's whole history (what
 //      CI actually does) enumerates every indeterminate task in one
 //      unreadable line.
+//  16. (T-746) resolveTaskStatusRecordRepo() falls back to the matching
+//      BACKLOG record's Repo:/Repos: field (any section, including archived
+//      waves) when a TASK_STATUS record carries no Repo: field of its own —
+//      the sync-status mirror never propagates Repo: onto TASK_STATUS.md.
+//      checkCommitReachable() wired to a backlogAnySectionIndex correctly
+//      skips a cross-repo task whose fallback resolves to a different repo
+//      (fixture case); omitting the index (named mutant: "return
+//      tsRecord.repo only") makes the finding reappear; a BACKLOG record
+//      declaring Repos: <self-id>, other-repo is still checked, not skipped
+//      (control case) — the fallback never swallows a task that also names
+//      its own repo.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -90,6 +101,7 @@ const cp = require('node:child_process');
 
 const {
   checkCommitReachable,
+  resolveTaskStatusRecordRepo,
   extractCommitHashesFromEvidence,
   extractCommitEntriesFromEvidence,
   ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD,
@@ -97,6 +109,8 @@ const {
   isHashReachable,
   resolveSelfRepoId,
   getSeverityForCheck,
+  createTaskRecordIndex,
+  parseBacklogAllTasksAnySection,
 } = require('./mavp-validator.js');
 const { getCommitHashesReachableFromHead, isShallowRepository } = require('./mavp-operator-lib.js');
 
@@ -977,6 +991,149 @@ function makeShallowFixture(name) {
   console.log(
     `Test 15 passed: the stand-down message names at most ${ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD} task ids (the existing archived-aggregation cap) while still stating the true total count (${count}) and summarizing the remainder`
   );
+}
+
+// ---------------------------------------------------------------------------
+// Test 16 (T-746): resolveTaskStatusRecordRepo() BACKLOG-fallback + wiring.
+// ---------------------------------------------------------------------------
+{
+  // 16a: direct unit tests of resolveTaskStatusRecordRepo() itself.
+  {
+    const index = createTaskRecordIndex([
+      { taskId: 'T-990', repo: 'other-repo' },
+      { taskId: 'T-991', repo: null },
+    ]);
+
+    assert.strictEqual(
+      resolveTaskStatusRecordRepo({ taskId: 'T-990', repo: 'this-repo' }, index),
+      'this-repo',
+      'Test 16a FAIL: tsRecord.repo present must win over the BACKLOG fallback'
+    );
+    assert.strictEqual(
+      resolveTaskStatusRecordRepo({ taskId: 'T-990', repo: null }, index),
+      'other-repo',
+      'Test 16a FAIL: expected fallback to the matching BACKLOG record repo'
+    );
+    assert.strictEqual(
+      resolveTaskStatusRecordRepo({ taskId: 'T-991', repo: null }, index),
+      null,
+      'Test 16a FAIL: BACKLOG record with no repo of its own -> null'
+    );
+    assert.strictEqual(
+      resolveTaskStatusRecordRepo({ taskId: 'T-999', repo: null }, index),
+      null,
+      'Test 16a FAIL: no matching BACKLOG record at all -> null'
+    );
+    assert.strictEqual(
+      resolveTaskStatusRecordRepo({ taskId: 'T-990', repo: null }, undefined),
+      null,
+      'Test 16a FAIL: no index supplied at all (mutant shape: "return tsRecord.repo only") -> null, not the BACKLOG value'
+    );
+
+    console.log('Test 16a passed: resolveTaskStatusRecordRepo() prefers tsRecord.repo, falls back to the BACKLOG index, and returns null when neither resolves');
+  }
+
+  // 16b-16d: checkCommitReachable() wired end-to-end with a real BACKLOG
+  // "archived wave" section — a TASK_STATUS "Recently completed" record with
+  // NO Repo: field of its own resolves its repo through the BACKLOG index.
+  {
+    const { root, orphanHash } = makeGitFixture('t746-repo-fallback');
+    const repoMap = { 'this-repo': { path: root }, 'other-repo': { path: '/tmp/does-not-matter' } };
+
+    // Fixture case (16b): BACKLOG's archived-wave counterpart declares
+    // Repo: other-repo; the TASK_STATUS "Recently completed" record itself
+    // carries no Repo: field at all (the realistic mirror-gap shape).
+    const backlogMarkdown = [
+      '# BACKLOG',
+      '',
+      '## Active Wave',
+      '',
+      '## Wave 1 — Archived',
+      '',
+      '### T-990 — Fixture archived task (fallback resolves to other-repo)',
+      '- **Status:** merged',
+      '- **Repo:** other-repo',
+      '- **Verification type:** runtime',
+      '',
+      '### T-991 — Fixture archived task (control: Repos includes self)',
+      '- **Status:** merged',
+      '- **Repos:** this-repo, other-repo',
+      '- **Verification type:** runtime',
+      '',
+    ].join('\n');
+    const backlogAnySectionIndex = createTaskRecordIndex(parseBacklogAllTasksAnySection(backlogMarkdown));
+
+    const recentlyCompletedRecords = [
+      {
+        taskId: 'T-990',
+        status: 'merged',
+        repo: null,
+        rawBlock: taskBlock({ taskId: 'T-990', status: 'merged', repo: null, evidenceLine: `commit: ${orphanHash}` }),
+      },
+    ];
+
+    const findingsWithIndex = checkCommitReachable({
+      activeRecords: [],
+      recentlyCompletedRecords,
+      root,
+      repoMap,
+      backlogAnySectionIndex,
+    });
+    assert.strictEqual(
+      findingsWithIndex.length,
+      0,
+      `Test 16b FAIL: expected the cross-repo skip to fire via the BACKLOG fallback (Repo: other-repo), got: ${JSON.stringify(findingsWithIndex)}`
+    );
+    console.log('Test 16b passed: a TASK_STATUS record with no Repo: of its own is skipped via its archived BACKLOG counterpart\'s Repo: field');
+
+    // Named mutant (16c): "return tsRecord.repo only" — simulated by omitting
+    // backlogAnySectionIndex entirely, which is exactly what
+    // resolveTaskStatusRecordRepo() falls back to when there is no index to
+    // consult (see Test 16a's last assertion). Without the fallback the
+    // record's own (empty) repo can no longer skip it, so the finding must
+    // reappear.
+    const findingsWithoutIndex = checkCommitReachable({
+      activeRecords: [],
+      recentlyCompletedRecords,
+      root,
+      repoMap,
+      // backlogAnySectionIndex intentionally omitted
+    });
+    assert.strictEqual(
+      findingsWithoutIndex.length,
+      1,
+      `Test 16c FAIL: expected the mutant (no BACKLOG fallback) to let the finding reappear, got: ${JSON.stringify(findingsWithoutIndex)}`
+    );
+    assert.strictEqual(findingsWithoutIndex[0].taskId, 'T-990', 'Test 16c FAIL: taskId mismatch on the reappeared finding');
+    assert.strictEqual(findingsWithoutIndex[0].severity, 'info', 'Test 16c FAIL: expected INFO severity for a Recently-completed entry');
+    console.log('Test 16c passed: named mutant "return tsRecord.repo only" (no BACKLOG fallback) makes the commit_unreachable finding reappear');
+
+    // Control case (16d): the BACKLOG record's Repos: list includes THIS
+    // repo alongside another — the task must still be checked, never
+    // skipped, even though the fallback resolves a non-empty repo value.
+    const recentlyCompletedControlRecords = [
+      {
+        taskId: 'T-991',
+        status: 'merged',
+        repo: null,
+        rawBlock: taskBlock({ taskId: 'T-991', status: 'merged', repo: null, evidenceLine: `commit: ${orphanHash}` }),
+      },
+    ];
+    const controlFindings = checkCommitReachable({
+      activeRecords: [],
+      recentlyCompletedRecords: recentlyCompletedControlRecords,
+      root,
+      repoMap,
+      backlogAnySectionIndex,
+    });
+    assert.strictEqual(
+      controlFindings.length,
+      1,
+      `Test 16d FAIL: a task whose fallback-resolved Repos: includes the self repo must still be checked, got: ${JSON.stringify(controlFindings)}`
+    );
+    assert.strictEqual(controlFindings[0].taskId, 'T-991', 'Test 16d FAIL: taskId mismatch on the control-case finding');
+    console.log('Test 16d passed: a BACKLOG record whose Repos: includes the self repo alongside another is still checked, not skipped, via the fallback');
+  }
 }
 
 // ---------------------------------------------------------------------------

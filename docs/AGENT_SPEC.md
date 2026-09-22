@@ -142,6 +142,16 @@ MAVP_REPORT role=<role> task=<T-NNN|n/a> verdict=<done|blocked|needs_fix|pass|fa
 | architect | Codebase analysis, system design | Pre-task analysis, cross-service design, task decomposition |
 | analyst | Web research, synthesis | Technology landscape, library/API options, competitive research |
 
+### Frontmatter contract
+
+The harness reads a fixed subset of the keys in each `.claude/agents/<role>.md` frontmatter block: `name`, `description`, `model`, `tools`, `isolation`, `maxTurns`. Two further keys — `deny-tools` and `permissions-mode` — are Mavericks-only: the harness ignores them entirely, and they exist solely for `scripts/test-agent-spec-sync.js` to assert against.
+
+**An ill-formed `hooks:` value silently unregisters the agent.** This is not a validation error surfaced anywhere — the role simply stops appearing in the Agent tool's type list, and a spawn returns `Agent type '<role>' not found` with no reference back to the frontmatter as the cause. Measured 2026-09-21 (T-752, five-probe matrix): a `hooks:` block written as a bare YAML sequence of `- event: ... / condition: ... / action: ... / message: ...` items is rejected and unregisters the spec; a `hooks:` block written as the harness's documented event-keyed mapping (`PreToolUse:` → `hooks:` → `- type: command, command: ...`) registers correctly; and quoting the `description:` scalar makes no difference to registration either way.
+
+**Frontmatter `PreToolUse` hooks were measured not to fire at all under this repo's shipped configuration.** A schema-correct, event-keyed `PreToolUse`/`Bash` hook that unconditionally exits 2 and writes to stderr on every Bash call was spawned and did not fire — the probing agent's own `git status` returned normal output. Recorded alongside this measurement: `hasTrustDialogAccepted: false` for this project in `~/.claude.json`, and `claude --version` reporting `2.1.197` while `isolation: worktree` demonstrably works — a key the harness changelog places at `2.1.267`, meaning the running harness is newer than the binary reports. Because of this, **no role spec may carry a `hooks:` block without a quoted live-fire observation** — a schema-valid block that never fires reads as a working guard to the next author while providing none, which is exactly how two shipped documents came to assert a guard (`.claude/agents/developer.md`'s destructive-git block) that had been inert since 2026-05-29.
+
+**Registration is proven only by a live spawn, never by reading the file.** Byte-identical frontmatter has been observed to register successfully at one point in time and fail to register later with no diff against it (T-752) — the harness-side cause of that specific regression was not isolated, only the frontmatter-side contributor (the sequence-form `hooks:` block) was. Treat "the file looks correct" and "the role is spawnable" as two independent claims; only the second is evidence.
+
 ## Model selection
 
 This section is the **single source of truth** for model selection across the framework. `docs/core/ROLES.md`, `CLAUDE.md`, and `docs/core/ORCHESTRATION_RULES.md` reference this section by pointer — they do not re-inline the policy.

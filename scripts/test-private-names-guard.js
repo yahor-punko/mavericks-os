@@ -277,4 +277,69 @@ function makeFixture(name) {
   console.log('Test 6 passed: a matching identifier in a non-ship-classified staged file never blocks the commit');
 }
 
-console.log('\nAll T-600 private-names-guard assertions passed.');
+// ---------------------------------------------------------------------------
+// Constructed at RUNTIME (concatenation), same discipline as FAKE_IDENTIFIER
+// above — the source text of this file must never carry a contiguous
+// "/Users/<segment>" substring, or this ship-classified test file would trip
+// the very guard it exercises. Each array element is a separate string
+// literal; the slash-joined path only exists once Array.prototype.join runs.
+// ---------------------------------------------------------------------------
+const FAKE_ABS_PATH = ['/Users', 'octocat', 'private-notes.txt'].join('/');
+
+// ---------------------------------------------------------------------------
+// Test 7 (T-762 AC 3): names source ABSENT, a staged ship-classified file
+// containing a runtime-constructed absolute path in its CONTENTS -> commit
+// is BLOCKED via the always-on "Absolute /Users/ path" category, and the
+// output names the category, file and line. Proves the always-on categories
+// now run even with no private-names source, which is the T-762 fix.
+// ---------------------------------------------------------------------------
+{
+  const root = makeFixture('test7-always-on-blocks-no-names');
+  // Deliberately no writeNamesFile() call — .mavp/private-names never created.
+  fs.writeFileSync(path.join(root, 'README.md'), `hello world\nsee ${FAKE_ABS_PATH} for details\n`, 'utf8');
+  gitAdd(root, ['README.md']);
+
+  const result = commit(root, 'test 7 always-on category, no names source');
+
+  assert.notStrictEqual(
+    result.status,
+    0,
+    `Test 7 FAIL: expected commit to be BLOCKED by the always-on absolute-path category ` +
+      `even with no names source, got exit ${result.status}`
+  );
+  const out = `${result.stdout}${result.stderr}`;
+  assert.ok(out.includes('README.md:2'), `Test 7 FAIL: expected finding to name "README.md:2", got:\n${out}`);
+  assert.ok(
+    out.includes('[Absolute /Users/ path]'),
+    `Test 7 FAIL: expected "[Absolute /Users/ path]" category, got:\n${out}`
+  );
+  console.log(
+    'Test 7 passed: with no names source, a staged ship file with a runtime-constructed ' +
+      'absolute path in CONTENTS still blocks the commit via the always-on category'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Test 8 (T-762 AC 4, control case): the identical constructed absolute path
+// staged in a NON-ship-classified file -> commit PROCEEDS (exit 0). Without
+// this control, the fix could be indistinguishable from "block everything".
+// ---------------------------------------------------------------------------
+{
+  const root = makeFixture('test8-always-on-control-non-ship');
+  // Deliberately no writeNamesFile() call, same as Test 7.
+  fs.writeFileSync(path.join(root, 'internal-notes.txt'), `see ${FAKE_ABS_PATH} for details\n`, 'utf8');
+  gitAdd(root, ['internal-notes.txt']);
+
+  const result = commit(root, 'test 8 control: absolute path in non-ship file');
+
+  assert.strictEqual(
+    result.status,
+    0,
+    `Test 8 FAIL: expected commit to PROCEED (file is not ship-classified), got exit ${result.status}:\n${result.stdout}${result.stderr}`
+  );
+  console.log(
+    'Test 8 passed: the identical absolute-path leak in a non-ship-classified file never blocks the commit'
+  );
+}
+
+console.log('\nAll T-600/T-762 private-names-guard assertions passed.');

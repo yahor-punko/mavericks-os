@@ -16,6 +16,11 @@ if [[ "${1-}" == "--help" ]]; then
   echo "  --close-session  Run end-of-session ritual (summarise, bump wave, commit)"
   echo "  --set-strategy-note  Set wave strategy context note (persists in PROCESS_STATE.json until --close-session)"
   echo "                       Usage: --set-strategy-note \"text\" (empty string clears)"
+  echo "  --set-next-action    Sanctioned write path for PROCESS_STATE.json's next_action field, gated by"
+  echo "                       classifyNextAction(): refuses (exit 1, no write) when the value contains a"
+  echo "                       volatile fact; a value not beginning with T-NNN is written with a non-blocking"
+  echo "                       advisory; regenerates PROCESS_STATE.md after a successful write"
+  echo "                       Usage: --set-next-action \"text\" (empty string clears)"
   echo "  --new-task       Interactively create and register a new task"
   echo "                   Usage: --new-task --title \"...\" [--owner <role>] [--repo <name>]"
   echo "                   [--depends-on <T-NNN>] [--requires-ux <y/n>] [--criteria \"...\"] [--verification-type <type>]"
@@ -103,6 +108,9 @@ elif [[ "${1-}" == "--close-session" ]]; then
 elif [[ "${1-}" == "--set-strategy-note" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-set-strategy-note.js" "$@"
+elif [[ "${1-}" == "--set-next-action" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-set-next-action.js" "$@"
 elif [[ "${1-}" == "--new-task" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-new-task.js" "$@"
