@@ -62,6 +62,26 @@ const PROPOSAL_FILE = path.join(SKILL_PROPOSALS_DIR, `${role}-${today}.md`);
 // ---------------------------------------------------------------------------
 async function main() {
   // -----------------------------------------------------------------------
+  // Step 0: Agent spec existence check (T-773)
+  //
+  // This MUST run before any trajectory read/write. extractTrajectories() is
+  // a pure read, but writeTrajectories() unconditionally mkdirs
+  // .mavp/trajectories/ and writes <role>.jsonl (even an empty file for zero
+  // records) — so an unknown role previously reached that write before ever
+  // hitting the agent-spec check that used to live near the bottom of this
+  // function (guarded behind the N>=8 gate, which exits 0 long before Step 8
+  // could run for a fresh/unknown role). Checking here, first, means an
+  // unknown role exits 1 naming the missing spec path with zero filesystem
+  // side effects under .mavp/ — matching this file's own header contract
+  // ("1 — bad role arg").
+  // -----------------------------------------------------------------------
+  if (!fs.existsSync(AGENT_SPEC_FILE)) {
+    console.error(`Error: agent spec not found at ${AGENT_SPEC_FILE}`);
+    console.error(`Available roles are listed in .claude/agents/`);
+    process.exit(1);
+  }
+
+  // -----------------------------------------------------------------------
   // Step 1: Load / refresh trajectories
   // -----------------------------------------------------------------------
   // Always re-extract from TASK_STATUS so the file stays current
@@ -154,15 +174,6 @@ async function main() {
     console.error('@anthropic-ai/sdk is an optional dependency used only by --reflect-skill.');
     console.error('Install it with:');
     console.error('  npm install');
-    process.exit(1);
-  }
-
-  // -----------------------------------------------------------------------
-  // Step 8: Check agent spec file exists
-  // -----------------------------------------------------------------------
-  if (!fs.existsSync(AGENT_SPEC_FILE)) {
-    console.error(`Error: agent spec not found at ${AGENT_SPEC_FILE}`);
-    console.error(`Available roles are listed in .claude/agents/`);
     process.exit(1);
   }
 

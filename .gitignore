@@ -43,6 +43,13 @@ HANDOFF.md
 # file keeps `git status --porcelain` clean, which both of those scripts require.
 .mavp/assembled-suite-receipt.json
 
+# Full-suite receipt (T-763) — machine-local evidence that an unfiltered,
+# all-green scripts/run-tests.js run happened at a specific commit. Written by
+# scripts/run-tests.js, checked by .claude/hooks/pre-push via
+# scripts/mavp-suite-receipt.js. Must stay untracked AND ignored, for the same
+# two reasons as the assembled-suite receipt above.
+.mavp/suite-receipt.json
+
 # Session-transcript archive (opt-in, --transcript-archive) — privacy-sensitive
 # full session content, local-disk only, never git-tracked
 .mavp/transcripts/

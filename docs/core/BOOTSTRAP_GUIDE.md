@@ -180,6 +180,13 @@ node "$HOME/.mavericks/scripts/mavp-install.js" --update /path/to/your-project
 
 This re-copies `.claude/hooks/pre-commit` from the mavericks source along with agents, skills, and rules.
 
+## Pre-push hook
+
+Installed the same way as the pre-commit hook above (same `.claude/hooks/` directory, same `core.hooksPath` wiring — `git config core.hooksPath` confirms it is active), `.claude/hooks/pre-push` runs two independent gates before every `git push`, each with its own escape hatch; setting one hatch never silently disables the other:
+
+1. **Worktree refusal (T-753)** — refuses a push issued from a linked git worktree (pushes belong to the Main Agent, from the primary checkout, after integrating a sub-agent's commits by cherry-pick/merge, never straight from the worktree that produced them). Escape hatch: `MAVP_ALLOW_WORKTREE_PUSH=1` — for a bare-primary layout where every checkout on the machine is a linked worktree and no single "primary" exists to push from. This gate applies wherever the hook is installed; it is not canonical-only.
+2. **Full-suite receipt gate (T-763)** — refuses a push whose HEAD has no current full-suite receipt; see `docs/core/ORCHESTRATION_RULES.md` — "Test-execution scope (worktree developers)" for what the receipt is and how staleness is judged. Escape hatch: `MAVP_SKIP_SUITE_RECEIPT=1` — for a push that genuinely cannot wait on a suite run. **This gate is inert outside the canonical repo**: it checks for `scripts/mavp-suite-receipt.js` and does nothing when the file is absent, which is the case in every adopter project (the installer never ships that checker script to a bootstrapped project); in the public mirror — which does carry the checker but is not the canonical repo — it prints a SKIP line and exits 0 rather than enforcing. **Accepted boundary:** the gate judges the checkout's HEAD, not the ref actually being pushed, so `git push origin other-branch:main` is checked against the wrong commit — accepted rather than guarded, since this repo's push convention is always HEAD → main.
+
 ## Close-session commit contract
 
 `--close-session` (`scripts/mavp-operator-close-session.js`, both interactive and non-interactive modes) creates a session commit — `chore: close session <date>` — as part of every close-session run, gated only by the validator's exit code:

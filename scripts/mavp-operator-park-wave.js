@@ -24,8 +24,17 @@
  * matching parked_waves entry.
  *
  * Usage:
- *   ./scripts/mavp-operator --park-wave [N] --reason "text"
+ *   ./scripts/mavp-operator --park-wave [N] --reason "text" [--until YYYY-MM-DD]
  *   ./scripts/mavp-operator --unpark-wave <N>
+ *
+ * T-769: --until YYYY-MM-DD additionally arms a wave-level recheck in
+ * PROCESS_STATE.json rechecks[] ({ id, wave, title: "Wave N — <reason>",
+ * due, armed_at, note }, no `task` key) inside the SAME single write that
+ * appends parked_waves, so the parked wave resurfaces as a due recheck on
+ * that date. The date is validated (format, not before today) before any
+ * file is written. --unpark-wave N removes every rechecks[] entry whose
+ * `wave` equals N, printing one "acked RC-N (parked-wave reminder)" line per
+ * removal. Without --until, --park-wave behaves exactly as before.
  *
  * N defaults to the current wave (PROCESS_STATE.json's `wave` field) when
  * omitted from --park-wave. --unpark-wave always requires an explicit N.
@@ -49,6 +58,9 @@ const {
   parkedTaskStatusHeading,
   printRepoIdentityHeader,
   guardMutatingRoot,
+  appendRecheckEntry,
+  todayIso,
+  validateUntil,
 } = require('./mavp-operator-lib.js');
 
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -64,7 +76,7 @@ const RED = '\x1b[31m';
 
 function readUtf8(p) { return fs.readFileSync(p, 'utf8'); }
 function writeUtf8(p, content) { fs.writeFileSync(p, content, 'utf8'); }
-function today() { return new Date().toISOString().slice(0, 10); }
+function today() { return todayIso(); }
 
 function readProcessState() {
   if (!fs.existsSync(PROCESS_STATE_JSON)) {
@@ -101,12 +113,19 @@ function runValidatorOnce() {
 
 function printUsage() {
   console.error('Usage:');
-  console.error('  mavp-operator --park-wave [N] --reason "text"');
+  console.error('  mavp-operator --park-wave [N] --reason "text" [--until YYYY-MM-DD]');
   console.error('  mavp-operator --unpark-wave <N>');
   console.error('');
   console.error('  N          Wave number (defaults to the current wave for --park-wave; required for --unpark-wave)');
   console.error('  --reason   Required for --park-wave — one-line reason recorded in parked_waves');
+  console.error('  --until    Optional for --park-wave — date (YYYY-MM-DD, today or later) on which the parked');
+  console.error('             wave resurfaces as a due recheck; --unpark-wave auto-acks it');
 }
+
+// T-769: --until validation lives in validateUntil() in mavp-operator-lib.js
+// (lifted there by T-771 so --ack-recheck --rearm --due can share the same
+// rules) — imported above. Checked before ANY file write (compute-then-write
+// contract).
 
 /**
  * --park-wave: move every BACKLOG.md Active Wave block and every
@@ -116,7 +135,7 @@ function printUsage() {
  * Both file transforms are computed in-memory before either file is
  * written, so a failure on either side leaves both files untouched.
  */
-function parkWave(waveNumber, reason) {
+function parkWave(waveNumber, reason, until) {
   if (!fs.existsSync(BACKLOG_MD)) {
     throw new Error(`BACKLOG.md not found at ${BACKLOG_MD}`);
   }
@@ -151,12 +170,24 @@ function parkWave(waveNumber, reason) {
   const state = readProcessState();
   if (!Array.isArray(state.parked_waves)) state.parked_waves = [];
   state.parked_waves.push(`Wave ${waveNumber} — ${reason}`);
+  let recheck = null;
+  if (until) {
+    // T-769: folded into this same single PROCESS_STATE.json write.
+    recheck = appendRecheckEntry(state, {
+      wave: waveNumber,
+      title: `Wave ${waveNumber} — ${reason}`,
+      due: until,
+      note: `parked wave — resume with --unpark-wave ${waveNumber}`,
+      today: today(),
+    });
+  }
   state.last_updated = today();
   writeProcessState(state);
 
   return {
     backlogTaskIds: backlogResult.taskIds,
     taskStatusTaskIds: taskStatusResult ? taskStatusResult.taskIds : [],
+    recheck,
   };
 }
 
@@ -201,12 +232,25 @@ function unparkWave(waveNumber) {
     const re = new RegExp(`^Wave\\s+${waveNumber}\\b`);
     state.parked_waves = state.parked_waves.filter((entry) => !re.test(String(entry)));
   }
+  // T-769: auto-ack every wave-level recheck armed for this wave by
+  // --park-wave --until, in this same single write.
+  const ackedRecheckIds = [];
+  if (Array.isArray(state.rechecks)) {
+    state.rechecks = state.rechecks.filter((entry) => {
+      const matches = entry && typeof entry === 'object'
+        && entry.wave !== undefined && entry.wave !== null
+        && String(entry.wave) === String(waveNumber);
+      if (matches) ackedRecheckIds.push(entry.id || '(no id)');
+      return !matches;
+    });
+  }
   state.last_updated = today();
   writeProcessState(state);
 
   return {
     backlogTaskIds: backlogResult.taskIds,
     taskStatusTaskIds: taskStatusResult ? taskStatusResult.taskIds : [],
+    ackedRecheckIds,
   };
 }
 
@@ -225,6 +269,7 @@ function main() {
   if (mode === '--park-wave') {
     let waveNumber = null;
     let reason = null;
+    let until = null;
     let i = 0;
     if (rest[0] && !rest[0].startsWith('--')) {
       waveNumber = rest[0];
@@ -235,6 +280,10 @@ function main() {
         reason = rest[++i];
       } else if (rest[i].startsWith('--reason=')) {
         reason = rest[i].slice('--reason='.length);
+      } else if (rest[i] === '--until' && rest[i + 1] !== undefined) {
+        until = rest[++i];
+      } else if (rest[i].startsWith('--until=')) {
+        until = rest[i].slice('--until='.length);
       } else {
         console.error(`Error: Unknown argument "${rest[i]}".`);
         console.error('');
@@ -250,6 +299,15 @@ function main() {
       printUsage();
       process.exitCode = 1;
       return;
+    }
+
+    if (until !== null) {
+      const untilError = validateUntil(until, today());
+      if (untilError) {
+        console.error(`Error: ${untilError}`);
+        process.exitCode = 1;
+        return;
+      }
     }
 
     let resolvedWave;
@@ -272,9 +330,17 @@ function main() {
       resolvedWave = state.wave;
     }
 
+    // T-769: a wave recheck needs an integer wave number — refuse before
+    // any write rather than failing mid-way after BACKLOG.md is rewritten.
+    if (until !== null && !/^\d+$/.test(String(resolvedWave))) {
+      console.error(`Error: cannot arm a --until reminder: wave number "${resolvedWave}" is not an integer.`);
+      process.exitCode = 1;
+      return;
+    }
+
     let result;
     try {
-      result = parkWave(resolvedWave, reason);
+      result = parkWave(resolvedWave, reason, until);
     } catch (err) {
       console.error(`${RED}Error: ${err.message}${RESET}`);
       process.exitCode = 2;
@@ -284,6 +350,9 @@ function main() {
     console.log(`${GREEN}✓ BACKLOG.md — parked ${result.backlogTaskIds.length} task(s) into "${parkedBacklogHeading(resolvedWave)}": ${result.backlogTaskIds.join(', ') || '(none)'}${RESET}`);
     console.log(`${GREEN}✓ TASK_STATUS.md — parked ${result.taskStatusTaskIds.length} task(s) into "${parkedTaskStatusHeading(resolvedWave)}": ${result.taskStatusTaskIds.join(', ') || '(none)'}${RESET}`);
     console.log(`${DIM}parked_waves: "Wave ${resolvedWave} — ${reason}"${RESET}`);
+    if (result.recheck) {
+      console.log(`${DIM}rechecks: armed ${result.recheck.id} for Wave ${resolvedWave} (due ${result.recheck.entry.due}) — --unpark-wave ${resolvedWave} auto-acks it${RESET}`);
+    }
 
     process.exitCode = runValidatorOnce();
     return;
@@ -311,6 +380,9 @@ function main() {
     console.log(`${GREEN}✓ BACKLOG.md — restored ${result.backlogTaskIds.length} task(s) to Active Wave: ${result.backlogTaskIds.join(', ') || '(none)'}${RESET}`);
     console.log(`${GREEN}✓ TASK_STATUS.md — restored ${result.taskStatusTaskIds.length} task(s) to Active tasks: ${result.taskStatusTaskIds.join(', ') || '(none)'}${RESET}`);
     console.log(`${DIM}removed parked_waves entry for Wave ${waveNumber}${RESET}`);
+    for (const rcId of result.ackedRecheckIds) {
+      console.log(`acked ${rcId} (parked-wave reminder)`);
+    }
 
     process.exitCode = runValidatorOnce();
     return;

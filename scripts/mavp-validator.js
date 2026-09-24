@@ -28,6 +28,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   computeDueRechecks,
+  recheckRef,
   classifyNextAction,
   ACTION_TARGET_FOLLOWER_NOUNS,
   extractHeadingIds,
@@ -2196,15 +2197,21 @@ function checkOverdueRechecks(processStatePath) {
 
   return overdue.map((entry) => {
     const rcId = entry.id || '(no id)';
-    const taskRef = entry.task || '(no task ref)';
+    // T-769: shared recheckRef() — "T-NNN" for task entries, "Wave N" for
+    // wave entries armed by --park-wave --until, else the RC id.
+    const ref = recheckRef(entry) || '(no ref)';
     const title = entry.title || '(no title)';
     const dueDate = entry.due;
+    const isWaveEntry = !entry.task && entry.wave !== undefined && entry.wave !== null && entry.wave !== '';
+    const suggestedAction = isWaveEntry
+      ? `Resume the parked wave with --unpark-wave ${entry.wave} (auto-acks this reminder), or dismiss it with --ack-recheck ${rcId}.`
+      : `Review ${ref} and either act on the recheck or remove/update the entry in PROCESS_STATE.json rechecks[].`;
     return createFinding({
       checkName: 'overdue_recheck',
-      taskId: taskRef,
-      message: `Recheck ${rcId} for ${taskRef} ("${title}") was due ${dueDate} and is overdue`,
+      taskId: ref,
+      message: `Recheck ${rcId} for ${ref} ("${title}") was due ${dueDate} and is overdue`,
       repairTarget: 'PROCESS_STATE.json',
-      suggestedAction: `Review ${taskRef} and either act on the recheck or remove/update the entry in PROCESS_STATE.json rechecks[].`,
+      suggestedAction,
     });
   });
 }

@@ -152,6 +152,11 @@ function cleanup(...dirs) {
   for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 }
 
+// T-763: every stdout line carrying the propose-only receipt advisory.
+function suiteReceiptLines(stdout) {
+  return stdout.split('\n').filter((line) => line.includes('Suite receipt:'));
+}
+
 /**
  * T-648: interactive runs that must resolve MORE THAN ONE `rl.question()`
  * cannot use runCloseSessionCli()'s static spawnSync `input` buffer —
@@ -290,6 +295,18 @@ async function main() {
   assert.ok(
     !/session commit SKIPPED/.test(result.stdout),
     'Case 10 FAIL: should not print "session commit SKIPPED" on exit 1 (interactive)'
+  );
+  // T-763: interactive mode prints exactly one receipt line, before the
+  // push prompt.
+  const receiptLines10 = suiteReceiptLines(result.stdout);
+  assert.strictEqual(
+    receiptLines10.length,
+    1,
+    `Case 10 FAIL (T-763): expected exactly one "Suite receipt:" line (interactive), got ${receiptLines10.length}:\n${result.stdout}`
+  );
+  assert.ok(
+    result.stdout.indexOf('Suite receipt:') < result.stdout.indexOf('Run git push?'),
+    `Case 10 FAIL (T-763): the receipt line must precede the push prompt, got:\n${result.stdout}`
   );
 
   cleanup(repoDir, fakeScriptsDir);
@@ -1750,6 +1767,23 @@ console.log('All T-542 assertions passed.');
     !/you just pushed/.test(result.stdout),
     `Case 29 FAIL: reminder text must not claim a push already happened, got:\n${result.stdout}`
   );
+  // T-763: exactly one propose-only receipt line beside the reminder; this
+  // fixture has no publish manifest, so it is the non-canonical stand-down.
+  const receiptLines29 = suiteReceiptLines(result.stdout);
+  assert.strictEqual(
+    receiptLines29.length,
+    1,
+    `Case 29 FAIL (T-763): expected exactly one "Suite receipt:" line, got ${receiptLines29.length}:\n${result.stdout}`
+  );
+  assert.ok(
+    /Suite receipt: not checked — non-canonical repo/.test(receiptLines29[0]),
+    `Case 29 FAIL (T-763): expected the non-canonical stand-down line, got: ${receiptLines29[0]}`
+  );
+  const reminderIdx29 = result.stdout.indexOf('Wave complete — run `git push` to close the wave');
+  assert.ok(
+    result.stdout.indexOf('Suite receipt:') > reminderIdx29,
+    `Case 29 FAIL (T-763): the receipt line must sit beside (directly after) the push reminder, got:\n${result.stdout}`
+  );
 
   console.log('Case 29 passed: non-interactive wave-complete close appends a CI-verification reminder, worded as a reminder rather than a post-push confirmation');
 
@@ -1825,6 +1859,117 @@ console.log('All T-689 assertions passed.');
 }
 
 console.log('All T-749 assertions passed.');
+
+// ---------------------------------------------------------------------------
+// T-763 — the propose-only suite-receipt line in a CANONICAL fixture: one
+// line in both modes, current / missing / stale, and never a write.
+// ---------------------------------------------------------------------------
+
+const suiteReceipt = require('./mavp-suite-receipt.js');
+
+// makeFixtureRepo() plus a publish manifest whose every exclude key is
+// tracked (canonical per isCanonicalRepo), CI's real workflow file (the
+// staleness definition) and a .gitignore covering the receipt.
+function makeCanonicalFixtureRepo() {
+  const dir = makeFixtureRepo();
+  fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'scripts', 'publish-manifest.json'),
+    JSON.stringify({ ship: [], exclude: { 'BACKLOG.md': 'fixture state' } }, null, 2) + '\n'
+  );
+  fs.mkdirSync(path.join(dir, '.github', 'workflows'), { recursive: true });
+  fs.copyFileSync(path.join(__dirname, '..', '.github', 'workflows', 'ci.yml'), path.join(dir, '.github', 'workflows', 'ci.yml'));
+  fs.writeFileSync(path.join(dir, '.gitignore'), '.mavp/\n');
+  execFileSync('git', ['add', '-A'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'fixture: canonical manifest + ci workflow'], { cwd: dir });
+  return dir;
+}
+
+function writeFixtureReceiptAtHead(dir) {
+  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+  suiteReceipt.writeSuiteReceipt(dir, {
+    commit,
+    summaryLine: 'Summary: 1 passed, 0 failed (of 1 total)',
+    suite: { total: 1, passed: 1, failed: 0 },
+    standDowns: [],
+  });
+  return { commit, receiptPath: path.join(dir, suiteReceipt.RECEIPT_RELATIVE_PATH) };
+}
+
+// Case 33 (T-763): non-interactive, receipt written at the pre-close HEAD.
+// The close-session commit touches only state artifacts, so the line must
+// report the receipt as CURRENT (the whole point of using CI's paths-ignore
+// definition) — and the receipt file must be byte-identical afterwards.
+{
+  const repoDir = makeCanonicalFixtureRepo();
+  const { commit, receiptPath } = writeFixtureReceiptAtHead(repoDir);
+  const receiptBefore = fs.readFileSync(receiptPath, 'utf8');
+
+  const result = runCloseSessionCli(repoDir, __dirname, ['--non-interactive']);
+  const headAfter = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+
+  assert.notStrictEqual(headAfter, commit, `Case 33 FAIL: expected the close-session commit to move HEAD, got:\n${result.stdout}`);
+  const lines = suiteReceiptLines(result.stdout);
+  assert.strictEqual(lines.length, 1, `Case 33 FAIL: expected exactly one "Suite receipt:" line, got ${lines.length}:\n${result.stdout}`);
+  assert.ok(
+    lines[0].includes(`Suite receipt: current — recorded at ${commit.slice(0, 7)}; HEAD differs only in CI paths-ignore (state) paths`),
+    `Case 33 FAIL: a state-only close commit must leave the receipt current, got: ${lines[0]}`
+  );
+  assert.strictEqual(fs.readFileSync(receiptPath, 'utf8'), receiptBefore, 'Case 33 FAIL: close-session must never rewrite the receipt');
+
+  console.log('Case 33 passed: non-interactive close over a current receipt prints one "current" line — the state-only close commit does not stale it — and never rewrites the receipt');
+  cleanup(repoDir);
+}
+
+// Case 34 (T-763): interactive, canonical, no receipt — one "missing" line
+// naming the remedy, before the push prompt; nothing written, close completes.
+{
+  const repoDir = makeCanonicalFixtureRepo();
+  const result = await runCloseSessionCliSequential(repoDir, __dirname, ['--interactive'], [
+    { match: 'Next action [', answer: '' },
+    { match: 'Enter wave goal', answer: '' },
+    { match: 'Run git push?', answer: 'n' },
+  ]);
+
+  const lines = suiteReceiptLines(result.stdout);
+  assert.strictEqual(lines.length, 1, `Case 34 FAIL: expected exactly one "Suite receipt:" line (interactive), got ${lines.length}:\n${result.stdout}`);
+  assert.ok(
+    lines[0].includes(`Suite receipt: missing — run \`${suiteReceipt.REMEDY_COMMAND}\` (unfiltered) before \`git push\``),
+    `Case 34 FAIL: expected the missing line with the remedy, got: ${lines[0]}`
+  );
+  assert.ok(
+    result.stdout.indexOf('Suite receipt:') < result.stdout.indexOf('Run git push?'),
+    `Case 34 FAIL: the receipt line must precede the push prompt, got:\n${result.stdout}`
+  );
+  assert.ok(!fs.existsSync(path.join(repoDir, '.mavp')), 'Case 34 FAIL: close-session must never create the receipt (or its directory)');
+  assert.ok(/Session closed\./.test(result.stdout), `Case 34 FAIL: a missing receipt must never block the close, got:\n${result.stdout}`);
+
+  console.log('Case 34 passed: interactive close with no receipt prints one "missing" line with the remedy before the push prompt, writes nothing and still closes');
+  cleanup(repoDir);
+}
+
+// Case 35 (T-763): non-interactive, receipt followed by a scripts/ commit —
+// one "stale" line naming the first offending path.
+{
+  const repoDir = makeCanonicalFixtureRepo();
+  const { commit } = writeFixtureReceiptAtHead(repoDir);
+  fs.writeFileSync(path.join(repoDir, 'scripts', 'extra.js'), "'use strict';\n");
+  execFileSync('git', ['add', '-A'], { cwd: repoDir });
+  execFileSync('git', ['commit', '-q', '-m', 'content: add a script'], { cwd: repoDir });
+
+  const result = runCloseSessionCli(repoDir, __dirname, ['--non-interactive']);
+  const lines = suiteReceiptLines(result.stdout);
+  assert.strictEqual(lines.length, 1, `Case 35 FAIL: expected exactly one "Suite receipt:" line, got ${lines.length}:\n${result.stdout}`);
+  assert.ok(
+    lines[0].includes(`Suite receipt: stale (first offending path since ${commit.slice(0, 7)}: scripts/extra.js) — run \`${suiteReceipt.REMEDY_COMMAND}\``),
+    `Case 35 FAIL: expected the stale line naming scripts/extra.js, got: ${lines[0]}`
+  );
+
+  console.log('Case 35 passed: non-interactive close after a content commit prints one "stale" line naming the first offending path and the remedy');
+  cleanup(repoDir);
+}
+
+console.log('All T-763 assertions passed.');
 
 }
 

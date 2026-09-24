@@ -102,7 +102,17 @@ function assertWrapperBehavior(wrapperPath, label) {
 // (a `shift 2` with fewer than 2 positional args left is itself fatal under
 // `set -e`, so a guard placed after it could never execute) and that the
 // unbound-variable text is gone from the refusal output.
-function assertReflectSkillGuard(wrapperPath, label) {
+// T-773: the canonical wrapper (run in place, cwd = framework root) invokes
+// mavp-skill-reflect.js WITHOUT exporting MAVERICKS_PROJECT_ROOT (only the
+// adopter wrapper's generated form does that — see mavp-install.js's
+// buildBashWrapper()), so an unknown role's --reflect-skill run resolves
+// ROOT to the real framework checkout, not a scratch dir. `trajectoryFile`
+// is the absolute path this run would have written to under the pre-fix
+// bug (an empty .mavp/trajectories/<role>.jsonl created before the N<8
+// gate could ever exit); pass it only for the canonical-wrapper call so
+// this check runs once, against the one wrapper invocation that is
+// actually unpinned.
+function assertReflectSkillGuard(wrapperPath, label, trajectoryFile) {
   // No-role invocation: must exit 1 with a usage message on stderr, and
   // must NOT surface bash's unbound-variable abort text anywhere.
   const noRole = run(wrapperPath, ['--reflect-skill'], { cwd: path.dirname(path.dirname(wrapperPath)) });
@@ -132,6 +142,18 @@ function assertReflectSkillGuard(wrapperPath, label) {
     `FAIL (${label}): --reflect-skill <role> was incorrectly rejected by the no-role guard`
   );
   console.log(`Assertion 5 passed (${label}): --reflect-skill <role> dispatches past the guard (no unbound-variable text, not rejected as missing)`);
+
+  // T-773: an unknown role must never leave behind an untracked trajectory
+  // file. mavp-skill-reflect.js now refuses an unknown role before any
+  // .mavp/ write (see the agent-spec existence check that runs first in
+  // main()), so this file must not exist after the run above.
+  if (trajectoryFile) {
+    assert.ok(
+      !fs.existsSync(trajectoryFile),
+      `FAIL (${label}): --reflect-skill <role> with an unknown role must not create ${trajectoryFile}, but it exists`
+    );
+    console.log(`Assertion 5b passed (${label}): unknown role via --reflect-skill created no untracked trajectory file at ${trajectoryFile}`);
+  }
 }
 
 function makeScratchDir(prefix) {
@@ -140,7 +162,11 @@ function makeScratchDir(prefix) {
 
 // --- Canonical wrapper (scripts/mavp-operator, run in place) ---
 assertWrapperBehavior(CANONICAL_WRAPPER, 'canonical');
-assertReflectSkillGuard(CANONICAL_WRAPPER, 'canonical');
+assertReflectSkillGuard(
+  CANONICAL_WRAPPER,
+  'canonical',
+  path.join(FRAMEWORK_ROOT, '.mavp', 'trajectories', 'nonexistent-role.jsonl')
+);
 
 // --- Adopter wrapper (freshly generated via mavp-install.js) ---
 const scratch = makeScratchDir('mavp-wrapper-unrecognized-flag-');

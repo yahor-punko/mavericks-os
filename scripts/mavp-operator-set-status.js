@@ -39,6 +39,20 @@
  *                   not match are warned and skipped. Enables atomic transitions
  *                   (e.g. dev_done → ready_for_qa) without running the validator
  *                   on any intermediate state.
+ * --needs-fix-rounds <N>   When present, N must match /^\d+$/ — an invalid or
+ *                   missing value exits 1 with a usage line before any file is
+ *                   read or written. Applies to every updated task on ANY target
+ *                   status (not only merged): the Evidence field ends up with
+ *                   exactly one "needs_fix_rounds: N" token, replacing an
+ *                   existing digit-valued token in place (never appending a
+ *                   second one) or inserting when absent. This is the sanctioned
+ *                   channel for recording a task's TRUE needs_fix_rounds count —
+ *                   replacing the auto-stamped 0 in place, rather than hand-
+ *                   appending a second needs_fix_rounds: token (which trips the
+ *                   validator's conflicting_needs_fix_rounds check). When
+ *                   omitted, behavior is byte-identical to before this flag
+ *                   existed: needs_fix_rounds: 0 is still auto-stamped only on
+ *                   a merged transition, only when the field is absent.
  */
 
 'use strict';
@@ -209,11 +223,52 @@ function appendNeedsFixRoundsIfMissing(markdown, taskId) {
   return markdown.slice(0, loc.startIndex) + updatedBlock + markdown.slice(loc.endIndex);
 }
 
+/**
+ * Write an EXPLICIT "needs_fix_rounds: N" value into the Evidence field for
+ * a SPECIFIC task's own block in TASK_STATUS.md (T-774), bounded by
+ * locateTaskBlock() (same T-608 pattern as the sibling functions above).
+ *
+ * Unlike appendNeedsFixRoundsIfMissing() (which only ever INSERTS the
+ * stamped 0 and never touches an existing value), this REPLACES an existing
+ * digit-valued "needs_fix_rounds:" token in place — collapsing the field to
+ * exactly one occurrence — or inserts one when the field is absent. This is
+ * the sanctioned channel for the Main Agent to record a task's true
+ * needs_fix_rounds count without hand-appending a second token (which trips
+ * the validator's conflicting_needs_fix_rounds check, T-558).
+ *
+ * Only the FIRST "needs_fix_rounds:" occurrence is replaced (non-global
+ * regex) — a block that already carries 2+ conflicting occurrences is an
+ * existing corruption outside this function's contract; collapsing that is
+ * the validator finding's own remediation, not this call's job.
+ *
+ * @param {string} markdown
+ * @param {string} taskId
+ * @param {string} value  already-validated /^\d+$/ digit string
+ * @returns {{updated: string, changed: boolean}}
+ */
+function applyNeedsFixRounds(markdown, taskId, value) {
+  const loc = locateTaskBlock(markdown, taskId);
+  if (loc.count !== 1) return { updated: markdown, changed: false };
+  const currentEvidence = extractBlockField(loc.rawBlock, 'Evidence') || '';
+  let mergedEvidence;
+  if (/needs_fix_rounds:\s*\d+/.test(currentEvidence)) {
+    mergedEvidence = currentEvidence.replace(/needs_fix_rounds:\s*\d+/, `needs_fix_rounds: ${value}`);
+  } else {
+    mergedEvidence = currentEvidence
+      ? `${currentEvidence} needs_fix_rounds: ${value}`
+      : `needs_fix_rounds: ${value}`;
+  }
+  const updatedBlock = setBlockField(loc.rawBlock, 'Evidence', mergedEvidence);
+  const updated = markdown.slice(0, loc.startIndex) + updatedBlock + markdown.slice(loc.endIndex);
+  return { updated, changed: true };
+}
+
 function printUsage() {
   console.error(
-    `${BOLD}Usage:${RESET} ./scripts/mavp-operator --set-status T-NNN[,T-MMM,...] <status> [--commit <hash>] [--branch <name>] [--from <status>]`
+    `${BOLD}Usage:${RESET} ./scripts/mavp-operator --set-status T-NNN[,T-MMM,...] <status> [--commit <hash>] [--branch <name>] [--from <status>] [--needs-fix-rounds <N>]`
   );
   console.error(`${DIM}  --from <status>  Precondition guard: skip tasks not currently at <status>${RESET}`);
+  console.error(`${DIM}  --needs-fix-rounds <N>  N must match /^\\d+$/ — replaces an existing needs_fix_rounds: value in place, or inserts it, on any target status${RESET}`);
   console.error(`${DIM}Valid statuses: ${VALID_STATUSES.join(', ')}${RESET}`);
 }
 
@@ -228,11 +283,14 @@ function main() {
 
   const argv = process.argv.slice(2);
 
-  // Extract named flags (--commit, --branch, --from) before reading positional args.
-  // This preserves the existing positional contract: argv[0]=IDs, argv[1]=status.
+  // Extract named flags (--commit, --branch, --from, --needs-fix-rounds) before
+  // reading positional args. This preserves the existing positional contract:
+  // argv[0]=IDs, argv[1]=status.
   let commitHash = null;
   let branchName = 'main';
   let fromStatus = null;
+  let needsFixRoundsFlagSeen = false;
+  let needsFixRoundsRaw = null;
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--commit' && i + 1 < argv.length) {
@@ -241,9 +299,29 @@ function main() {
       branchName = argv[++i];
     } else if (argv[i] === '--from' && i + 1 < argv.length) {
       fromStatus = argv[++i];
+    } else if (argv[i] === '--needs-fix-rounds') {
+      needsFixRoundsFlagSeen = true;
+      if (i + 1 < argv.length) {
+        needsFixRoundsRaw = argv[++i];
+      }
     } else {
       positional.push(argv[i]);
     }
+  }
+
+  // Validate --needs-fix-rounds before any file is read or written: a
+  // missing or non-/^\d+$/ value exits 1 with a usage line immediately.
+  let needsFixRounds = null;
+  if (needsFixRoundsFlagSeen) {
+    if (needsFixRoundsRaw === null || !/^\d+$/.test(needsFixRoundsRaw)) {
+      console.error(
+        `${RED}Error: --needs-fix-rounds requires a non-negative integer value, got ${JSON.stringify(needsFixRoundsRaw)}.${RESET}`
+      );
+      printUsage();
+      process.exitCode = 1;
+      return;
+    }
+    needsFixRounds = needsFixRoundsRaw;
   }
 
   const args = positional;
@@ -350,6 +428,7 @@ function main() {
 
   const updated = [];
   const skipped = [];
+  const stampedZeroIds = [];
 
   for (const taskId of normalisedIds) {
     const inBacklog = taskExistsInFile(backlog, taskId);
@@ -412,9 +491,24 @@ function main() {
         const mergedEvidence = mergeCommitEvidence(currentEvidence, commitHash, branchName);
         taskStatus = updateTaskEvidence(taskStatus, taskId, mergedEvidence);
       }
-      // Auto-insert needs_fix_rounds: 0 when transitioning to merged (if not already set)
-      if (newStatus === 'merged' && inTaskStatus) {
+      // --needs-fix-rounds (T-774): when supplied, write the EXPLICIT value
+      // into every updated task's Evidence field, on ANY target status — this
+      // takes priority over (and entirely replaces) the merged-only
+      // auto-stamp-0 fallback below, so a single task never receives both.
+      // When omitted, behavior is byte-identical to before this flag existed:
+      // needs_fix_rounds: 0 is auto-inserted only on a merged transition,
+      // only when the field is absent.
+      if (needsFixRounds !== null && inTaskStatus) {
+        const result = applyNeedsFixRounds(taskStatus, taskId, needsFixRounds);
+        if (result.changed) {
+          taskStatus = result.updated;
+        }
+      } else if (newStatus === 'merged' && inTaskStatus) {
+        const before = taskStatus;
         taskStatus = appendNeedsFixRoundsIfMissing(taskStatus, taskId);
+        if (taskStatus !== before) {
+          stampedZeroIds.push(taskId);
+        }
       }
     }
 
@@ -449,7 +543,11 @@ function main() {
     if (commitWarning) {
       console.warn(`${YELLOW}Warning: ${commitWarning}${RESET}`);
     }
-    if (newStatus === 'merged') {
+    if (needsFixRounds !== null) {
+      console.log(
+        `${GREEN}Evidence written: needs_fix_rounds: ${needsFixRounds}${RESET}`
+      );
+    } else if (stampedZeroIds.length > 0) {
       console.log(
         `${GREEN}Evidence: needs_fix_rounds: 0 added where absent${RESET}`
       );

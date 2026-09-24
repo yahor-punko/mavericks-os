@@ -112,7 +112,7 @@ If `due_rechecks` is present and non-empty, surface a callout immediately after 
 > - ...
 ```
 
-Where `{overdue_marker}` is ` ⚠ OVERDUE` when the entry's `overdue` field is `true`, and empty otherwise. List overdue entries before due-today entries (the array is already in this order). This callout must be visible before the task list so the operator sees it at session start.
+Where `{task}` is the entry's `task` value; when `task` is absent and the entry has a `wave` field (a parked-wave reminder armed by `--park-wave --until`), render `Wave {wave}` in its place instead (its `{title}` already reads `Wave {wave} — <reason>`, so you may show the title alone for such an entry, e.g. `- Wave 9 — external review (due: 2026-10-01)`). Where `{overdue_marker}` is ` ⚠ OVERDUE` when the entry's `overdue` field is `true`, and empty otherwise. List overdue entries before due-today entries (the array is already in this order). This callout must be visible before the task list so the operator sees it at session start.
 
 If `must_read` is present and non-empty, render it as a list immediately after the rechecks callout (or after the wave digest/strategy note if no rechecks are due):
 

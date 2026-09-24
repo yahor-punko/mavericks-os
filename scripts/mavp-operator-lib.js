@@ -1358,7 +1358,10 @@ function collectOperatorData() {
     : [];
 
   // Compute due/overdue rechecks from PROCESS_STATE.json rechecks[] registry (read-only).
-  const recheckToday = processStateJson?.last_updated || new Date().toISOString().slice(0, 10);
+  // T-767: always read the real clock, never fall back to last_updated — a
+  // recheck due today must surface even when no state artifact was written
+  // since it came due.
+  const recheckToday = todayIso();
   const rechecks = processStateJson?.rechecks || [];
   const { due: rechecksDue, overdue: rechecksOverdue } = computeDueRechecks(rechecks, recheckToday);
   const dueRechecks = [
@@ -1581,7 +1584,7 @@ function renderThinSnapshot(data) {
 
   if (dueRechecks && dueRechecks.length > 0) {
     const overdueCount = dueRechecks.filter(e => e.overdue).length;
-    const taskRefs = dueRechecks.map(e => e.task || e.id).join(', ');
+    const taskRefs = dueRechecks.map(e => recheckRef(e)).join(', ');
     const overdueSuffix = overdueCount > 0 ? ` (${overdueCount} overdue)` : '';
     parts.push('', `Due rechecks: ${dueRechecks.length} due: ${taskRefs}${overdueSuffix}`);
   }
@@ -2110,14 +2113,30 @@ function moveActiveBlocksToParkedSection(content, activeHeadingRegex, parkedHead
   const blocksChunk = blocks.flatMap((b) => b.lines);
   const taskIds = blocks.map((b) => b.id).filter(Boolean);
 
-  // Shrink the active section down to its preamble only — the preamble is
-  // left byte-for-byte untouched at its original offset relative to the
-  // heading, so a later unpark can restore it exactly.
+  // T-768: a non-task "### " sub-heading sitting inside the preamble (e.g. a
+  // wave-goal heading like "### Wave 12 — old goal") must travel WITH the
+  // blocks it introduces, not stay behind under the (now near-empty) active
+  // section — otherwise a later --unpark-wave reinserts the blocks under a
+  // *different* wave's heading instead of restoring a coherent grouping.
+  // Only the trailing run starting at the LAST such heading moves; anything
+  // before it stays in place, and preamble with no such heading at all
+  // behaves exactly as before this change.
+  let lastHeadingIdx = -1;
+  for (let i = 0; i < preamble.length; i++) {
+    if (/^###\s+/.test(preamble[i]) && !/^###\s+T-\d+/.test(preamble[i])) lastHeadingIdx = i;
+  }
+  const keepPreamble = lastHeadingIdx === -1 ? preamble : preamble.slice(0, lastHeadingIdx);
+  const movingPreamble = lastHeadingIdx === -1 ? [] : preamble.slice(lastHeadingIdx);
+
+  // Shrink the active section down to its (surviving) preamble only — that
+  // surviving preamble is left byte-for-byte untouched at its original
+  // offset relative to the heading, so a later unpark can restore it exactly.
   const updated = [
     ...lines.slice(0, activeIdx + 1),
-    ...preamble,
+    ...keepPreamble,
     parkedHeading,
     '',
+    ...movingPreamble,
     ...blocksChunk,
     ...lines.slice(sectionEnd),
   ];
@@ -3149,6 +3168,18 @@ function getDeployPendingForRepo(tasks, repoName, deployContours) {
  */
 
 /**
+ * Return today's date as a YYYY-MM-DD string, read from the real clock.
+ * Shared helper so every recheck-due-date computation reads the clock
+ * consistently (T-767) instead of some sites falling back to a stale
+ * PROCESS_STATE.json `last_updated` value that may be days or weeks old.
+ *
+ * @returns {string} Current date as YYYY-MM-DD
+ */
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
  * Compute due and overdue recheck entries relative to a given date.
  *
  * Each entry in the rechecks[] registry (from PROCESS_STATE.json) has the shape:
@@ -3267,26 +3298,91 @@ function addDays(dateStr, days) {
 }
 
 /**
- * Arm a new recheck entry and persist it to PROCESS_STATE.json.
+ * Validate an explicit due-date value (YYYY-MM-DD, a real calendar date,
+ * not before today). Returns an error message string, or null when valid.
+ * Shared by --park-wave --until (T-769) and --ack-recheck --rearm --due
+ * (T-771) — a single source of truth for "is this an acceptable due date",
+ * checked before any file write (compute-then-write contract).
  *
- * Generates the next RC-N id by scanning the existing rechecks[] array.
- * Looks up the task title from BACKLOG.md / TASK_STATUS.md for a self-contained entry.
- * Falls back to the task id as title if not found.
- *
- * @param {object} opts
- * @param {string} opts.taskId       - Task ID, e.g. "T-123"
- * @param {string} opts.due          - Due date, YYYY-MM-DD
- * @param {string} [opts.interval]   - Repeat interval, e.g. "8w"
- * @param {string} [opts.note]       - Optional free-text note
- * @param {string} opts.today        - Today's date, YYYY-MM-DD (for armed_at)
- * @param {string} opts.processStateJsonPath - Absolute path to PROCESS_STATE.json
- * @param {string} opts.backlogPath          - Absolute path to BACKLOG.md
- * @param {string} opts.taskStatusPath       - Absolute path to TASK_STATUS.md
- * @returns {{ id: string, entry: object }} The new RC-N id and the full entry object
- * @throws {Error} If PROCESS_STATE.json cannot be read/written, or due is invalid
+ * @param {string} dateStr - Candidate date, e.g. "2026-10-01"
+ * @param {string} todayStr - Today's date, YYYY-MM-DD
+ * @param {string} [flagName] - Flag name to cite in the error message
+ *   (defaults to "--until" so existing --park-wave callers see unchanged
+ *   text; pass "--due" for --ack-recheck --rearm)
+ * @param {string} [pastLabel] - Trailing clause naming what the date is for,
+ *   used only in the "before today" message (defaults to the --park-wave
+ *   phrasing so existing callers see unchanged text)
+ * @returns {string|null}
  */
-function armRecheck(opts) {
-  const { taskId, due, interval, note, today, processStateJsonPath, backlogPath, taskStatusPath } = opts;
+function validateUntil(dateStr, todayStr, flagName = '--until', pastLabel = 'a parked-wave reminder must be due today or later') {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return `Invalid ${flagName} value "${dateStr}". Expected YYYY-MM-DD.`;
+  }
+  const parsed = new Date(`${dateStr}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== dateStr) {
+    return `Invalid ${flagName} value "${dateStr}". Not a real calendar date.`;
+  }
+  if (dateStr < todayStr) {
+    return `Invalid ${flagName} value "${dateStr}". It is before today (${todayStr}) — ${pastLabel}.`;
+  }
+  return null;
+}
+
+/**
+ * Human-facing reference for a recheck entry (T-769), shared by every
+ * surface that names a recheck (snapshot "Due rechecks:" line, dashboard
+ * Due Rechecks panel, validator overdue_recheck finding):
+ *   - task entries  → the task id, e.g. "T-123"
+ *   - wave entries  → "Wave N" (armed by --park-wave --until)
+ *   - otherwise     → the recheck id, e.g. "RC-4"
+ *
+ * @param {object} entry - A rechecks[] entry from PROCESS_STATE.json
+ * @returns {string}
+ */
+function recheckRef(entry) {
+  if (!entry || typeof entry !== 'object') return '';
+  if (entry.task) return String(entry.task);
+  if (entry.wave !== undefined && entry.wave !== null && entry.wave !== '') return `Wave ${entry.wave}`;
+  return entry.id ? String(entry.id) : '';
+}
+
+/**
+ * Validate a recheck request and append the new entry to an in-memory
+ * PROCESS_STATE object (no file I/O). Shared by armRecheck() (which wraps it
+ * in a read + write) and --park-wave --until (T-769), which must fold the
+ * recheck into the same single PROCESS_STATE.json write that appends
+ * parked_waves.
+ *
+ * Exactly one of `taskId` or `wave` must be given:
+ *   - taskId → task entry; title looked up from BACKLOG.md / TASK_STATUS.md
+ *     (falls back to the task id).
+ *   - wave   → wave entry; stored as a number under `wave` with NO `task`
+ *     key; an explicit non-empty `title` is required.
+ *
+ * @param {object} state - Parsed PROCESS_STATE.json object (mutated in place)
+ * @param {object} opts  - Same options as armRecheck() minus processStateJsonPath
+ * @returns {{ id: string, entry: object }}
+ * @throws {Error} On both/neither taskId+wave, missing wave title, bad due/interval
+ */
+function appendRecheckEntry(state, opts) {
+  const { taskId, wave, title: explicitTitle, due, interval, note, today, backlogPath, taskStatusPath } = opts;
+
+  const hasTask = taskId !== undefined && taskId !== null && taskId !== '';
+  const hasWave = wave !== undefined && wave !== null && wave !== '';
+  if (hasTask && hasWave) {
+    throw new Error('armRecheck: pass exactly one of taskId or wave, not both.');
+  }
+  if (!hasTask && !hasWave) {
+    throw new Error('armRecheck: exactly one of taskId or wave is required.');
+  }
+  if (hasWave) {
+    if (!/^\d+$/.test(String(wave))) {
+      throw new Error(`armRecheck: invalid wave "${wave}". Expected an integer.`);
+    }
+    if (!explicitTitle || typeof explicitTitle !== 'string' || !explicitTitle.trim()) {
+      throw new Error('armRecheck: an explicit title is required for a wave recheck.');
+    }
+  }
 
   // Validate due date format
   if (!due || !/^\d{4}-\d{2}-\d{2}$/.test(due)) {
@@ -3300,6 +3396,78 @@ function armRecheck(opts) {
     }
   }
 
+  if (!Array.isArray(state.rechecks)) {
+    state.rechecks = [];
+  }
+
+  // Generate next RC-N id
+  let maxN = 0;
+  for (const existing of state.rechecks) {
+    if (existing && typeof existing.id === 'string') {
+      const m = existing.id.match(/^RC-(\d+)$/);
+      if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+    }
+  }
+  const newId = `RC-${maxN + 1}`;
+
+  let entry;
+  if (hasWave) {
+    entry = {
+      id: newId,
+      wave: Number(wave),
+      title: explicitTitle,
+      due,
+      armed_at: today,
+    };
+  } else {
+    // Look up task title
+    const foundTitle = lookupTaskTitle(taskId, backlogPath, taskStatusPath);
+    entry = {
+      id: newId,
+      task: taskId,
+      title: foundTitle || taskId,
+      due,
+      armed_at: today,
+    };
+  }
+  if (interval) entry.interval = interval;
+  if (note) entry.note = note;
+
+  state.rechecks.push(entry);
+  return { id: newId, entry };
+}
+
+/**
+ * Arm a new recheck entry and persist it to PROCESS_STATE.json.
+ *
+ * Generates the next RC-N id by scanning the existing rechecks[] array.
+ * Task entries: looks up the task title from BACKLOG.md / TASK_STATUS.md for
+ * a self-contained entry, falling back to the task id as title if not found.
+ * Wave entries (T-769): `wave` + explicit `title`, no `task` key.
+ * Exactly one of taskId / wave is required (see appendRecheckEntry()).
+ *
+ * @param {object} opts
+ * @param {string} [opts.taskId]     - Task ID, e.g. "T-123" (exclusive with wave)
+ * @param {number|string} [opts.wave] - Wave number (exclusive with taskId)
+ * @param {string} [opts.title]      - Explicit title (required with wave)
+ * @param {string} opts.due          - Due date, YYYY-MM-DD
+ * @param {string} [opts.interval]   - Repeat interval, e.g. "8w"
+ * @param {string} [opts.note]       - Optional free-text note
+ * @param {string} opts.today        - Today's date, YYYY-MM-DD (for armed_at)
+ * @param {string} opts.processStateJsonPath - Absolute path to PROCESS_STATE.json
+ * @param {string} opts.backlogPath          - Absolute path to BACKLOG.md
+ * @param {string} opts.taskStatusPath       - Absolute path to TASK_STATUS.md
+ * @returns {{ id: string, entry: object }} The new RC-N id and the full entry object
+ * @throws {Error} If PROCESS_STATE.json cannot be read/written, due is invalid,
+ *                 or taskId/wave are both or neither given
+ */
+function armRecheck(opts) {
+  const { today, processStateJsonPath } = opts;
+
+  // Validate the request shape before touching the file, so a bad call
+  // never reports a misleading read error.
+  appendRecheckEntry({ rechecks: [] }, opts);
+
   // Read existing state
   let state = {};
   try {
@@ -3308,37 +3476,7 @@ function armRecheck(opts) {
     throw new Error(`Cannot read PROCESS_STATE.json: ${err.message}`);
   }
 
-  if (!Array.isArray(state.rechecks)) {
-    state.rechecks = [];
-  }
-
-  // Generate next RC-N id
-  let maxN = 0;
-  for (const entry of state.rechecks) {
-    if (entry && typeof entry.id === 'string') {
-      const m = entry.id.match(/^RC-(\d+)$/);
-      if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
-    }
-  }
-  const newId = `RC-${maxN + 1}`;
-
-  // Look up task title
-  const foundTitle = lookupTaskTitle(taskId, backlogPath, taskStatusPath);
-  const title = foundTitle || taskId;
-
-  // Build entry
-  const entry = {
-    id: newId,
-    task: taskId,
-    title,
-    due,
-    armed_at: today,
-  };
-  if (interval) entry.interval = interval;
-  if (note) entry.note = note;
-
-  // Append and write
-  state.rechecks.push(entry);
+  const { id: newId, entry } = appendRecheckEntry(state, opts);
   state.last_updated = today;
 
   try {
@@ -3354,19 +3492,29 @@ function armRecheck(opts) {
  * Acknowledge (and optionally re-arm) a recheck entry in PROCESS_STATE.json.
  *
  * Without --rearm: removes the entry from rechecks[].
- * With --rearm: instead of removing, sets due = today + interval (in days).
- *   If --rearm is given but the entry has no interval, throws a clear error.
+ * With --rearm:
+ *   - opts.due given (T-771): sets due = that explicit date (format-validated
+ *     via validateUntil(), must not be before today) and armed_at = today.
+ *     No interval is required — this is what lets an interval-less entry
+ *     (e.g. a wave recheck armed via --park-wave --until, which never carries
+ *     an interval) be rearmed to an explicit date. The entry's `wave`/`task`
+ *     and `title` fields are left untouched.
+ *   - opts.due absent: unchanged pre-T-771 behavior — sets due = today +
+ *     interval (in days); throws when the entry has no interval.
  *
  * @param {object} opts
  * @param {string} opts.recheckId    - Recheck ID, e.g. "RC-1"
  * @param {boolean} opts.rearm       - If true, reschedule instead of removing
+ * @param {string} [opts.due]        - Explicit YYYY-MM-DD due date (T-771);
+ *                                     only meaningful together with rearm
  * @param {string} opts.today        - Today's date, YYYY-MM-DD
  * @param {string} opts.processStateJsonPath - Absolute path to PROCESS_STATE.json
  * @returns {{ removed: boolean, rearmed: boolean, newDue?: string, entry: object }}
- * @throws {Error} If the recheck ID is not found, or --rearm without interval
+ * @throws {Error} If the recheck ID is not found, if --rearm is given without
+ *   --due and the entry has no interval, or if --due fails validation
  */
 function ackRecheck(opts) {
-  const { recheckId, rearm, today, processStateJsonPath } = opts;
+  const { recheckId, rearm, due, today, processStateJsonPath } = opts;
 
   // Validate recheckId format
   if (!recheckId || !/^RC-\d+$/.test(recheckId)) {
@@ -3393,21 +3541,33 @@ function ackRecheck(opts) {
   const entry = state.rechecks[idx];
 
   if (rearm) {
-    // Validate interval exists and is parseable
-    if (!entry.interval) {
-      throw new Error(
-        `Cannot --rearm "${recheckId}": entry has no interval. ` +
-          `Set an interval when arming (--interval 8w) to enable rearming.`
-      );
+    let newDue;
+    if (due) {
+      // T-771: explicit due date — validated before any write, no interval
+      // required. Reuses the same rules as --park-wave --until.
+      const dueError = validateUntil(due, today, '--due', 'a recheck must be due today or later');
+      if (dueError) {
+        throw new Error(dueError);
+      }
+      newDue = due;
+    } else {
+      // Pre-T-771 path: due = today + interval. Validate interval exists
+      // and is parseable.
+      if (!entry.interval) {
+        throw new Error(
+          `Cannot --rearm "${recheckId}": entry has no interval. ` +
+            `Set an interval when arming (--interval 8w) to enable rearming.`
+        );
+      }
+      const days = parseIntervalDays(entry.interval);
+      if (days === null) {
+        throw new Error(
+          `Cannot --rearm "${recheckId}": interval "${entry.interval}" could not be parsed. ` +
+            `Expected e.g. "8w", "2d".`
+        );
+      }
+      newDue = addDays(today, days);
     }
-    const days = parseIntervalDays(entry.interval);
-    if (days === null) {
-      throw new Error(
-        `Cannot --rearm "${recheckId}": interval "${entry.interval}" could not be parsed. ` +
-          `Expected e.g. "8w", "2d".`
-      );
-    }
-    const newDue = addDays(today, days);
     entry.due = newDue;
     entry.armed_at = today;
     state.last_updated = today;
@@ -5241,6 +5401,7 @@ function formatWorktreePruneSuggestion(entries) {
 module.exports = {
   ROOT,
   ackRecheck,
+  appendRecheckEntry,
   addDays,
   archiveActiveWaveInBacklog,
   ARCHIVABLE_TERMINAL_STATUSES,
@@ -5350,10 +5511,13 @@ module.exports = {
   summarizeTrajectories,
   summarizeWorktreeClassification,
   TERMINAL_SKIP_STATUSES,
+  todayIso,
+  recheckRef,
   truncateTaskBlockAtLevel2Heading,
   UnresolvableMainRefError,
   updateLastTaskId,
   updateTaskField,
+  validateUntil,
   WORKTREE_PRUNE_MTIME_THRESHOLD_MS,
   writeContextBundle,
   writeTrajectories,

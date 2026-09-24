@@ -15,6 +15,16 @@
 //
 // Exit code: 0 if all tests pass, non-zero if any test fails.
 //
+// Suite receipt (T-763): every run ends with exactly one "Suite receipt:"
+// line. Only an UNFILTERED run in which every file passed, against a tracked
+// tree with no modified non-state file, writes .mavp/suite-receipt.json
+// (git-ignored) naming HEAD — the evidence .claude/hooks/pre-push checks
+// before a push leaves the canonical repo. Every other run writes nothing and
+// says why. The contract (path, shape, what counts as "state") lives in
+// scripts/mavp-suite-receipt.js; this runner only calls it. The helper is
+// required defensively: a runner copied alone into a scratch dir (as
+// scripts/test-run-tests-standdown.js does) must still run its tests.
+//
 // Node built-ins only — no npm dependencies (see .claude/rules/scripts.md).
 
 const fs = require('node:fs');
@@ -23,6 +33,12 @@ const { spawnSync } = require('node:child_process');
 
 const SCRIPTS_DIR = __dirname;
 const SELF_BASENAME = path.basename(__filename);
+const RECEIPT_HELPER = path.join(SCRIPTS_DIR, 'mavp-suite-receipt.js');
+
+function loadReceiptHelper() {
+  if (!fs.existsSync(RECEIPT_HELPER)) return null;
+  return require(RECEIPT_HELPER);
+}
 
 // Marker token a test prints on a line to flag a documented, gated stand-down
 // (e.g. a canonical-repo-only check that skips on a mirror/adopter checkout).
@@ -154,6 +170,12 @@ function main() {
 
   console.log(`Running ${testFiles.length} test file(s)${filter ? ` (filter: "${filter}")` : ''}...\n`);
 
+  // Receipt pre-run facts (HEAD + tracked-tree cleanliness) are captured
+  // BEFORE any test runs, so a test that dirties the tree cannot launder
+  // itself; a filtered run can never earn a receipt, so it skips the git calls.
+  const receiptHelper = loadReceiptHelper();
+  const receiptStart = receiptHelper && !filter ? receiptHelper.captureRunStart(SCRIPTS_DIR) : null;
+
   const results = [];
   const standDowns = [];
   for (const filePath of testFiles) {
@@ -181,14 +203,35 @@ function main() {
   const failedResults = results.filter((r) => !r.passed);
   const failedCount = failedResults.length;
 
+  const summaryLine = `Summary: ${passedCount} passed, ${failedCount} failed (of ${results.length} total)`;
   console.log('');
-  console.log(`Summary: ${passedCount} passed, ${failedCount} failed (of ${results.length} total)`);
+  console.log(summaryLine);
   console.log(`Stand-downs: ${standDowns.length}${standDowns.length > 0 ? ` (${standDowns.join(', ')})` : ''}`);
   if (failedCount > 0) {
     console.log(`Failed: ${failedResults.map((r) => r.file).join(', ')}`);
     process.exitCode = 1;
   } else {
     process.exitCode = 0;
+  }
+
+  // Exactly one receipt line per run. A receipt problem never changes the
+  // runner's exit code — the suite's verdict is the suite's, not the receipt's.
+  if (!receiptHelper) {
+    console.log('Suite receipt: not written — scripts/mavp-suite-receipt.js is not beside this runner.');
+    return;
+  }
+  try {
+    console.log(receiptHelper.writeReceiptIfEligible({
+      start: receiptStart,
+      filter,
+      failedFiles: failedResults.map((r) => r.file),
+      summaryLine,
+      total: results.length,
+      passed: passedCount,
+      standDowns,
+    }));
+  } catch (err) {
+    console.log(`Suite receipt: not written — ${err.message}`);
   }
 }
 

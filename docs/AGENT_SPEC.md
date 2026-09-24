@@ -262,7 +262,7 @@ The ×1.5 multiplier converts the highest observed turn count for a role class i
 | technical-writer | 70 | Same doc-authoring class as product-docs — aligned for consistency (still zero independent observations). |
 | frontend-design | 45 | Implementation role with build/preview verify loops — between docs and developer. |
 | architect | 50 | Read-heavy role; tool-use counts over-count turns for this role class. Nine-run external table shows truncations at 39/40 vs the prior cap of 25; recalibrated per `docs/TURN_BUDGET.md` "T-727 recalibration" — ceil(40×1.5)=60 → 60, discounted for read-heavy over-count (same precedent as this row's own original basis) → 50. |
-| qa | 40 | Bounded read → run → verdict. Nine-run external table shows truncations at 20/26/30 vs the prior cap of 20, and a local T-710 report truncated at exactly cap 20 with no completion token was likely misclassified `infra_failure` instead of a cap-hit; recalibrated per `docs/TURN_BUDGET.md` "T-727 recalibration" — ceil(30×1.5)=45 → 50, discounted for read-heavy over-count → 40. |
+| qa | 70 | Bounded read → run → verdict. Wave-100 session-2 evidence (four runtime QA spawns against the prior cap of 40): one cap-hit (T-763, 40/40, resumed to 47 cumulative) and two completions within five turns of cap (T-771 36/40, T-769 35/40); recalibrated per `docs/TURN_BUDGET.md` "Session 6 evidence" — ceil(47×1.5)=71 → ceiling-to-next-multiple-of-10 per resolution 3 → 80, discounted for read-heavy over-count (T-310/T-727 precedent) → 70, 49% headroom over the 47 floor. |
 | ui-designer | 20 | Bounded visual-design role; no observed cap pressure. |
 | analyst | 15 | Read-only research; no observed cap pressure. |
 | exa-researcher | 15 | Bounded retrieval; no observed cap pressure. |

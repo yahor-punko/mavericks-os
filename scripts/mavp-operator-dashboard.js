@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const readline = require('node:readline');
-const { collectOperatorData, clip, formatIsoTime, IN_FLIGHT_STATUSES, normalizeWhitespace, relativeTime, renderThinSnapshot, shortenSessionKey } = require('./mavp-operator-lib');
+const { collectOperatorData, clip, formatIsoTime, IN_FLIGHT_STATUSES, normalizeWhitespace, recheckRef, relativeTime, renderThinSnapshot, shortenSessionKey } = require('./mavp-operator-lib');
 
 const MAX_WAVE_TASKS = 10;
 
@@ -382,8 +382,9 @@ function renderDashboard() {
     if (!entries || entries.length === 0) return [];
     const overdueCount = entries.filter(e => e.overdue).length;
     const recheckLines = entries.map(e => {
-      const ref = e.task || e.id;
-      const label = e.title ? `${ref} — ${e.title}` : ref;
+      const ref = recheckRef(e);
+      // T-769: a wave entry's title already reads "Wave N — <reason>" — don't repeat the ref.
+      const label = e.title ? (e.title.startsWith(`${ref} — `) ? e.title : `${ref} — ${e.title}`) : ref;
       const overdueMark = e.overdue ? ` ${RED}[overdue]${RESET}` : '';
       return `${label}  ${DIM}due:${e.due}${RESET}${overdueMark}`;
     });

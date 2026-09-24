@@ -41,7 +41,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { buildDeployQueue, classifyNextAction, computeDueRechecks, computeMustRead, detectPermissionModeConflict, generateProcessStateMd, getDeployPendingForRepo, IN_FLIGHT_STATUSES, parseBlockedBy, parseHold, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { buildDeployQueue, classifyNextAction, computeDueRechecks, computeMustRead, detectPermissionModeConflict, generateProcessStateMd, getDeployPendingForRepo, IN_FLIGHT_STATUSES, parseBlockedBy, parseHold, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
@@ -722,9 +722,12 @@ function main() {
   }
 
   // Compute due/overdue rechecks from PROCESS_STATE.json rechecks[] registry.
-  // today is determined from last_updated (same source used for lastUpdated display),
-  // falling back to the current date. Entries with due <= today are surfaced.
-  const recheckToday = json?.last_updated || new Date().toISOString().slice(0, 10);
+  // T-767: today is read from the real clock (todayIso()), never from
+  // last_updated — a recheck due today must surface at session start even
+  // when no state artifact was written since it came due. The `lastUpdated`
+  // display above (line 668) is unrelated and stays sourced from json.last_updated.
+  // Entries with due <= today are surfaced.
+  const recheckToday = todayIso();
   const rechecks = json?.rechecks || [];
   const { due: rechecksDue, overdue: rechecksOverdue } = computeDueRechecks(rechecks, recheckToday);
   // Combine: overdue entries first (more urgent), then due-today entries.

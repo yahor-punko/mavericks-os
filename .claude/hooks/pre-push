@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
-# Mavericks pre-push hook — refuses pushes issued from a linked git worktree
-# (T-753). Pushes belong to the Main Agent, from the primary checkout, after
-# integrating a sub-agent's commits by cherry-pick/merge — never straight
-# from the worktree that produced them.
+# Mavericks pre-push hook — two independent gates, each with its own escape
+# hatch, run in this order:
+#
+#   1. Linked-worktree refusal (T-753) — escape hatch MAVP_ALLOW_WORKTREE_PUSH=1
+#   2. Full-suite receipt gate (T-763) — escape hatch MAVP_SKIP_SUITE_RECEIPT=1
+#
+# Each escape hatch skips ONLY its own gate: setting one never silently
+# disables the other.
+#
+# ---------------------------------------------------------------------------
+# Gate 1 — linked-worktree refusal (T-753)
+# ---------------------------------------------------------------------------
+# Refuses pushes issued from a linked git worktree. Pushes belong to the Main
+# Agent, from the primary checkout, after integrating a sub-agent's commits
+# by cherry-pick/merge — never straight from the worktree that produced them.
 #
 # Scope note: this is the ONLY destructive git command that needs a hook
 # here. `git reset --hard`, `git clean -f`, and `git checkout -- <path>`
@@ -21,42 +32,101 @@
 # naive string comparison of two different-looking-but-equal relative forms
 # would misclassify the primary checkout as a worktree.
 #
-# Escape hatch: MAVP_ALLOW_WORKTREE_PUSH=1 skips this refusal entirely. This
-# exists for a real layout — a bare-primary setup where every checkout on
-# the machine is a linked worktree and no single "primary" exists to push
-# from. Set it deliberately, not as a routine bypass.
+# Escape hatch: MAVP_ALLOW_WORKTREE_PUSH=1 skips this refusal. This exists
+# for a real layout — a bare-primary setup where every checkout on the
+# machine is a linked worktree and no single "primary" exists to push from.
+# Set it deliberately, not as a routine bypass.
+#
+# ---------------------------------------------------------------------------
+# Gate 2 — full-suite receipt (T-763)
+# ---------------------------------------------------------------------------
+# Refuses a push from the canonical repo unless an unfiltered, all-green
+# `node scripts/run-tests.js` run has recorded a receipt that is current for
+# HEAD — "current" meaning the receipt's commit equals HEAD, or the two
+# differ only in the CI workflow's own paths-ignore (state-artifact) paths,
+# so the close-session commit never invalidates it. The check itself is
+# `node scripts/mavp-suite-receipt.js --if-canonical`; its refusal message
+# names the receipt commit, HEAD, the first offending path and the remedy.
+#
+# Guarded on the checker's existence: in a repository without
+# scripts/mavp-suite-receipt.js (an adopter project, or a test fixture that
+# copies only this hook) the gate is inert. In a non-canonical repository
+# that does carry the checker (the public mirror) `--if-canonical` prints a
+# SKIP line and exits 0. If `node` is not on PATH the gate warns and lets the
+# push through rather than blocking on a missing toolchain.
+#
+# Escape hatch: MAVP_SKIP_SUITE_RECEIPT=1 skips this gate — for a push that
+# genuinely cannot wait for a suite run (e.g. pushing a CI fix while the
+# suite is red for an unrelated reason). Set it deliberately, per push.
 
 set -euo pipefail
 
-if [[ -n "${MAVP_ALLOW_WORKTREE_PUSH:-}" ]]; then
-  exit 0
-fi
+worktree_refusal() {
+  if [[ -n "${MAVP_ALLOW_WORKTREE_PUSH:-}" ]]; then
+    return 0
+  fi
 
-GIT_DIR_RAW="$(git rev-parse --git-dir 2>/dev/null || true)"
-GIT_COMMON_DIR_RAW="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+  local git_dir_raw git_common_dir_raw resolved_git_dir resolved_common_dir
+  git_dir_raw="$(git rev-parse --git-dir 2>/dev/null || true)"
+  git_common_dir_raw="$(git rev-parse --git-common-dir 2>/dev/null || true)"
 
-if [[ -z "$GIT_DIR_RAW" || -z "$GIT_COMMON_DIR_RAW" ]]; then
-  # Not resolvable (unexpected) — fail open rather than block a push we
-  # cannot classify.
-  exit 0
-fi
+  if [[ -z "$git_dir_raw" || -z "$git_common_dir_raw" ]]; then
+    # Not resolvable (unexpected) — fail open rather than block a push we
+    # cannot classify.
+    return 0
+  fi
 
-RESOLVED_GIT_DIR="$(cd "$GIT_DIR_RAW" 2>/dev/null && pwd -P || true)"
-RESOLVED_COMMON_DIR="$(cd "$GIT_COMMON_DIR_RAW" 2>/dev/null && pwd -P || true)"
+  resolved_git_dir="$(cd "$git_dir_raw" 2>/dev/null && pwd -P || true)"
+  resolved_common_dir="$(cd "$git_common_dir_raw" 2>/dev/null && pwd -P || true)"
 
-if [[ -z "$RESOLVED_GIT_DIR" || -z "$RESOLVED_COMMON_DIR" ]]; then
-  exit 0
-fi
+  if [[ -z "$resolved_git_dir" || -z "$resolved_common_dir" ]]; then
+    return 0
+  fi
 
-if [[ "$RESOLVED_GIT_DIR" != "$RESOLVED_COMMON_DIR" ]]; then
-  echo "" >&2
-  echo "PUSH REFUSED: this is a linked git worktree ($RESOLVED_GIT_DIR)." >&2
-  echo "Pushes belong to the Main Agent, from the primary checkout — not a" >&2
-  echo "linked worktree. Integrate this worktree's commits into main via" >&2
-  echo "cherry-pick/merge instead of pushing directly from here." >&2
-  echo "Set MAVP_ALLOW_WORKTREE_PUSH=1 to override (e.g. a bare-primary" >&2
-  echo "layout where every checkout is a linked worktree)." >&2
-  exit 1
-fi
+  if [[ "$resolved_git_dir" != "$resolved_common_dir" ]]; then
+    echo "" >&2
+    echo "PUSH REFUSED: this is a linked git worktree ($resolved_git_dir)." >&2
+    echo "Pushes belong to the Main Agent, from the primary checkout — not a" >&2
+    echo "linked worktree. Integrate this worktree's commits into main via" >&2
+    echo "cherry-pick/merge instead of pushing directly from here." >&2
+    echo "Set MAVP_ALLOW_WORKTREE_PUSH=1 to override (e.g. a bare-primary" >&2
+    echo "layout where every checkout is a linked worktree)." >&2
+    return 1
+  fi
+
+  return 0
+}
+
+suite_receipt_gate() {
+  if [[ -n "${MAVP_SKIP_SUITE_RECEIPT:-}" ]]; then
+    echo "pre-push: suite-receipt gate skipped (MAVP_SKIP_SUITE_RECEIPT is set)." >&2
+    return 0
+  fi
+
+  local top checker
+  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -z "$top" ]]; then
+    return 0
+  fi
+  checker="$top/scripts/mavp-suite-receipt.js"
+  if [[ ! -f "$checker" ]]; then
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    echo "pre-push: node not found on PATH — suite-receipt gate not run." >&2
+    return 0
+  fi
+
+  if ! node "$checker" --if-canonical; then
+    echo "" >&2
+    echo "PUSH REFUSED: no current full-suite receipt for HEAD (see the line above)." >&2
+    echo "Set MAVP_SKIP_SUITE_RECEIPT=1 to override for this push." >&2
+    return 1
+  fi
+  return 0
+}
+
+worktree_refusal || exit 1
+suite_receipt_gate || exit 1
 
 exit 0

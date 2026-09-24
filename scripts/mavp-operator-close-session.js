@@ -115,6 +115,25 @@ const CI_CHECK_COMMAND = 'gh run watch --exit-status';
 const CI_CHECK_POST_PUSH_LINE = `${DIM}Check CI on the commit you just pushed — \`${CI_CHECK_COMMAND}\` (the push itself does not verify anything).${RESET}`;
 const CI_CHECK_REMINDER_SUFFIX = `, and then check CI once it's pushed — \`${CI_CHECK_COMMAND}\`.`;
 
+// T-763: exactly one propose-only "Suite receipt:" line beside the
+// wave-complete push reminder, in BOTH modes, naming the full-suite receipt
+// as current or as missing/stale with the remedy. The line comes from
+// formatCloseSessionReceiptLine() in scripts/mavp-suite-receipt.js — the same
+// module the pre-push hook's checker uses, so the advisory and the gate can
+// never disagree about what "current" means. Read-only: it never writes the
+// receipt, never runs the suite and never blocks the close. Loaded
+// defensively so an older mavericks installation without the helper simply
+// prints nothing extra.
+function buildSuiteReceiptLine(root) {
+  const helperPath = path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-suite-receipt.js');
+  if (!fs.existsSync(helperPath)) return null;
+  try {
+    return `${DIM}${require(helperPath).formatCloseSessionReceiptLine(root)}${RESET}`;
+  } catch {
+    return null;
+  }
+}
+
 // T-649: a following, separate line naming the changed path(s) — printed
 // immediately after VERSION_BUMP_LINE/VERSION_UNRELEASED_LINE, never merged
 // into them, so existing whole-line assertions against those two constants
@@ -2188,7 +2207,11 @@ async function runNonInteractive(args) {
   // there must be no code path that pushes without a human between the table
   // and the push under bypass mode.
   if (allMerged) {
+    const suiteReceiptLine = buildSuiteReceiptLine(ROOT);
     if (args.push) {
+      // T-763: before any push attempt/suppression, so the operator sees
+      // the receipt state the pre-push hook is about to judge.
+      if (suiteReceiptLine) console.log(`\n${suiteReceiptLine}`);
       // T-663: shared fallback order with --agent — persisted (from an
       // earlier session's SessionStart hook payload; see
       // mavp-operator-agent.js — persistRuntimePermissionMode) over the
@@ -2217,6 +2240,8 @@ async function runNonInteractive(args) {
       // T-689 (c): a reminder to push, not a post-push confirmation — the
       // suffix must not claim a push has happened yet.
       console.log(`\n${CYAN}${BOLD}Wave complete — run \`git push\` to close the wave${RESET}${CI_CHECK_REMINDER_SUFFIX}`);
+      // T-763: directly under the push reminder it qualifies.
+      if (suiteReceiptLine) console.log(suiteReceiptLine);
     }
   }
 
@@ -2579,6 +2604,10 @@ async function runInteractive() {
   // authorization — valid because the results table above already printed.
   if (waveComplete) {
     console.log(`\n${CYAN}${BOLD}Wave complete.${RESET} All tasks merged.`);
+    // T-763: before the [Y/n] prompt, so the human answering it has seen the
+    // receipt state the pre-push hook is about to judge.
+    const suiteReceiptLine = buildSuiteReceiptLine(ROOT);
+    if (suiteReceiptLine) console.log(suiteReceiptLine);
     const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
     const pushAnswer = await new Promise(resolve => rl2.question(`Run git push? [Y/n]: `, resolve));
     rl2.close();
@@ -2631,4 +2660,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE, findExecutionLogOmissions, printExecutionLogOmissionWarning, loadShipManifestSet, getCommitChangedFiles, findShipTouchingChangelogOmissions, printChangelogShipOmissionWarning, CI_CHECK_COMMAND, CI_CHECK_POST_PUSH_LINE, CI_CHECK_REMINDER_SUFFIX };
+module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE, findExecutionLogOmissions, printExecutionLogOmissionWarning, loadShipManifestSet, getCommitChangedFiles, findShipTouchingChangelogOmissions, printChangelogShipOmissionWarning, CI_CHECK_COMMAND, CI_CHECK_POST_PUSH_LINE, CI_CHECK_REMINDER_SUFFIX, buildSuiteReceiptLine };

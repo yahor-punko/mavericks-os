@@ -12,10 +12,15 @@
 //   5. Non-hex, non-HEAD input to --commit is rejected before any git
 //      subprocess runs (no evidence written, non-zero exit).
 //   6. Degrades silently (no warning, no crash) when git itself is unavailable.
+//   7 (T-774) — --needs-fix-rounds <N> replaces an existing digit-valued
+//      needs_fix_rounds: token in place (never appending a second one), or
+//      inserts one when absent, on any target status; an invalid/missing
+//      value exits 1 before any file is read or written.
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const assert = require('node:assert');
 const { execFileSync, spawnSync } = require('node:child_process');
 
@@ -478,6 +483,84 @@ const REAL_COMMIT_SHORT = execFileSync('git', ['-C', REPO, 'rev-parse', '--short
   console.log('Test 9 passed: --from guard on a Status-less target skips with an explicit "currently unknown" warning, never matching a neighbor\'s status');
 }
 
+// ---------------------------------------------------------------------------
+// Part 10 (T-774) — --needs-fix-rounds <N>: replaces an existing digit-valued
+// needs_fix_rounds: token in place, inserts one when absent, applies on any
+// target status (not only merged), and rejects an invalid/missing value
+// before any file is read or written.
+// ---------------------------------------------------------------------------
+{
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: REPO };
+
+  // (a) existing digit value gets REPLACED in place — exactly one match.
+  // Uses a genuine status transition (ready_for_qa -> qa_passed) so the file
+  // write actually fires — a same-status no-op is suppressed by the
+  // pre-existing "Status field not changed" skip guard (untouched by this
+  // task) and would leave the Evidence write unpersisted too.
+  writeFixture(REPO, 'T-960', 'ready_for_qa', 'commit: abc1234 branch: main needs_fix_rounds: 0');
+  const rA = runSetStatus(['T-960', 'qa_passed', '--needs-fix-rounds', '1'], REPO, env);
+  assert.ok(!/Error:/.test(rA.output), `Test 10a FAIL: expected no error, got:\n${rA.output}`);
+  const evA = taskStatusEvidence(REPO, 'T-960');
+  assert.ok(evA.includes('needs_fix_rounds: 1'), `Test 10a FAIL: expected needs_fix_rounds: 1, got: ${evA}`);
+  assert.strictEqual(
+    (evA.match(/needs_fix_rounds:/g) || []).length,
+    1,
+    `Test 10a FAIL: expected exactly one needs_fix_rounds: token, got: ${evA}`
+  );
+  assert.ok(evA.includes('commit: abc1234 branch: main'), `Test 10a FAIL: prior commit evidence must be preserved, got: ${evA}`);
+  console.log(`Test 10a passed: existing needs_fix_rounds: 0 replaced in place — Evidence: "${evA}"`);
+
+  // (b) absent field + --needs-fix-rounds 2 on `merged` yields a single
+  // needs_fix_rounds: 2 — no 0 stamped beside it (the auto-stamp branch must
+  // not also fire).
+  writeFixture(REPO, 'T-961', 'qa_passed', 'qa notes: no needs_fix_rounds yet');
+  const rB = runSetStatus(['T-961', 'merged', '--needs-fix-rounds', '2'], REPO, env);
+  assert.ok(!/Error:/.test(rB.output), `Test 10b FAIL: expected no error, got:\n${rB.output}`);
+  assert.ok(/Evidence written: needs_fix_rounds: 2/.test(rB.output), `Test 10b FAIL: expected the explicit-write summary line, got:\n${rB.output}`);
+  assert.ok(!/needs_fix_rounds: 0 added where absent/.test(rB.output), `Test 10b FAIL: the auto-stamp-0 line must not print when the flag is supplied, got:\n${rB.output}`);
+  const evB = taskStatusEvidence(REPO, 'T-961');
+  assert.ok(evB.includes('needs_fix_rounds: 2'), `Test 10b FAIL: expected needs_fix_rounds: 2, got: ${evB}`);
+  assert.strictEqual(
+    (evB.match(/needs_fix_rounds:/g) || []).length,
+    1,
+    `Test 10b FAIL: expected exactly one needs_fix_rounds: token (no stamped 0 beside it), got: ${evB}`
+  );
+  console.log(`Test 10b passed: absent field + --needs-fix-rounds 2 on merged yields a single token — Evidence: "${evB}"`);
+
+  // (c) absent field, no flag, merged yields needs_fix_rounds: 0 — existing
+  // behaviour preserved byte-for-byte.
+  writeFixture(REPO, 'T-962', 'qa_passed', 'qa notes: no needs_fix_rounds yet either');
+  const rC = runSetStatus(['T-962', 'merged'], REPO, env);
+  assert.ok(/Evidence: needs_fix_rounds: 0 added where absent/.test(rC.output), `Test 10c FAIL: expected the legacy stamp-0 summary line, got:\n${rC.output}`);
+  const evC = taskStatusEvidence(REPO, 'T-962');
+  assert.ok(evC.includes('needs_fix_rounds: 0'), `Test 10c FAIL: expected needs_fix_rounds: 0, got: ${evC}`);
+  console.log(`Test 10c passed: omitted flag preserves the existing auto-stamp-0-on-merged behaviour — Evidence: "${evC}"`);
+
+  // (d) --needs-fix-rounds x exits 1 and the fixture file is unchanged (hash
+  // compared) — rejected before any file is read or written.
+  writeFixture(REPO, 'T-963', 'qa_passed', 'qa notes: reject-non-digit test');
+  const taskStatusPath = path.join(REPO, 'TASK_STATUS.md');
+  const backlogPath = path.join(REPO, 'BACKLOG.md');
+  const hashOf = (p) => crypto.createHash('sha256').update(readUtf8(p)).digest('hex');
+  const taskStatusHashBefore = hashOf(taskStatusPath);
+  const backlogHashBefore = hashOf(backlogPath);
+  const rD = runSetStatus(['T-963', 'merged', '--needs-fix-rounds', 'x'], REPO, env);
+  assert.notStrictEqual(rD.status, 0, 'Test 10d FAIL: expected --needs-fix-rounds x to exit non-zero');
+  assert.ok(/--needs-fix-rounds requires a non-negative integer value/.test(rD.output), `Test 10d FAIL: expected a usage/error line, got:\n${rD.output}`);
+  assert.strictEqual(hashOf(taskStatusPath), taskStatusHashBefore, 'Test 10d FAIL: TASK_STATUS.md must be byte-for-byte unchanged when --needs-fix-rounds is rejected');
+  assert.strictEqual(hashOf(backlogPath), backlogHashBefore, 'Test 10d FAIL: BACKLOG.md must be byte-for-byte unchanged when --needs-fix-rounds is rejected');
+  assert.strictEqual(taskStatusStatus(REPO, 'T-963'), 'qa_passed', 'Test 10d FAIL: status must remain unchanged when --needs-fix-rounds is rejected');
+  console.log('Test 10d passed: non-digit --needs-fix-rounds value rejected before any write, files byte-for-byte unchanged (hash compared)');
+
+  // Also cover a missing value (flag at end of argv with nothing following).
+  writeFixture(REPO, 'T-964', 'qa_passed', 'qa notes: missing-value test');
+  const rE = runSetStatus(['T-964', 'merged', '--needs-fix-rounds'], REPO, env);
+  assert.notStrictEqual(rE.status, 0, 'Test 10e FAIL: expected a missing --needs-fix-rounds value to exit non-zero');
+  assert.ok(/--needs-fix-rounds requires a non-negative integer value/.test(rE.output), `Test 10e FAIL: expected a usage/error line, got:\n${rE.output}`);
+  assert.strictEqual(taskStatusStatus(REPO, 'T-964'), 'qa_passed', 'Test 10e FAIL: status must remain unchanged when --needs-fix-rounds value is missing');
+  console.log('Test 10e passed: missing --needs-fix-rounds value rejected before any write');
+}
+
 fs.rmSync(REPO, { recursive: true, force: true });
 
-console.log('\nAll T-446 / T-608 assertions passed.');
+console.log('\nAll T-446 / T-608 / T-774 assertions passed.');
