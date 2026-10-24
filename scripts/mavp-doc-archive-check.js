@@ -28,6 +28,18 @@
  *     always-loaded ones (layer 0) and the path-scoped ones (layer 1);
  *   - every module context_docs path parsed from docs/MODULES.md at that
  *     revision via parseModuleRegistryFromText() (T-791) — layer 1.
+ * Installer-managed files (T-799): when a revision's own tree is NOT a
+ * framework source tree (it has no scripts/mavp-operator-lib.js, which
+ * adopters never receive), every perimeter file for which
+ * isInstallerManagedPath() holds is dropped from that revision's perimeter
+ * (in practice the framework-owned .claude/rules/*.md that `mavp-install.js
+ * --update` rewrites), and run() prints one summary line naming the files it
+ * skipped, only when there are any. In a framework source tree nothing is
+ * skipped. Accepted false-negative boundary: an adopter hand-edit that
+ * removes a line from a framework-managed rule is unjudged, because --update
+ * overwrites that file anyway and the archive duty for framework text belongs
+ * to the framework's own history; the adopter's own rule home is
+ * .claude/rules/project-*.md (T-788), which stays in the perimeter.
  * A file that leaves the perimeter in the same commit (its @ import removed,
  * or the file deleted or moved) is still judged, because "removed from" uses
  * the parent's perimeter.
@@ -81,6 +93,8 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const {
   collectAlwaysLoadedContext,
+  isFrameworkSourceTree,
+  isInstallerManagedPath,
   parseModuleRegistryFromText,
   readFileAtRevision,
 } = require('./mavp-operator-lib.js');
@@ -197,8 +211,13 @@ function normalizeRel(p) {
   return String(p).trim().replace(/^\.\//, '').split(path.sep).join('/');
 }
 
-/** Perimeter (layers 0-1) of one revision: a sorted array of repo-relative paths. */
-function computePerimeter(root, reader) {
+/**
+ * Perimeter (layers 0-1) of one revision plus the installer-managed files left
+ * out of it (T-799): { paths, skipped }, both sorted arrays of repo-relative
+ * paths. `skipped` is non-empty only when the revision's own tree is not a
+ * framework source tree (no scripts/mavp-operator-lib.js at that revision).
+ */
+function computePerimeterDetail(root, reader) {
   const absRoot = path.resolve(root);
   const toRel = (abs) => path.relative(absRoot, abs).split(path.sep).join('/');
   const ctx = collectAlwaysLoadedContext(absRoot, {
@@ -228,7 +247,21 @@ function computePerimeter(root, reader) {
       }
     }
   }
-  return [...set].sort();
+  const skipped = [];
+  if (!isFrameworkSourceTree(root, { exists: (rel) => reader.paths.has(rel) })) {
+    for (const rel of [...set]) {
+      if (isInstallerManagedPath(rel)) {
+        set.delete(rel);
+        skipped.push(rel);
+      }
+    }
+  }
+  return { paths: [...set].sort(), skipped: skipped.sort() };
+}
+
+/** Perimeter (layers 0-1) of one revision: a sorted array of repo-relative paths. */
+function computePerimeter(root, reader) {
+  return computePerimeterDetail(root, reader).paths;
 }
 
 /** Lines removed and added in one file between two revisions (raw, untrimmed). */
@@ -330,13 +363,15 @@ function lineSet(reader, files) {
  * Returns { label, perimeter, removed, working, archive, amended: [{file, text, retention}], missing: [{file, text}] }.
  */
 function judgeStep(root, { parentRev, childRev, label, readers }) {
-  const result = { label, perimeter: [], removed: 0, working: 0, archive: 0, amended: [], missing: [], root: parentRev === null };
+  const result = { label, perimeter: [], skipped: [], removed: 0, working: 0, archive: 0, amended: [], missing: [], root: parentRev === null };
   if (parentRev === null) return result;
   const parentReader = readers.get(parentRev);
   const childReader = readers.get(childRev);
   const parentPerimeter = readers.perimeter(parentRev);
   const childPerimeter = readers.perimeter(childRev);
   result.perimeter = parentPerimeter;
+  // T-799: installer-managed files dropped from the parent's perimeter (adopter trees only).
+  result.skipped = typeof readers.skipped === 'function' ? readers.skipped(parentRev) : [];
 
   // Target sets, both read AFTER the step (at the child).
   const workingFiles = [...new Set([...parentPerimeter, ...childPerimeter])];
@@ -380,14 +415,23 @@ function judgeStep(root, { parentRev, childRev, label, readers }) {
 function makeReaderPool(root) {
   const readers = new Map();
   const perimeters = new Map();
+  const skippedByRev = new Map();
   return {
     get(rev) {
       if (!readers.has(rev)) readers.set(rev, makeRevisionReader(root, rev));
       return readers.get(rev);
     },
     perimeter(rev) {
-      if (!perimeters.has(rev)) perimeters.set(rev, computePerimeter(root, this.get(rev)));
+      if (!perimeters.has(rev)) {
+        const d = computePerimeterDetail(root, this.get(rev));
+        perimeters.set(rev, d.paths);
+        skippedByRev.set(rev, d.skipped);
+      }
       return perimeters.get(rev);
+    },
+    skipped(rev) {
+      this.perimeter(rev);
+      return skippedByRev.get(rev);
     },
   };
 }
@@ -446,6 +490,7 @@ function run(argv) {
 
   console.log(header);
   const perimeterUnion = new Set();
+  const skippedUnion = new Set();
   let removed = 0;
   let working = 0;
   let archive = 0;
@@ -459,6 +504,7 @@ function run(argv) {
       console.log(`  ${r.label}: merge commit — judged against its first parent`);
     }
     for (const f of r.perimeter) perimeterUnion.add(f);
+    for (const f of r.skipped) skippedUnion.add(f);
     removed += r.removed;
     working += r.working;
     archive += r.archive;
@@ -475,6 +521,9 @@ function run(argv) {
   console.log('Summary:');
   console.log(`  commits scanned: ${steps.length}`);
   console.log(`  perimeter files: ${perimeterUnion.size}${perimeterUnion.size ? ` (${[...perimeterUnion].sort().join(', ')})` : ''}`);
+  if (skippedUnion.size > 0) {
+    console.log(`  skipped installer-managed files (not in this adopter's perimeter): ${[...skippedUnion].sort().join(', ')}`);
+  }
   console.log(`  removed lines: ${removed}`);
   console.log(`  found-in-working: ${working}`);
   console.log(`  found-in-archive: ${archive}`);
@@ -507,4 +556,4 @@ if (require.main === module) {
   process.exitCode = code;
 }
 
-module.exports = { parseArgs, run, computePerimeter, judgeStep, tokenize, judgeAmended, AMENDED_RETENTION_THRESHOLD };
+module.exports = { parseArgs, run, computePerimeter, computePerimeterDetail, judgeStep, tokenize, judgeAmended, AMENDED_RETENTION_THRESHOLD };

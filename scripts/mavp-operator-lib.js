@@ -4808,6 +4808,103 @@ const MUST_READ_EXCLUDED_PATHS = Object.freeze([
   'EXECUTION_LOG.md',
 ]);
 
+/**
+ * T-799 — the installer's write set, defined ONCE here and required by
+ * scripts/mavp-install.js (which previously kept local copies). These are the
+ * files `mavp-install.js --update` rewrites from the framework source, so an
+ * adopter's copy of them is framework text, not adopter-owned text.
+ */
+const HOOK_NAMES = Object.freeze(['pre-commit', 'pre-push']);
+const CLAUDE_DIRS = Object.freeze(['agents', 'skills', 'rules']);
+const SYNC_SCRIPTS = Object.freeze([
+  'mavp-operator-agent.js',
+  'mavp-operator-close-session.js',
+]);
+const PROJECT_FILES = SYNC_SCRIPTS;
+const BASH_FILE = 'mavp-operator';
+/** Marker file: present in a framework source tree, never copied to an adopter. */
+const FRAMEWORK_MARKER_PATH = 'scripts/mavp-operator-lib.js';
+
+function normalizeInstallerRel(rel) {
+  return String(rel == null ? '' : rel).trim().split('\\').join('/').replace(/^(\.\/)+/, '');
+}
+
+/**
+ * T-799 — true iff the root's own tree contains scripts/mavp-operator-lib.js,
+ * which adopters never receive (they resolve the lib from the framework
+ * install at runtime). `opts.exists(rel)` lets a caller judge a git revision's
+ * path set instead of the working directory. Never throws.
+ *
+ * @param {string} root
+ * @param {{exists?: function(string): boolean}} [opts]
+ * @returns {boolean}
+ */
+function isFrameworkSourceTree(root, opts) {
+  try {
+    if (opts && typeof opts.exists === 'function') return Boolean(opts.exists(FRAMEWORK_MARKER_PATH));
+    return fs.statSync(path.join(root, ...FRAMEWORK_MARKER_PATH.split('/'))).isFile();
+  } catch (_err) {
+    return false;
+  }
+}
+
+/**
+ * T-799 — true when `rel` (root-relative, posix) is a file `mavp-install.js
+ * --update` rewrites. `.claude/{agents,skills,rules}/**` count only when a
+ * same-relative-path FILE exists in the framework source tree
+ * (`opts.frameworkRoot`, default: the checkout this lib lives in), so an
+ * adopter-created file with no framework counterpart is never managed; a
+ * `project-*` rule is the adopter's own rule home (T-788) and is never
+ * managed. Also true for the two git hooks and the wrapper plus the two
+ * synced scripts. False for everything else (.claude/settings.json,
+ * .claude/hooks/pre-commit.local, template-seeded docs, ...). Never throws.
+ *
+ * @param {string} rel
+ * @param {{frameworkRoot?: string}} [opts]
+ * @returns {boolean}
+ */
+function isInstallerManagedPath(rel, opts) {
+  const p = normalizeInstallerRel(rel);
+  if (!p || p.startsWith('/') || p.split('/').includes('..')) return false;
+  const parts = p.split('/');
+  if (parts[0] === '.claude' && parts.length >= 3 && CLAUDE_DIRS.includes(parts[1])) {
+    if (parts[1] === 'rules' && parts[2].startsWith('project-')) return false;
+    const frameworkRoot = (opts && opts.frameworkRoot) || path.resolve(__dirname, '..');
+    try {
+      return fs.statSync(path.join(frameworkRoot, ...parts)).isFile();
+    } catch (_err) {
+      return false;
+    }
+  }
+  if (parts[0] === '.claude' && parts.length === 3 && parts[1] === 'hooks') return HOOK_NAMES.includes(parts[2]);
+  if (parts[0] === 'scripts' && parts.length === 2) return parts[1] === BASH_FILE || SYNC_SCRIPTS.includes(parts[1]);
+  return false;
+}
+
+/**
+ * T-799 — split a must-read path list into adopter-owned `kept` and
+ * installer-managed `framework` paths. A framework source tree (the canon)
+ * is returned unchanged: everything is `kept`. Paths named in `opts.protect`
+ * (e.g. an in-flight task's context_docs) always stay `kept`. Never throws.
+ *
+ * @param {string} root
+ * @param {string[]} paths
+ * @param {{frameworkRoot?: string, protect?: string[]}} [opts]
+ * @returns {{kept: string[], framework: string[]}}
+ */
+function partitionInstallerManaged(root, paths, opts) {
+  const list = Array.isArray(paths) ? paths : [];
+  if (isFrameworkSourceTree(root)) return { kept: list.slice(), framework: [] };
+  const protect = new Set((opts && opts.protect) || []);
+  const kept = [];
+  const framework = [];
+  for (const p of list) {
+    if (!protect.has(p) && isInstallerManagedPath(p, opts)) framework.push(p);
+    else kept.push(p);
+  }
+  return { kept, framework };
+}
+
 /** T-781 — default `artifact_budgets.must_read_max_chars`. */
 const MUST_READ_DEFAULT_MAX_CHARS = 40000;
 
@@ -5711,6 +5808,15 @@ module.exports = {
   computeMustRead,
   MUST_READ_EXCLUDED_PATHS,
   MUST_READ_DEFAULT_MAX_CHARS,
+  HOOK_NAMES,
+  CLAUDE_DIRS,
+  SYNC_SCRIPTS,
+  PROJECT_FILES,
+  BASH_FILE,
+  FRAMEWORK_MARKER_PATH,
+  isFrameworkSourceTree,
+  isInstallerManagedPath,
+  partitionInstallerManaged,
   splitMustReadOversized,
   DEFERRED_TASK_STATUS_HEADING,
   detectPermissionModeConflict,

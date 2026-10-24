@@ -126,6 +126,9 @@ const path = require('node:path');
 const readline = require('node:readline');
 const { execSync, execFileSync } = require('node:child_process');
 const { MAVERICKS_VERSION } = require('./mavp-version.js');
+// T-799: the installer's write set (hooks, .claude dirs, synced scripts, wrapper
+// name) lives once in the lib, which also derives isInstallerManagedPath() from it.
+const { HOOK_NAMES, CLAUDE_DIRS, SYNC_SCRIPTS, PROJECT_FILES, BASH_FILE } = require('./mavp-operator-lib.js');
 
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -155,14 +158,9 @@ const MAVERICKS_IGNORE_PATTERNS = [
   'scripts/mavp-operator-close-session.js',
 ];
 
-// Project-specific files: templates, may have project customizations
-// Core framework files (lib, dashboard, snapshot, validator) stay in mavericks only.
-const PROJECT_FILES = [
-  'mavp-operator-agent.js',
-  'mavp-operator-close-session.js',
-];
-
-const BASH_FILE = 'mavp-operator';
+// Project-specific files (PROJECT_FILES) and the wrapper name (BASH_FILE) come
+// from the lib (T-799). Core framework files (lib, dashboard, snapshot,
+// validator) stay in mavericks only.
 
 function readUtf8(p) {
   try { return fs.readFileSync(p, 'utf8'); }
@@ -1062,7 +1060,7 @@ function emitDeployCiFragment(targetDir) {
 // refuses a push issued from a linked git worktree — see the hook's own
 // header comment for the discriminator and the MAVP_ALLOW_WORKTREE_PUSH
 // escape hatch (for a bare-primary layout where every checkout is linked).
-const HOOK_NAMES = ['pre-commit', 'pre-push'];
+// HOOK_NAMES is required from the lib above (T-799).
 
 /**
  * Copy each of HOOK_NAMES into .claude/hooks/ and configure git
@@ -1471,7 +1469,6 @@ async function main() {
     console.log(`${BOLD}Update mode${RESET} — re-syncing framework (scripts + .claude/) from mavericks\n`);
     const CLAUDE_SOURCE = path.join(FRAMEWORK_DIR, '..', '.claude');
     const CLAUDE_TARGET = path.join(targetDir, '.claude');
-    const CLAUDE_DIRS = ['agents', 'skills', 'rules'];
     let updatedCount = 0;
 
     // Self-install (T-406): .claude/{agents,skills,rules} ARE the source here —
@@ -1530,10 +1527,7 @@ async function main() {
     // Sync project-specific scripts from mavericks (agent, close-session).
     // mavp-operator-lib.js and mavp-version.js are NOT synced — projects resolve
     // them at runtime from the mavericks install via MAVERICKS_SCRIPTS (direct-reference model).
-    const SYNC_SCRIPTS = [
-      'mavp-operator-agent.js',
-      'mavp-operator-close-session.js',
-    ];
+    // (SYNC_SCRIPTS is required from the lib, T-799.)
     // Self-install (T-406): these ARE the framework source files — skip the copy.
     if (selfInstall) {
       console.log(`  ${DIM}skipped${RESET}  scripts/{${SYNC_SCRIPTS.join(',')}} ${DIM}(self-install — framework files are the source)${RESET}`);
@@ -2103,7 +2097,6 @@ async function main() {
   // Bootstrap .claude/ agents, skills, and rules (only if missing)
   const CLAUDE_SOURCE = path.join(FRAMEWORK_DIR, '..', '.claude');
   const CLAUDE_TARGET = path.join(targetDir, '.claude');
-  const CLAUDE_DIRS = ['agents', 'skills', 'rules'];
 
   for (const dir of CLAUDE_DIRS) {
     const srcDir = path.join(CLAUDE_SOURCE, dir);

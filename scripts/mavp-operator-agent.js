@@ -41,7 +41,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { buildDeployQueue, classifyNextAction, computeDueRechecks, computeMustRead, detectPermissionModeConflict, splitMustReadOversized, generateProcessStateMd, getDeployPendingForRepo, IN_FLIGHT_STATUSES, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { buildDeployQueue, classifyNextAction, computeDueRechecks, computeMustRead, detectPermissionModeConflict, partitionInstallerManaged, splitMustReadOversized, generateProcessStateMd, getDeployPendingForRepo, IN_FLIGHT_STATUSES, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
@@ -724,9 +724,22 @@ function main() {
   // T-781: ledgers are excluded inside computeMustRead; files over
   // artifact_budgets.must_read_max_chars move to the additive must_read_oversized.
   const mustReadBudgets = (readProcessStateJson() || {}).artifact_budgets;
-  const { mustRead, oversized: mustReadOversized } = splitMustReadOversized(
+  // T-799: in an adopter tree (never in a framework source tree, where the
+  // partition is a no-op) files `mavp-install.js --update` rewrites move out of
+  // must_read/must_read_oversized into the additive must_read_framework. An
+  // in-flight task's own context_docs are protected and always stay in must_read.
+  const declaredContextDocs = [];
+  for (const s of activeSlices) {
+    if (Array.isArray(s.context_docs)) declaredContextDocs.push(...s.context_docs);
+  }
+  const { kept: mustReadCandidates, framework: mustReadFramework } = partitionInstallerManaged(
     ROOT,
     computeMustRead(ROOT, activeSlices),
+    { protect: declaredContextDocs }
+  );
+  const { mustRead, oversized: mustReadOversized } = splitMustReadOversized(
+    ROOT,
+    mustReadCandidates,
     mustReadBudgets && typeof mustReadBudgets === 'object' ? mustReadBudgets.must_read_max_chars : undefined
   );
 
@@ -793,6 +806,7 @@ function main() {
     ...(dueRechecks.length > 0 ? { due_rechecks: dueRechecks } : {}),
     ...(mustRead.length > 0 ? { must_read: mustRead } : {}),
     ...(mustReadOversized.length > 0 ? { must_read_oversized: mustReadOversized } : {}),
+    ...(mustReadFramework.length > 0 ? { must_read_framework: mustReadFramework } : {}),
   };
 
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);

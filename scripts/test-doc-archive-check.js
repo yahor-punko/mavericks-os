@@ -544,6 +544,61 @@ try {
     assertSumsToTotal(r.out);
   });
 
+  // T-799: installer-managed files are skipped from the perimeter in adopter
+  // trees only. The fixture has two framework-owned rule lines and one
+  // adopter-owned rule; `withLib` adds a stub scripts/mavp-operator-lib.js,
+  // which is exactly what makes a tree a framework source tree.
+  const FRAMEWORK_RULE = ['# Docs rule', '', 'Framework rule line one.', 'Framework rule line two.', ''].join('\n');
+  const FRAMEWORK_RULE_AFTER = ['# Docs rule', '', 'Framework rule line one.', ''].join('\n');
+  const PROJECT_RULE = ['# Project rule', '', 'Adopter rule line one.', 'Adopter rule line two.', ''].join('\n');
+  const PROJECT_RULE_AFTER = ['# Project rule', '', 'Adopter rule line one.', ''].join('\n');
+
+  function ruleRepo({ withLib }) {
+    const { dir } = baseRepo();
+    write(dir, '.claude/rules/docs.md', FRAMEWORK_RULE);
+    write(dir, '.claude/rules/project-x.md', PROJECT_RULE);
+    if (withLib) write(dir, 'scripts/mavp-operator-lib.js', '// stub framework marker\n');
+    const base = commit(dir, 'add rules');
+    return { dir, base };
+  }
+
+  test('adopter tree: a line removed from a framework-managed rule passes and the skip line names that file', () => {
+    const { dir, base } = ruleRepo({ withLib: false });
+    write(dir, '.claude/rules/docs.md', FRAMEWORK_RULE_AFTER);
+    const c = commit(dir, 'update rewrites a framework rule');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(r.code, 0, `FAIL: expected exit 0:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'missing'), 0, r.out);
+    assert.strictEqual(count(r.out, 'removed lines'), 0, r.out);
+    assert.ok(/^\s*skipped installer-managed files .*: .*\.claude\/rules\/docs\.md/m.test(r.out), `FAIL: skip line must name .claude/rules/docs.md:\n${r.out}`);
+    assert.ok(!/skipped installer-managed files [^\n]*project-x/.test(r.out),`FAIL: project-x.md must not be skipped:\n${r.out}`);
+    assert.ok(/^Result: PASS/m.test(r.out), r.out);
+    assertSumsToTotal(r.out);
+  });
+
+  test('same fixture with a stub scripts/mavp-operator-lib.js (framework source tree): the removal is MISSING, exit 1, nothing skipped', () => {
+    const { dir, base } = ruleRepo({ withLib: true });
+    write(dir, '.claude/rules/docs.md', FRAMEWORK_RULE_AFTER);
+    const c = commit(dir, 'canon edits a rule');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(r.code, 1, `FAIL: expected exit 1:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'missing'), 1, r.out);
+    assert.ok(r.out.includes(`MISSING ${shortOf(dir, c)} .claude/rules/docs.md: Framework rule line two.`), r.out);
+    assert.ok(!/skipped installer-managed/.test(r.out), `FAIL: no skip line in a framework source tree:\n${r.out}`);
+    assertSumsToTotal(r.out);
+  });
+
+  test('adopter tree: a line removed from .claude/rules/project-x.md stays judged and is MISSING', () => {
+    const { dir, base } = ruleRepo({ withLib: false });
+    write(dir, '.claude/rules/project-x.md', PROJECT_RULE_AFTER);
+    const c = commit(dir, 'adopter edits its own rule');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(r.code, 1, `FAIL: expected exit 1:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'missing'), 1, r.out);
+    assert.ok(r.out.includes(`MISSING ${shortOf(dir, c)} .claude/rules/project-x.md: Adopter rule line two.`), r.out);
+    assertSumsToTotal(r.out);
+  });
+
   console.log(`PASS: test-doc-archive-check (${results.length} cases)`);
 } finally {
   for (const d of scratchDirs) fs.rmSync(d, { recursive: true, force: true });

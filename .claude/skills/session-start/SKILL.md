@@ -39,6 +39,7 @@ Read the JSON above. Key fields:
 - `UPDATE_AVAILABLE` — framework-version notice, a self-describing sentence (may be absent when versions match)
 - `must_read` — files changed since the previous close-session commit, plus context_docs declared by in-flight tasks (may be absent when empty). Ledgers (BACKLOG.md, TASK_STATUS.md, PROCESS_STATE.*, EXECUTION_LOG.md) never appear here — look tasks up by T-NNN with grep
 - `must_read_oversized` — `[{path, chars}]`: files that would be in `must_read` but exceed the size budget; search them, do not read them whole (present only when non-empty)
+- `must_read_framework` — string array: changed files that `mavp-install.js --update` rewrites from the framework source (framework-managed agents, skills, rules, hooks and synced scripts); reported only in an adopter repo, never in a framework source tree, and present only when non-empty
 
 Always render the wave digest header:
 
@@ -134,6 +135,16 @@ Oversized (search, do not read whole):
 ```
 
 These files exceeded the size budget (`artifact_budgets.must_read_max_chars`, default 40000): grep or search them for what you need instead of reading them whole. Omit this block entirely when `must_read_oversized` is absent.
+
+If `must_read_framework` is present and non-empty, render it as a third list directly after the "Oversized" list (or after the "Must read" list when there is none), never merged into either:
+
+```
+Framework-managed (changed by the last update, not yours to review):
+- {path}
+- ...
+```
+
+These files were rewritten from the framework source by `mavp-install.js --update`, so they are framework text rather than the project's own work: skip them unless a task touches the framework itself. Omit this block entirely when `must_read_framework` is absent.
 
 **First-run goal prompt:** if the onboarding block at the top of this skill contained text (this is the project's first session) and `next_action` is null, skip both branches below and end the brief by asking the operator what they are building, instead of showing "Next action: null":
 

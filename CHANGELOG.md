@@ -5,6 +5,30 @@ inspired by [Keep a Changelog](https://keepachangelog.com/). For how the
 framework actually works, see [README.md](README.md) and the core process
 docs in [`docs/core/`](docs/core/).
 
+## [0.51.1] — 2026-10-24
+
+**Notes for adopters:** nothing here is breaking. Two entries below are late clarifications of behaviour that has been in force since `v0.51.0` (documented late); the other entries are ordinary notes for changes that ship in the next release.
+
+### Documented late (in force since `v0.51.0`)
+
+Both entries describe behaviour that was already in force at the `v0.51.0` tag. The `## [0.51.0]` section below is frozen and left exactly as shipped (`docs/PUBLIC_RELEASE_STRATEGY.md` §5 — "Frozen-section rule"), so these clarifications could not be added to it; this section is the correction record, not new work. If you are reading them under a later version heading, they did not arrive in that version — they have applied since `v0.51.0`.
+
+- **If you run `--check-archive --range` in CI, make the checkout fetch the full git history, or the check will fail with exit 2** (T-783, shipped in `v0.51.0`, documented late) — `--range` walks every commit in the range, so it needs the whole history, and on a shallow clone it refuses to run and exits 2 rather than reporting a pass it cannot back. Most CI systems clone shallowly by default; with GitHub Actions, set `fetch-depth: 0` on `actions/checkout`. `--staged` is exempt: it judges only what is about to be committed, needs just `HEAD` and the index, and works on a shallow clone, which is why it is the form to call from `.claude/hooks/pre-commit.local`.
+
+- **The startup-size number that `context_size_budget` reports is a lower bound: your real load at the start of a session is larger** (T-782, shipped in `v0.51.0`, documented late) — the check counts what lives in your repository and is always loaded: `CLAUDE.md`, the files it pulls in with `@` imports, and the `.claude/rules/` files that carry no `paths:` frontmatter. It deliberately does not count content the harness owns and the framework cannot read or size: the auto-memory `MEMORY.md` index, and whatever your `SessionStart` hooks print. Both load into every session on top of the reported total, and one adopter measured about 21,000 characters it could not see this way. So a total that sits comfortably under `always_loaded_max_chars` does not mean the real startup load does; if sessions feel heavy, add your memory index and hook output to the number yourself before judging it.
+
+### Changed
+
+- **After you run `--update`, the files the framework itself rewrote no longer crowd your session-start "must read" list** (T-799) — in an adopter repository, `--update` re-copies the framework-owned files (the framework rules, agents and skills, the `pre-commit` and `pre-push` hooks, and the synced operator scripts), and each of them used to show up in `--agent`'s `must_read` as "changed since the last session close", even though you did not write them and have nothing to review in them. They are now listed in a new additive `--agent` field, `must_read_framework`, emitted only when non-empty, and no longer appear in `must_read`. Anything that reads `must_read` keeps working and simply sees a shorter list. Files you own are unaffected and stay in `must_read`: `.claude/rules/project-*.md`, `.claude/hooks/pre-commit.local`, and your own docs.
+
+- **The `context_size_budget` advice for an over-large startup total now points at the fix that actually shrinks it** (T-798) — when the total passes `always_loaded_max_chars`, the finding now names moving an oversized `@`-imported document into a module's `context_docs` in `docs/MODULES.md`, where it loads on demand when a task for that module needs it instead of at every start of every session and sub-agent spawn. The check itself, its thresholds and its info severity are unchanged.
+
+### Fixed
+
+- **A framework `--update` can no longer make your `--check-archive` nothing-lost check fail on text you never wrote** (T-799) — the check judges every line removed from the docs that load into your sessions, and a framework update rewrites the framework-managed rule files, so an adopter's check could fail on lines the framework itself had reworded. In an adopter repository `--check-archive` now leaves those framework-managed files out of its perimeter and says so on a summary line that names them, so you can see what was skipped. Files you own stay checked: `.claude/rules/project-*.md`, `pre-commit.local`, and project docs such as a `docs/MODULES.md` seeded from the template. **One boundary is accepted, not hidden:** if you hand-remove a line from a framework-managed rule file, the check does not judge it, because `--update` overwrites that file with the framework's copy anyway — put your own rules in `.claude/rules/project-*.md`, which are never overwritten and always checked.
+
+- **Validator findings that concern the project as a whole now print `[project]` instead of `[null]`** (T-798) — a finding that belongs to no single task, such as `context_size_budget`, carried no task id and the report printed that absence as the literal text `[null]`, which read like a bug in your own state files. Such findings are now labelled `[project]`. Only the printed label changes; the finding names, severities and exit codes are the same.
+
 ## [0.51.0] — 2026-10-23
 
 **Upgrade notes for adopters:** nothing in this release is breaking. Five things are worth knowing before you run `mavp-install.js --update`.

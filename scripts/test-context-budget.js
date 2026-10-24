@@ -15,6 +15,8 @@ const { collectAlwaysLoadedContext } = require('./mavp-operator-lib.js');
 const {
   parseArtifacts,
   getExitCode,
+  createFinding,
+  renderValidatorReport,
   DEFAULT_ARTIFACT_BUDGETS,
 } = require('./mavp-validator.js');
 
@@ -203,6 +205,50 @@ function validate(files, processState) {
   assert.match(findings[0].message, /big\d\.md/);
   assert.strictEqual(getExitCode(parsed.comparison.overallCandidateState), 0, 'Test 8 FAIL: info finding must not change the exit code');
   console.log('Test 8 passed: over-budget total -> exactly one info finding, exit 0');
+}
+
+// ---------------------------------------------------------------------------
+// Test 8c (T-798): the rendered report labels a project-level finding
+// "[project]" (never the bracketed null), the total-budget action names the
+// module context_docs route, and task-keyed findings keep "[T-123]" in the
+// Failures/Warnings block and in the info "## Findings" block.
+// ---------------------------------------------------------------------------
+{
+  const piece = 'x'.repeat(35000);
+  const { parsed, findings } = validate({
+    'CLAUDE.md': '@big1.md @big2.md @big3.md @big4.md @big5.md\n',
+    'big1.md': piece, 'big2.md': piece, 'big3.md': piece, 'big4.md': piece, 'big5.md': piece,
+  });
+  assert.strictEqual(findings.length, 1);
+  assert.strictEqual(findings[0].taskId, null, 'Test 8c FAIL: fixture finding must be project-level (taskId null)');
+  assert.match(findings[0].suggestedAction, /context_docs/, 'Test 8c FAIL: suggestedAction must name context_docs');
+  assert.match(findings[0].suggestedAction, /docs\/MODULES\.md/, 'Test 8c FAIL: suggestedAction must name docs/MODULES.md');
+  const report = renderValidatorReport(parsed);
+  assert.ok(report.includes('- [project] context_size_budget'), `Test 8c FAIL: missing project label in:\n${report}`);
+  assert.ok(!report.includes('[null]'), 'Test 8c FAIL: report must not contain the bracketed null label');
+  assert.ok(!report.includes('[undefined]'), 'Test 8c FAIL: report must not contain the bracketed undefined label');
+
+  // Task-keyed labels unchanged, in the warning block and the info block.
+  const synthetic = {
+    ...parsed,
+    comparison: {
+      ...parsed.comparison,
+      findings: [
+        createFinding({ checkName: 'zz_warn_check', severity: 'warning', taskId: 'T-123', message: 'm', repairTarget: 'r', suggestedAction: 'a' }),
+        createFinding({ checkName: 'zz_info_check', severity: 'info', taskId: 'T-123', message: 'm', repairTarget: 'r', suggestedAction: 'a' }),
+        createFinding({ checkName: 'zz_warn_proj', severity: 'warning', taskId: undefined, message: 'm', repairTarget: 'r', suggestedAction: 'a' }),
+        createFinding({ checkName: 'zz_info_proj', severity: 'info', taskId: null, message: 'm', repairTarget: 'r', suggestedAction: 'a' }),
+        createFinding({ checkName: 'zz_info_agg', severity: 'info', taskId: 'AGGREGATE', message: 'm', repairTarget: 'r', suggestedAction: 'a' }),
+      ],
+    },
+  };
+  const synth = renderValidatorReport(synthetic);
+  assert.ok(synth.includes('- [T-123] zz_warn_check\n'), 'Test 8c FAIL: warning block must keep [T-123]');
+  assert.ok(synth.includes('- [T-123] zz_info_check: m'), 'Test 8c FAIL: info block must keep [T-123]');
+  assert.ok(synth.includes('- [project] zz_warn_proj\n'), 'Test 8c FAIL: undefined taskId must render [project] in warning block');
+  assert.ok(synth.includes('- [project] zz_info_proj: m'), 'Test 8c FAIL: null taskId must render [project] in info block');
+  assert.ok(synth.includes('- [AGGREGATE] zz_info_agg: m'), 'Test 8c FAIL: AGGREGATE label must be unchanged');
+  console.log('Test 8c passed: [project] label, context_docs route in action, [T-123]/[AGGREGATE] unchanged');
 }
 
 // Test 8b: the finding names only the top five contributors.

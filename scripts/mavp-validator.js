@@ -2499,7 +2499,7 @@ function checkContextSizeBudget({ root, processStatePath }) {
         taskId: null,
         message: `Always-loaded context is ${ctxResult.total_chars} characters, exceeding the budget of ${budgets.always_loaded_max_chars}; top contributors: ${top}`,
         repairTarget: 'CLAUDE.md',
-        suggestedAction: 'Trim the largest always-loaded documents, move content behind path-scoped rules, or raise always_loaded_max_chars in PROCESS_STATE.json artifact_budgets if the growth is intentional.',
+        suggestedAction: 'Trim the largest always-loaded documents, move an over-size @-imported document to a module\'s context_docs in docs/MODULES.md (layer 1, loaded only when a task for that module is active), move content behind path-scoped rules, or raise always_loaded_max_chars in PROCESS_STATE.json artifact_budgets if the growth is intentional.',
       })
     );
   }
@@ -3287,9 +3287,15 @@ function groupFindingsBySeverity(findings) {
   );
 }
 
+// T-798: project-level findings carry taskId null/undefined; label them
+// "project" so they never read like a bracketed severity ("[null]").
+function formatFindingLabel(finding) {
+  return finding.taskId === null || finding.taskId === undefined ? 'project' : String(finding.taskId);
+}
+
 function renderFindingLines(finding) {
   return [
-    `- [${finding.taskId}] ${finding.checkName}`,
+    `- [${formatFindingLabel(finding)}] ${finding.checkName}`,
     `  - Issue: ${finding.message}`,
     `  - Repair target: ${finding.repairTarget}`,
     `  - Next action: ${finding.suggestedAction}`,
@@ -3326,7 +3332,7 @@ function renderValidatorReport(parsed) {
   if (grouped.info.length > 0) {
     lines.push('', '## Findings');
     for (const finding of grouped.info) {
-      lines.push(`- [${finding.taskId}] ${finding.checkName}: ${finding.message}`);
+      lines.push(`- [${formatFindingLabel(finding)}] ${finding.checkName}: ${finding.message}`);
     }
   }
 

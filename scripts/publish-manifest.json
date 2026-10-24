@@ -167,6 +167,7 @@
     "scripts/test-install-update-preserves-project-files.js",
     "scripts/test-install-vscode-worktree-exclude.js",
     "scripts/test-install-wrapper-hook-resync.js",
+    "scripts/test-installer-managed-paths.js",
     "scripts/test-manifest-guard.js",
     "scripts/test-merged-evidence-type-aware.js",
     "scripts/test-mirror-ci-gate.js",

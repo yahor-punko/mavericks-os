@@ -539,6 +539,45 @@ function makeWorkingTreeFixture(name, { withGitignore = false } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// T-799: must_read_framework. In an adopter tree (no scripts/mavp-operator-lib.js)
+// a changed installer-managed file moves out of must_read into the additive
+// must_read_framework; in a framework source tree nothing changes.
+// ---------------------------------------------------------------------------
+function makeManagedChangeFixture(name, { withLib }) {
+  const { root } = makeGitFixture(name, { changedFile: 'src/x.js' });
+  fs.mkdirSync(path.join(root, '.claude', 'hooks'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.claude', 'hooks', 'pre-commit'), '#!/bin/sh\nexit 0\n', 'utf8');
+  fs.writeFileSync(path.join(root, '.claude', 'hooks', 'pre-commit.local'), '#!/bin/sh\nexit 0\n', 'utf8');
+  if (withLib) {
+    fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'scripts', 'mavp-operator-lib.js'), '// stub framework marker\n', 'utf8');
+  }
+  git(root, 'add -A');
+  git(root, 'commit -q -m "T-799: managed file changes"');
+  addMinimalState(root, { backlog: BACKLOG_NO_TASKS, taskStatus: TASK_STATUS_NO_TASKS });
+  return root;
+}
+
+{
+  const root = makeManagedChangeFixture('managed-adopter-fixture', { withLib: false });
+  const output = runAgent(root);
+  assert.ok(output.must_read.includes('src/x.js'), `Test 17 FAIL: src/x.js must stay in must_read, got ${JSON.stringify(output.must_read)}`);
+  assert.ok(!output.must_read.includes('.claude/hooks/pre-commit'), `Test 17 FAIL: the managed hook must leave must_read, got ${JSON.stringify(output.must_read)}`);
+  assert.deepStrictEqual(output.must_read_framework, ['.claude/hooks/pre-commit'], `Test 17 FAIL: must_read_framework must hold exactly the managed hook (pre-commit.local is adopter-owned), got ${JSON.stringify(output.must_read_framework)}`);
+  assert.ok(output.must_read.includes('.claude/hooks/pre-commit.local'), `Test 17 FAIL: pre-commit.local is adopter-owned and must stay in must_read, got ${JSON.stringify(output.must_read)}`);
+  assert.ok(!('must_read_oversized' in output), 'Test 17 FAIL: no oversized entry expected');
+  console.log('Test 17 passed: adopter tree lists src/x.js in must_read and the managed hook only in must_read_framework');
+}
+
+{
+  const root = makeManagedChangeFixture('managed-canon-fixture', { withLib: true });
+  const output = runAgent(root);
+  assert.ok(output.must_read.includes('.claude/hooks/pre-commit'), `Test 18 FAIL: in a framework source tree the hook stays in must_read, got ${JSON.stringify(output.must_read)}`);
+  assert.ok(!('must_read_framework' in output), `Test 18 FAIL: must_read_framework must be absent in a framework source tree, got ${JSON.stringify(output.must_read_framework)}`);
+  console.log('Test 18 passed: framework source tree is unchanged (no must_read_framework, hook stays in must_read)');
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 fs.rmSync(TMP_DIR, { recursive: true, force: true });

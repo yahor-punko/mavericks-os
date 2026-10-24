@@ -55,6 +55,8 @@ function buildFrameworkFixture(root) {
   fs.mkdirSync(scriptsDir, { recursive: true });
   fs.copyFileSync(REAL_INSTALL_SCRIPT, path.join(scriptsDir, 'mavp-install.js'));
   fs.copyFileSync(REAL_VERSION_SCRIPT, path.join(scriptsDir, 'mavp-version.js'));
+  // T-799: the installer requires its write-set constants from the lib.
+  fs.copyFileSync(path.join(__dirname, 'mavp-operator-lib.js'), path.join(scriptsDir, 'mavp-operator-lib.js'));
 
   const seed = {
     wrapper: '#!/usr/bin/env bash\necho "FIXTURE CANONICAL WRAPPER — must not change"\n',

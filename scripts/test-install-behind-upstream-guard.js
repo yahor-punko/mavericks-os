@@ -107,6 +107,8 @@ function cloneAsFixtureSource(upstreamRoot, version) {
   const scriptsDir = path.join(cloneRoot, 'scripts');
   fs.mkdirSync(scriptsDir, { recursive: true });
   fs.copyFileSync(REAL_INSTALL_SCRIPT, path.join(scriptsDir, 'mavp-install.js'));
+  // T-799: the installer requires its write-set constants from the lib.
+  fs.copyFileSync(path.join(__dirname, 'mavp-operator-lib.js'), path.join(scriptsDir, 'mavp-operator-lib.js'));
   fs.writeFileSync(
     path.join(scriptsDir, 'mavp-version.js'),
     `module.exports = { MAVERICKS_VERSION: '${version}' };\n`,
@@ -124,6 +126,8 @@ function buildPlainFixtureInstall(root, version) {
   const scriptsDir = path.join(root, 'scripts');
   fs.mkdirSync(scriptsDir, { recursive: true });
   fs.copyFileSync(REAL_INSTALL_SCRIPT, path.join(scriptsDir, 'mavp-install.js'));
+  // T-799: the installer requires its write-set constants from the lib.
+  fs.copyFileSync(path.join(__dirname, 'mavp-operator-lib.js'), path.join(scriptsDir, 'mavp-operator-lib.js'));
   fs.writeFileSync(
     path.join(scriptsDir, 'mavp-version.js'),
     `module.exports = { MAVERICKS_VERSION: '${version}' };\n`,
