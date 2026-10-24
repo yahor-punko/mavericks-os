@@ -16,6 +16,9 @@
 //      needs_fix_rounds: token in place (never appending a second one), or
 //      inserts one when absent, on any target status; an invalid/missing
 //      value exits 1 before any file is read or written.
+//   8 (T-779) — explicit --commit/--needs-fix-rounds persist on a task already
+//      at the target status; --from-skipped tasks get no write; the implicit
+//      needs_fix_rounds: 0 auto-stamp requires a genuine transition.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -561,6 +564,167 @@ const REAL_COMMIT_SHORT = execFileSync('git', ['-C', REPO, 'rev-parse', '--short
   console.log('Test 10e passed: missing --needs-fix-rounds value rejected before any write');
 }
 
+// ---------------------------------------------------------------------------
+// Part 11 (T-779) — explicit evidence flags persist on a task already at the
+// target status; a --from-skipped task receives no write of any kind; the
+// implicit needs_fix_rounds: 0 auto-stamp fires only on a genuine transition.
+// ---------------------------------------------------------------------------
+{
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: REPO };
+  const taskStatusPath = path.join(REPO, 'TASK_STATUS.md');
+  const backlogPath = path.join(REPO, 'BACKLOG.md');
+  const hashOf = (p) => crypto.createHash('sha256').update(readUtf8(p)).digest('hex');
+
+  // A second reachable commit (short hash) distinct from REAL_COMMIT_SHORT.
+  gitQuiet(REPO, ['commit', '-q', '--allow-empty', '-m', 'second commit']);
+  const SECOND_COMMIT_SHORT = execFileSync('git', ['-C', REPO, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
+  assert.notStrictEqual(SECOND_COMMIT_SHORT, REAL_COMMIT_SHORT, 'Test 11 setup FAIL: need two distinct reachable hashes');
+
+  // (a) already-merged task, --needs-fix-rounds 2 alone: persisted.
+  const fixtureA = () =>
+    writeFixture(REPO, 'T-970', 'merged', `commit: ${REAL_COMMIT_SHORT} branch: main needs_fix_rounds: 0`);
+  fixtureA();
+  const rA = runSetStatus(['T-970', 'merged', '--needs-fix-rounds', '2'], REPO, env);
+  assert.notStrictEqual(rA.status, 2, `Test 11a FAIL: exit must not be 2, got:\n${rA.output}`);
+  const evA = taskStatusEvidence(REPO, 'T-970');
+  assert.ok(evA.includes('needs_fix_rounds: 2'), `Test 11a FAIL: expected needs_fix_rounds: 2, got: ${evA}`);
+  assert.ok(evA.includes(`commit: ${REAL_COMMIT_SHORT} branch: main`), `Test 11a FAIL: hash+branch must be preserved, got: ${evA}`);
+  assert.strictEqual((evA.match(/needs_fix_rounds:/g) || []).length, 1, `Test 11a FAIL: expected exactly one needs_fix_rounds: token, got: ${evA}`);
+  assert.strictEqual(taskStatusStatus(REPO, 'T-970'), 'merged', 'Test 11a FAIL: Status must remain merged');
+  assert.ok(/Evidence updated, status unchanged \(1\): T-970/.test(rA.output), `Test 11a FAIL: expected the evidence-updated summary line, got:\n${rA.output}`);
+  assert.ok(!/Skipped/.test(rA.output), `Test 11a FAIL: task must not be reported Skipped, got:\n${rA.output}`);
+  console.log(`Test 11a passed: same-status --needs-fix-rounds persisted — Evidence: "${evA}"`);
+
+  // (b) same shape with --commit <other reachable hash> alone. Existing
+  // mergeCommitEvidence() REPLACES an existing commit/branch token in place
+  // (and preserves the surrounding text) — asserted as-is; merge semantics
+  // are not changed by this task.
+  fixtureA();
+  const rB = runSetStatus(['T-970', 'merged', '--commit', SECOND_COMMIT_SHORT], REPO, env);
+  assert.notStrictEqual(rB.status, 2, `Test 11b FAIL: exit must not be 2, got:\n${rB.output}`);
+  const evB = taskStatusEvidence(REPO, 'T-970');
+  assert.strictEqual(
+    evB,
+    `commit: ${SECOND_COMMIT_SHORT} branch: main needs_fix_rounds: 0`,
+    `Test 11b FAIL: commit token must be replaced in place with prior text preserved, got: ${evB}`
+  );
+  assert.ok(!evB.includes(REAL_COMMIT_SHORT), `Test 11b FAIL: old hash must be gone (replaced, not appended), got: ${evB}`);
+  assert.ok(/Evidence updated, status unchanged \(1\): T-970/.test(rB.output), `Test 11b FAIL: expected the evidence-updated summary line, got:\n${rB.output}`);
+  console.log(`Test 11b passed: same-status --commit persisted (replaced in place) — Evidence: "${evB}"`);
+
+  // (c) --from-skipped task: byte-identical, warning names the --from guard.
+  writeFixture(REPO, 'T-971', 'qa_passed', 'qa notes: from-guard test');
+  const tsHashC = hashOf(taskStatusPath);
+  const blHashC = hashOf(backlogPath);
+  const rC = runSetStatus(['T-971', 'merged', '--from', 'ready_for_qa', '--needs-fix-rounds', '3'], REPO, env);
+  assert.strictEqual(hashOf(taskStatusPath), tsHashC, 'Test 11c FAIL: TASK_STATUS.md must be byte-identical for a --from-skipped task');
+  assert.strictEqual(hashOf(backlogPath), blHashC, 'Test 11c FAIL: BACKLOG.md must be byte-identical for a --from-skipped task');
+  assert.ok(/--from guard/.test(rC.output), `Test 11c FAIL: expected the --from guard warning, got:\n${rC.output}`);
+  console.log('Test 11c passed: --from-skipped task receives no write (hash compared), --from guard warning printed');
+
+  // (d) already-merged, no needs_fix_rounds:, no flags: no auto-stamp, no write.
+  writeFixture(REPO, 'T-972', 'merged', `commit: ${REAL_COMMIT_SHORT} branch: main`);
+  const tsHashD = hashOf(taskStatusPath);
+  const rD = runSetStatus(['T-972', 'merged'], REPO, env);
+  assert.strictEqual(hashOf(taskStatusPath), tsHashD, 'Test 11d FAIL: TASK_STATUS.md must be byte-identical (auto-stamp needs a transition)');
+  assert.ok(!/needs_fix_rounds/.test(readUtf8(taskStatusPath)), 'Test 11d FAIL: no needs_fix_rounds token may appear');
+  assert.ok(!/needs_fix_rounds: 0 added where absent/.test(rD.output), `Test 11d FAIL: stamp summary line must not print, got:\n${rD.output}`);
+  console.log('Test 11d passed: same-status merged with no flags writes nothing and stamps nothing');
+
+  // (e) two-task batch: T-973 transitions, T-974 is same-status with
+  // --needs-fix-rounds 1 — both persisted, T-974 under the evidence line.
+  writeUtf8(backlogPath, `# BACKLOG
+
+## Active Wave
+
+### T-973 — Fixture transitioning task
+- **Status:** qa_passed
+- **Owner role:** developer
+- **Repo:** mavericks
+- **Verification type:** runtime
+
+### T-974 — Fixture same-status task
+- **Status:** merged
+- **Owner role:** developer
+- **Repo:** mavericks
+- **Verification type:** runtime
+`);
+  writeUtf8(taskStatusPath, `# TASK_STATUS
+
+## Active tasks
+
+### T-973 — Fixture transitioning task
+- **Status:** qa_passed
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** qa
+- **Evidence:** qa notes: batch test
+- **Notes:** —
+
+### T-974 — Fixture same-status task
+- **Status:** merged
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Last verified by:** qa
+- **Evidence:** commit: ${REAL_COMMIT_SHORT} branch: main needs_fix_rounds: 0
+- **Notes:** —
+
+## Recently completed tasks
+`);
+  const rE = runSetStatus(['T-973,T-974', 'merged', '--needs-fix-rounds', '1'], REPO, env);
+  assert.strictEqual(taskStatusStatus(REPO, 'T-973'), 'merged', 'Test 11e FAIL: T-973 must transition');
+  assert.ok(taskStatusEvidence(REPO, 'T-973').includes('needs_fix_rounds: 1'), 'Test 11e FAIL: T-973 evidence must carry needs_fix_rounds: 1');
+  const evE = taskStatusEvidence(REPO, 'T-974');
+  assert.strictEqual(evE, `commit: ${REAL_COMMIT_SHORT} branch: main needs_fix_rounds: 1`, `Test 11e FAIL: T-974 evidence must be updated, got: ${evE}`);
+  assert.ok(/Updated \(1\): T-973/.test(rE.output), `Test 11e FAIL: expected T-973 in the Updated line, got:\n${rE.output}`);
+  assert.ok(/Evidence updated, status unchanged \(1\): T-974/.test(rE.output), `Test 11e FAIL: expected T-974 in the evidence-updated line, got:\n${rE.output}`);
+  console.log('Test 11e passed: batch persists the transitioning task and the same-status evidence-only task');
+
+  // (f) named mutant: reverting the write condition to `if (updated.length > 0)`
+  // makes (a)'s evidence-only write vanish. Toggled in-process on the real
+  // source with an unconditional restore.
+  {
+    const original = readUtf8(SET_STATUS_PATH);
+    const liveCondition = 'if (backlog !== backlogAsRead || taskStatus !== taskStatusAsRead) {';
+    assert.ok(original.includes(liveCondition), 'Test 11f setup FAIL: live write condition not found in source');
+    const mutant = original.replace(liveCondition, 'if (updated.length > 0) {');
+    assert.notStrictEqual(mutant, original, 'Test 11f setup FAIL: mutation did not change the source');
+    let redBytesIdentical;
+    try {
+      writeUtf8(SET_STATUS_PATH, mutant);
+      fixtureA();
+      const before = hashOf(taskStatusPath);
+      runSetStatus(['T-970', 'merged', '--needs-fix-rounds', '2'], REPO, env);
+      redBytesIdentical = hashOf(taskStatusPath) === before;
+    } finally {
+      writeUtf8(SET_STATUS_PATH, original);
+    }
+    assert.strictEqual(readUtf8(SET_STATUS_PATH), original, 'Test 11f FAIL: source must be restored byte-for-byte');
+    assert.strictEqual(redBytesIdentical, true, 'Test 11f FAIL (red): under the updated.length > 0 mutant, the same-status write must NOT persist');
+    fixtureA();
+    const beforeGreen = hashOf(taskStatusPath);
+    runSetStatus(['T-970', 'merged', '--needs-fix-rounds', '2'], REPO, env);
+    assert.notStrictEqual(hashOf(taskStatusPath), beforeGreen, 'Test 11f FAIL (green): restored source must persist the same-status write');
+    console.log('Test 11f passed: mutant (updated.length > 0) leaves file byte-identical [red]; restored source persists it [green]');
+  }
+
+  // (g) annotated-only Evidence block already at target status, with
+  // --needs-fix-rounds 1: refused by the T-778 gate — exit 1, byte-identical.
+  writeFixture(REPO, 'T-975', 'merged', 'commit: abc1234 branch: main');
+  writeUtf8(
+    taskStatusPath,
+    readUtf8(taskStatusPath).replace('- **Evidence:**', '- **Evidence (2026-09-20, QA):**')
+  );
+  const tsHashG = hashOf(taskStatusPath);
+  const blHashG = hashOf(backlogPath);
+  const rG = runSetStatus(['T-975', 'merged', '--needs-fix-rounds', '1'], REPO, env);
+  assert.strictEqual(rG.status, 1, `Test 11g FAIL: expected exit 1, got ${rG.status}:\n${rG.output}`);
+  assert.ok(/refusing to write/.test(rG.output), `Test 11g FAIL: expected the T-778 refusal, got:\n${rG.output}`);
+  assert.strictEqual(hashOf(taskStatusPath), tsHashG, 'Test 11g FAIL: TASK_STATUS.md must be byte-identical');
+  assert.strictEqual(hashOf(backlogPath), blHashG, 'Test 11g FAIL: BACKLOG.md must be byte-identical');
+  console.log('Test 11g passed: annotated-only Evidence at target status refused by the T-778 gate (exit 1, byte-identical)');
+}
+
 fs.rmSync(REPO, { recursive: true, force: true });
 
-console.log('\nAll T-446 / T-608 / T-774 assertions passed.');
+console.log('\nAll T-446 / T-608 / T-774 / T-779 assertions passed.');

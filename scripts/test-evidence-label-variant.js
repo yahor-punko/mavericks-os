@@ -424,6 +424,102 @@ function writeSanctionedFixture(root, taskId) {
   console.log('Case 8 passed: the sanctioned indented-sub-bullet form is never refused, and --commit updates the canonical field in place');
 }
 
+// ---------------------------------------------------------------------------
+// Part 4 — T-778: the refusal covers EVERY Evidence-writing path, not only
+// --commit. Cases 9-10 run against the defect fixture (annotated-only
+// Evidence); Case 9 uses a target status (ready_for_qa) that DIFFERS from the
+// fixture's qa_passed, because a same-status run writes nothing at all (the
+// `updated.length > 0` guard — a separate concern), so only a real status
+// change lets --needs-fix-rounds reach the forking insert.
+// ---------------------------------------------------------------------------
+
+// Shared assertions for the two refusal cases: non-zero exit, TASK_STATUS.md
+// byte-identical, top-level Evidence count stays 1, output names the
+// annotated key verbatim.
+function assertRefusedAndUntouched(label, args, taskId) {
+  writeDefectFixture(REPO, taskId);
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: REPO };
+  const before = readUtf8(path.join(REPO, 'TASK_STATUS.md'));
+  const backlogBefore = readUtf8(path.join(REPO, 'BACKLOG.md'));
+  assert.strictEqual(countTopLevelEvidenceBullets(before), 1, `${label} setup FAIL: expected exactly 1 top-level Evidence bullet before the run`);
+
+  const { status, output } = runSetStatus([taskId, ...args], REPO, env);
+
+  assert.notStrictEqual(status, 0, `${label} FAIL: expected a non-zero exit on the annotated-only Evidence block, got ${status}:\n${output}`);
+  assert.ok(output.includes('Evidence (2026-09-20, QA)'), `${label} FAIL: output must name the annotated key verbatim, got:\n${output}`);
+  const after = readUtf8(path.join(REPO, 'TASK_STATUS.md'));
+  assert.strictEqual(after, before, `${label} FAIL: TASK_STATUS.md must be byte-for-byte unchanged`);
+  assert.strictEqual(countTopLevelEvidenceBullets(after), 1, `${label} FAIL: top-level Evidence count must stay at 1`);
+  assert.strictEqual(readUtf8(path.join(REPO, 'BACKLOG.md')), backlogBefore, `${label} FAIL: BACKLOG.md must be byte-for-byte unchanged — the whole run is refused`);
+}
+
+// Case 9: --needs-fix-rounds with NO --commit on the defect fixture.
+{
+  assertRefusedAndUntouched('Case 9', ['ready_for_qa', '--needs-fix-rounds', '1'], 'T-964');
+  console.log('Case 9 passed: --needs-fix-rounds (no --commit) on an annotated-only Evidence block is refused, nothing written, count stayed at 1');
+}
+
+// Case 10: bare `merged` (neither flag) on the defect fixture — the
+// needs_fix_rounds: 0 auto-stamp would otherwise fork a second field.
+{
+  assertRefusedAndUntouched('Case 10', ['merged'], 'T-965');
+  console.log('Case 10 passed: bare merged (auto-stamp path) on an annotated-only Evidence block is refused, nothing written, count stayed at 1');
+}
+
+// Case 11: sanctioned fixture (canonical field + indented dated sub-bullet)
+// with --needs-fix-rounds and no --commit -> the write proceeds, one
+// top-level Evidence field, exactly one needs_fix_rounds: 1, sub-bullet kept.
+{
+  writeSanctionedFixture(REPO, 'T-966');
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: REPO };
+  const { status, output } = runSetStatus(['T-966', 'ready_for_qa', '--needs-fix-rounds', '1'], REPO, env);
+  assert.notStrictEqual(status, 2, `Case 11 FAIL: expected the write to proceed (not repair-required exit 2), got:\n${output}`);
+
+  const after = readUtf8(path.join(REPO, 'TASK_STATUS.md'));
+  assert.strictEqual(countTopLevelEvidenceBullets(after), 1, `Case 11 FAIL: sanctioned form must still carry exactly one top-level Evidence field, got:\n${after}`);
+  const nfrTokens = after.match(/needs_fix_rounds: 1\b/g) || [];
+  assert.strictEqual(nfrTokens.length, 1, `Case 11 FAIL: expected exactly one "needs_fix_rounds: 1" token, got ${nfrTokens.length}:\n${after}`);
+  assert.ok(after.includes('**Evidence (2026-09-15, QA):** first pass, all cases pass'), `Case 11 FAIL: the sanctioned dated sub-bullet must be preserved, got:\n${after}`);
+  console.log('Case 11 passed: sanctioned form with --needs-fix-rounds is not refused; one Evidence field, one needs_fix_rounds: 1, sub-bullet preserved');
+}
+
+// Case 12 (named mutant): revert the refusal's OUTER predicate to the
+// pre-T-778 `if (commitHash) {` — the exact line implementing the widened
+// contract. Case 9's scenario must then fork a second Evidence field (count
+// 2, red); with the source restored it must stay at 1 (green). Toggled
+// in-process with an unconditional restore, like Case 7.
+{
+  const setStatusSrc = readUtf8(SET_STATUS_PATH);
+  const predicateMarker = 'if (runWritesEvidence) {';
+  assert.ok(setStatusSrc.includes(predicateMarker), 'Case 12 setup FAIL: expected to find the widened refusal predicate line in mavp-operator-set-status.js');
+  const mutatedSrc = setStatusSrc.replace(predicateMarker, 'if (commitHash) {');
+  assert.notStrictEqual(mutatedSrc, setStatusSrc, 'Case 12 setup FAIL: mutation should have changed the source');
+
+  writeUtf8(SET_STATUS_PATH, mutatedSrc);
+  try {
+    writeDefectFixture(REPO, 'T-967');
+    const env = { ...process.env, MAVERICKS_PROJECT_ROOT: REPO };
+    const { status } = runSetStatus(['T-967', 'ready_for_qa', '--needs-fix-rounds', '1'], REPO, env);
+    const countAfter = countTopLevelEvidenceBullets(readUtf8(path.join(REPO, 'TASK_STATUS.md')));
+    assert.strictEqual(
+      countAfter,
+      2,
+      `Case 12 (RED RUN, predicate reverted to commitHash-only) FAIL: expected the mutant to fork a second Evidence field (count 2), got ${countAfter} (status ${status})`
+    );
+    console.log(`Case 12 (red run) passed: with the predicate reverted to \`if (commitHash) {\`, --needs-fix-rounds forks a second Evidence field (count went to ${countAfter})`);
+  } finally {
+    writeUtf8(SET_STATUS_PATH, setStatusSrc);
+  }
+
+  writeDefectFixture(REPO, 'T-968');
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: REPO };
+  const { status: status2 } = runSetStatus(['T-968', 'ready_for_qa', '--needs-fix-rounds', '1'], REPO, env);
+  const count2 = countTopLevelEvidenceBullets(readUtf8(path.join(REPO, 'TASK_STATUS.md')));
+  assert.notStrictEqual(status2, 0, 'Case 12 (green run) FAIL: expected non-zero exit with the predicate restored');
+  assert.strictEqual(count2, 1, `Case 12 (green run) FAIL: expected the Evidence count to stay at 1 with the predicate restored, got ${count2}`);
+  console.log(`Case 12 (green run) passed: with the predicate restored, the same scenario is refused (count stayed at ${count2})`);
+}
+
 fs.rmSync(REPO, { recursive: true, force: true });
 
 console.log('\nAll T-745 assertions passed.');

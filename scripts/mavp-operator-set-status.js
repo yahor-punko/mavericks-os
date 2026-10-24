@@ -53,6 +53,11 @@
  *                   omitted, behavior is byte-identical to before this flag
  *                   existed: needs_fix_rounds: 0 is still auto-stamped only on
  *                   a merged transition, only when the field is absent.
+ *
+ * Evidence persistence (T-779): --commit and --needs-fix-rounds persist on a
+ * task already at the target status (reported as "Evidence updated, status
+ * unchanged"); a task skipped by --from receives no evidence write; the
+ * implicit needs_fix_rounds: 0 auto-stamp still requires a real transition.
  */
 
 'use strict';
@@ -398,17 +403,22 @@ function main() {
   let backlog = readUtf8(BACKLOG_MD);
   let taskStatus = readUtf8(TASK_STATUS_MD);
 
-  // Writer refusal (T-745): when --commit is provided, refuse the ENTIRE run
-  // — write nothing — if any target task's TASK_STATUS.md block carries a
-  // top-level, non-indented annotated Evidence key (e.g.
-  // "- **Evidence (2026-09-20, QA):**") with NO canonical "- **Evidence:**"
-  // field anywhere in the block. Without this refusal, updateTaskEvidence()
-  // below would silently INSERT a brand-new canonical Evidence field next to
-  // the annotated one (setBlockField()'s insert-if-missing behavior), fork-
-  // ing a second field the task now carries forever. This check runs against
-  // the file as read (before any mutation in this run), so a batch that
-  // fails here has made zero writes.
-  if (commitHash) {
+  // Writer refusal (T-745, widened by T-778): refuse the ENTIRE run — write
+  // nothing — whenever this run would write Evidence AND any target task's
+  // TASK_STATUS.md block carries a top-level, non-indented annotated Evidence
+  // key (e.g. "- **Evidence (2026-09-20, QA):**") with NO canonical
+  // "- **Evidence:**" field anywhere in the block. Without this refusal, the
+  // Evidence writers below would silently INSERT a brand-new canonical
+  // Evidence field next to the annotated one (setBlockField()'s insert-if-
+  // missing behavior), forking a second field the task now carries forever.
+  // Every Evidence-writing path of this command is covered: --commit
+  // (updateTaskEvidence), --needs-fix-rounds (applyNeedsFixRounds), and a
+  // target status of `merged` with neither flag (appendNeedsFixRoundsIfMissing
+  // auto-stamp). This check runs against the file as read (before any
+  // mutation in this run), so a batch that fails here has made zero writes.
+  const runWritesEvidence =
+    Boolean(commitHash) || needsFixRounds !== null || newStatus === 'merged';
+  if (runWritesEvidence) {
     for (const taskId of normalisedIds) {
       const loc = locateTaskBlock(taskStatus, taskId);
       if (loc.count !== 1) continue;
@@ -418,7 +428,7 @@ function main() {
           `${RED}Error: ${taskId} has a top-level \`- **${variant.key}:**\` field but no canonical - **Evidence:** field — refusing to write.${RESET}`
         );
         console.error(
-          `${DIM}Create a - **Evidence:** field first (none exists on this task), then demote \`- **${variant.key}:**\` to an indented sub-bullet under it, before re-running --set-status --commit.${RESET}`
+          `${DIM}Create a - **Evidence:** field first (none exists on this task), then demote \`- **${variant.key}:**\` to an indented sub-bullet under it, before re-running --set-status (this run would write Evidence: --commit, --needs-fix-rounds, or a merged target).${RESET}`
         );
         process.exitCode = 1;
         return;
@@ -426,7 +436,10 @@ function main() {
     }
   }
 
+  const backlogAsRead = backlog;
+  const taskStatusAsRead = taskStatus;
   const updated = [];
+  const evidenceOnly = [];
   const skipped = [];
   const stampedZeroIds = [];
 
@@ -468,6 +481,10 @@ function main() {
 
     let backlogChanged = false;
     let taskStatusChanged = false;
+    // Snapshot of TASK_STATUS.md before THIS task's mutations: lets the
+    // classification below tell "Evidence changed, Status unchanged" apart
+    // from "nothing changed" (T-779).
+    const taskStatusBeforeTask = taskStatus;
 
     if (inBacklog) {
       const result = updateTaskStatusField(backlog, taskId, newStatus);
@@ -483,27 +500,38 @@ function main() {
         taskStatus = result;
         taskStatusChanged = true;
       }
+    }
+
+    // True only when this run genuinely moved the task's Status (T-779). The
+    // implicit needs_fix_rounds: 0 auto-stamp below is bound to this — a task
+    // already at the target status never receives it.
+    const statusChanged = backlogChanged || taskStatusChanged;
+
+    if (inTaskStatus) {
       // Write evidence atomically alongside status when --commit is provided.
       // Merges into existing evidence text (e.g. prior QA notes) rather than
-      // clobbering it — see mergeCommitEvidence().
+      // clobbering it — see mergeCommitEvidence(). Persists on a task already
+      // at the target status too (T-779): an explicit evidence flag is its own
+      // write, independent of a Status change. (A --from-skipped task never
+      // reaches this point — the guard above `continue`s first.)
       if (commitHash && inTaskStatus) {
         const currentEvidence = readCurrentEvidence(taskStatus, taskId);
         const mergedEvidence = mergeCommitEvidence(currentEvidence, commitHash, branchName);
         taskStatus = updateTaskEvidence(taskStatus, taskId, mergedEvidence);
       }
       // --needs-fix-rounds (T-774): when supplied, write the EXPLICIT value
-      // into every updated task's Evidence field, on ANY target status — this
+      // into every targeted task's Evidence field, on ANY target status — this
       // takes priority over (and entirely replaces) the merged-only
       // auto-stamp-0 fallback below, so a single task never receives both.
       // When omitted, behavior is byte-identical to before this flag existed:
-      // needs_fix_rounds: 0 is auto-inserted only on a merged transition,
-      // only when the field is absent.
+      // needs_fix_rounds: 0 is auto-inserted only on a merged transition
+      // (statusChanged, T-779), only when the field is absent.
       if (needsFixRounds !== null && inTaskStatus) {
         const result = applyNeedsFixRounds(taskStatus, taskId, needsFixRounds);
         if (result.changed) {
           taskStatus = result.updated;
         }
-      } else if (newStatus === 'merged' && inTaskStatus) {
+      } else if (newStatus === 'merged' && inTaskStatus && statusChanged) {
         const before = taskStatus;
         taskStatus = appendNeedsFixRoundsIfMissing(taskStatus, taskId);
         if (taskStatus !== before) {
@@ -512,10 +540,15 @@ function main() {
       }
     }
 
-    if (backlogChanged || taskStatusChanged) {
+    if (statusChanged) {
       updated.push(taskId);
+    } else if (taskStatus !== taskStatusBeforeTask) {
+      // Status already at target, but an explicit evidence flag changed the
+      // Evidence text (T-779).
+      evidenceOnly.push(taskId);
     } else {
       // Task exists but Status field was already set to newStatus (or unmatched)
+      // and no evidence text changed.
       console.log(
         `${YELLOW}${taskId} — found but Status field not changed (may already be "${newStatus}")${RESET}`
       );
@@ -523,8 +556,9 @@ function main() {
     }
   }
 
-  // Write files (only if something changed)
-  if (updated.length > 0) {
+  // Write files when either artifact differs from its as-read content (T-779 —
+  // replaces the `updated.length > 0` guard, which hid evidence-only writes).
+  if (backlog !== backlogAsRead || taskStatus !== taskStatusAsRead) {
     writeUtf8(BACKLOG_MD, backlog);
     writeUtf8(TASK_STATUS_MD, taskStatus);
   }
@@ -535,6 +569,13 @@ function main() {
     console.log(
       `${GREEN}Updated (${updated.length}): ${updated.join(', ')} → ${CYAN}${newStatus}${RESET}`
     );
+  }
+  if (evidenceOnly.length > 0) {
+    console.log(
+      `${GREEN}Evidence updated, status unchanged (${evidenceOnly.length}): ${evidenceOnly.join(', ')}${RESET}`
+    );
+  }
+  if (updated.length > 0 || evidenceOnly.length > 0) {
     if (commitHash) {
       console.log(
         `${GREEN}Evidence written: commit: ${commitHash} branch: ${branchName}${RESET}`

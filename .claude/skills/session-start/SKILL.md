@@ -37,7 +37,8 @@ Read the JSON above. Key fields:
 - `permission_mode_verified` — `true` only when `permission_mode_source` is `hook_payload`; `false` otherwise, even when `persisted_runtime` originally came from a real payload — a mode resolved once at session start can be stale even when every settings file agrees, so "verified" always means "observed this session", never "read from more files"
 - `permission_mode_conflict` — present only when a readable user-global `~/.claude/settings.json` `defaultMode` differs from the project-file resolution; shape `{project, user_global}`, a fact report only — never render one as a "winner"
 - `UPDATE_AVAILABLE` — framework-version notice, a self-describing sentence (may be absent when versions match)
-- `must_read` — files changed since the previous close-session commit, plus context_docs declared by in-flight tasks (may be absent when empty)
+- `must_read` — files changed since the previous close-session commit, plus context_docs declared by in-flight tasks (may be absent when empty). Ledgers (BACKLOG.md, TASK_STATUS.md, PROCESS_STATE.*, EXECUTION_LOG.md) never appear here — look tasks up by T-NNN with grep
+- `must_read_oversized` — `[{path, chars}]`: files that would be in `must_read` but exceed the size budget; search them, do not read them whole (present only when non-empty)
 
 Always render the wave digest header:
 
@@ -122,7 +123,17 @@ Must read:
 - ...
 ```
 
-This is the set of files changed since the previous close-session commit plus context_docs declared by any in-flight task — read them before making changes this session. Omit this block entirely when `must_read` is absent.
+This is the set of files changed since the previous close-session commit plus context_docs declared by any in-flight task: read each listed file before editing it this session; ledgers never appear here — look tasks up by T-NNN with grep. Omit this block entirely when `must_read` is absent.
+
+If `must_read_oversized` is present and non-empty, render it as a separate list directly after the "Must read" list (never merged into it):
+
+```
+Oversized (search, do not read whole):
+- {path} ({chars} chars)
+- ...
+```
+
+These files exceeded the size budget (`artifact_budgets.must_read_max_chars`, default 40000): grep or search them for what you need instead of reading them whole. Omit this block entirely when `must_read_oversized` is absent.
 
 **First-run goal prompt:** if the onboarding block at the top of this skill contained text (this is the project's first session) and `next_action` is null, skip both branches below and end the brief by asking the operator what they are building, instead of showing "Next action: null":
 

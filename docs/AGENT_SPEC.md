@@ -304,3 +304,5 @@ Module declarations live in `docs/MODULES.md`. Each module entry provides:
 - `qa_checklist` — QA checks specific to this module type
 
 The `--agent` JSON includes `context_docs` for each in-flight task that declares a module.
+
+**Brief rule.** A brief names only the `context_docs` beyond what the context-bundle injection already carries into it (see `docs/core/ORCHESTRATION_RULES.md` — "Context cost of a spawn"); it does not re-list the module's full set. The architect reads those `context_docs` first, before the codebase.

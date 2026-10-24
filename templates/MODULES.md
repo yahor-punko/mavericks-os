@@ -30,6 +30,11 @@ See `docs/MODULES.md` in the mavericks framework for the full field reference.
   - Add QA steps specific to this module
   - Verify expected behavior in staging before promoting
 
+Optional: a `- **doc_limits:**` line sets a per-document character limit for a named
+`context_docs` entry, written as `<path> max_chars: <N> (T-NNN)` (comma-separated for
+several). The task ID names the owner of the exception. Limits may only decrease over
+time; see `docs/MODULES.md` in the mavericks framework for the ratchet rules.
+
 ---
 
 ## module-b

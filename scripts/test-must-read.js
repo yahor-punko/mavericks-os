@@ -56,6 +56,9 @@ const {
   computeMustRead,
   findPreviousCloseSessionCommit,
   getFilesChangedSincePreviousCloseSession,
+  MUST_READ_DEFAULT_MAX_CHARS,
+  MUST_READ_EXCLUDED_PATHS,
+  splitMustReadOversized,
 } = require('./mavp-operator-lib.js');
 
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 't391-must-read-'));
@@ -454,6 +457,85 @@ function makeWorkingTreeFixture(name, { withGitignore = false } = {}) {
     `Test 13 FAIL: expected call 1's result "src/survivesCall3.js" to survive call 3's injected failure, got: ${JSON.stringify(changed)}`
   );
   console.log('Test 13 passed: call 1\'s result survives when call 3 (untracked-file discovery) throws — the three git calls are independently guarded');
+}
+
+// ---------------------------------------------------------------------------
+// T-781: ledger exclusion + oversized split.
+// ---------------------------------------------------------------------------
+
+// Test 14: a TASK_STATUS.md change after the marker never appears in
+// computeMustRead(); the exclusion is exact root-relative paths, so a nested
+// file sharing a ledger basename is NOT excluded; the constant is exactly the
+// five ledger/state paths.
+{
+  const { root } = makeGitFixture('ledger-exclusion-fixture', { changedFile: 'src/keep.js' });
+  fs.writeFileSync(path.join(root, 'TASK_STATUS.md'), '# Task Status\n', 'utf8');
+  fs.mkdirSync(path.join(root, 'sub'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'sub', 'BACKLOG.md'), 'nested\n', 'utf8');
+  git(root, 'add -A');
+  git(root, 'commit -q -m "T-781: touch a ledger"');
+  const mustRead = computeMustRead(root, [{ id: 'T-900', context_docs: ['BACKLOG.md', 'docs/x.md'] }]);
+  assert.ok(!mustRead.includes('TASK_STATUS.md'), `Test 14 FAIL: TASK_STATUS.md must be excluded, got: ${JSON.stringify(mustRead)}`);
+  assert.ok(!mustRead.includes('BACKLOG.md'), `Test 14 FAIL: BACKLOG.md from context_docs must be excluded, got: ${JSON.stringify(mustRead)}`);
+  assert.ok(mustRead.includes('src/keep.js'), 'Test 14 FAIL: non-ledger changed file must remain');
+  assert.ok(mustRead.includes('docs/x.md'), 'Test 14 FAIL: non-ledger context_doc must remain');
+  assert.ok(mustRead.includes('sub/BACKLOG.md'), 'Test 14 FAIL: exclusion must be exact root-relative path, not basename');
+  assert.deepStrictEqual(
+    MUST_READ_EXCLUDED_PATHS.slice().sort(),
+    ['BACKLOG.md', 'EXECUTION_LOG.md', 'PROCESS_STATE.json', 'PROCESS_STATE.md', 'TASK_STATUS.md'],
+    'Test 14 FAIL: MUST_READ_EXCLUDED_PATHS must be exactly the five ledger/state paths'
+  );
+  console.log('Test 14 passed: ledgers are excluded from computeMustRead by exact root-relative path');
+}
+
+// Test 15: a 50,000-char changed file is under the default budget split out of
+// must_read into must_read_oversized with chars equal to its DECODED length
+// (multibyte content: 100,000 bytes, 50,000 chars); an override
+// must_read_max_chars: 100000 returns it to must_read; must_read_oversized is
+// omitted when empty.
+{
+  const bigName = 'src/big.txt';
+  const { root } = makeGitFixture('oversized-fixture', { changedFile: bigName });
+  const content = 'é'.repeat(50000);
+  fs.writeFileSync(path.join(root, bigName), content, 'utf8');
+  fs.mkdirSync(path.join(root, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'docs', 'MODULES.md'), MODULES_FIXTURE, 'utf8');
+  addMinimalState(root);
+
+  const output = runAgent(root);
+  assert.ok(!(output.must_read || []).includes(bigName), `Test 15 FAIL: oversized file must be absent from must_read, got: ${JSON.stringify(output.must_read)}`);
+  assert.deepStrictEqual(
+    output.must_read_oversized,
+    [{ path: bigName, chars: 50000 }],
+    `Test 15 FAIL: expected must_read_oversized [{${bigName}, 50000}], got: ${JSON.stringify(output.must_read_oversized)}`
+  );
+  assert.ok(output.must_read.includes('docs/AGENT_SPEC.md'), 'Test 15 FAIL: path absent on disk must pass through to must_read unchanged');
+
+  fs.writeFileSync(
+    path.join(root, 'PROCESS_STATE.json'),
+    JSON.stringify({ initiative: 'fixture-init', stage: 'execution', wave: 1, active_slices: ['T-900'], artifact_budgets: { must_read_max_chars: 100000 } }, null, 2) + '\n',
+    'utf8'
+  );
+  const overridden = runAgent(root);
+  assert.ok(overridden.must_read.includes(bigName), `Test 15 FAIL: override 100000 must return the file to must_read, got: ${JSON.stringify(overridden.must_read)}`);
+  assert.ok(!('must_read_oversized' in overridden), `Test 15 FAIL: must_read_oversized must be omitted when empty, got: ${JSON.stringify(overridden.must_read_oversized)}`);
+  console.log('Test 15 passed: oversized file splits into must_read_oversized (decoded chars), override restores it, field omitted when empty');
+}
+
+// Test 16: splitMustReadOversized() unit contract — boundary (== budget stays),
+// missing path passes through, order preserved, invalid budget -> default.
+{
+  const root = path.join(TMP_DIR, 'split-unit-fixture');
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, 'a.txt'), 'x'.repeat(10), 'utf8');
+  fs.writeFileSync(path.join(root, 'b.txt'), 'x'.repeat(11), 'utf8');
+  const { mustRead, oversized } = splitMustReadOversized(root, ['a.txt', 'gone.txt', 'b.txt'], 10);
+  assert.deepStrictEqual(mustRead, ['a.txt', 'gone.txt'], `Test 16 FAIL: got ${JSON.stringify(mustRead)}`);
+  assert.deepStrictEqual(oversized, [{ path: 'b.txt', chars: 11 }], `Test 16 FAIL: got ${JSON.stringify(oversized)}`);
+  const dflt = splitMustReadOversized(root, ['b.txt'], 'bogus');
+  assert.deepStrictEqual(dflt.mustRead, ['b.txt'], 'Test 16 FAIL: invalid budget must fall back to the 40000 default');
+  assert.strictEqual(MUST_READ_DEFAULT_MAX_CHARS, 40000, 'Test 16 FAIL: default budget must be 40000');
+  console.log('Test 16 passed: splitMustReadOversized() boundary, pass-through, order and default-budget contract');
 }
 
 // ---------------------------------------------------------------------------

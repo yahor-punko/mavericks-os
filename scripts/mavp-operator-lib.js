@@ -4129,23 +4129,38 @@ function resolveModuleRegistryPath(root) {
 }
 
 /**
- * Parse the module registry from docs/MODULES.md, parameterized by root.
- * Mirrors parseModuleRegistry() in mavp-operator-agent.js (same field set:
- * label, repos, context_docs, default_owner, qa_checklist). Returns {}
- * (never throws) when the file is absent — module enrichment degrades
- * gracefully.
+ * Parse the optional `doc_limits` module field (T-791): a comma-separated list
+ * of `<path> max_chars: <N> (T-NNN)` entries, kept on its own field line so the
+ * comma-split of `context_docs` is untouched. Entries that do not match the
+ * grammar are skipped (never thrown on).
  *
- * @param {string} [root] - Optional root override (used by tests). Defaults to ROOT.
- * @returns {Object<string, {label:string, repos:string[], context_docs:string[],
- *   default_owner:string, qa_checklist:string[]}>}
+ * @param {string} raw - The text after `- **doc_limits:**`.
+ * @returns {Object<string, {max_chars:number, task:string}>}
  */
-function parseModuleRegistry(root) {
+function parseDocLimits(raw) {
+  const limits = {};
+  for (const part of String(raw || '').split(',')) {
+    const m = part.trim().match(/^`?([^\s`]+)`?\s+max_chars:\s*(\d+)\s*\((T-\d+)\)$/);
+    if (m) limits[m[1]] = { max_chars: Number(m[2]), task: m[3] };
+  }
+  return limits;
+}
+
+/**
+ * Parse module-registry markdown text (T-791). The text-level helper holding
+ * the parsing body, so a caller that already holds the content (for example
+ * the docs/MODULES.md text of an earlier revision) can parse it without a
+ * filesystem root. Returns {} (never throws) on malformed input.
+ *
+ * @param {string} content - Raw docs/MODULES.md text.
+ * @returns {Object<string, {label:string, repos:string[], context_docs:string[],
+ *   default_owner:string, qa_checklist:string[],
+ *   doc_limits:Object<string,{max_chars:number, task:string}>}>}
+ */
+function parseModuleRegistryFromText(content) {
   try {
-    const modulesPath = resolveModuleRegistryPath(root);
-    if (!modulesPath) return {};
-    const content = fs.readFileSync(modulesPath, 'utf8');
     const registry = {};
-    const sections = content.split(/^(?=##\s+\S)/m).filter(Boolean);
+    const sections = String(content).split(/^(?=##\s+\S)/m).filter(Boolean);
     const META_HEADINGS = MODULE_META_HEADINGS;
     for (const section of sections) {
       const headingMatch = section.match(/^##\s+(\S+)/);
@@ -4157,6 +4172,7 @@ function parseModuleRegistry(root) {
       const reposMatch = section.match(/^- \*\*repos:\*\*\s+(.+)$/m);
       const contextDocsMatch = section.match(/^- \*\*context_docs:\*\*\s+(.+)$/m);
       const ownerMatch = section.match(/^- \*\*default_owner:\*\*\s+(.+)$/m);
+      const docLimitsMatch = section.match(/^- \*\*doc_limits:\*\*\s+(.+)$/m);
 
       const contextDocs = contextDocsMatch
         ? contextDocsMatch[1].split(',').map((s) => s.trim()).filter(Boolean)
@@ -4184,9 +4200,32 @@ function parseModuleRegistry(root) {
         context_docs: contextDocs,
         default_owner: ownerMatch ? ownerMatch[1].trim() : 'developer',
         qa_checklist: qaLines,
+        doc_limits: docLimitsMatch ? parseDocLimits(docLimitsMatch[1]) : {},
       };
     }
     return registry;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Parse the module registry from docs/MODULES.md, parameterized by root.
+ * The single module-registry parser (T-791 removed the duplicate in
+ * mavp-operator-agent.js): reads docs/MODULES.md and delegates to
+ * parseModuleRegistryFromText(). Returns {} (never throws) when the file is
+ * absent — module enrichment degrades gracefully.
+ *
+ * @param {string} [root] - Optional root override (used by tests). Defaults to ROOT.
+ * @returns {Object<string, {label:string, repos:string[], context_docs:string[],
+ *   default_owner:string, qa_checklist:string[],
+ *   doc_limits:Object<string,{max_chars:number, task:string}>}>}
+ */
+function parseModuleRegistry(root) {
+  try {
+    const modulesPath = resolveModuleRegistryPath(root);
+    if (!modulesPath) return {};
+    return parseModuleRegistryFromText(fs.readFileSync(modulesPath, 'utf8'));
   } catch {
     return {};
   }
@@ -4750,7 +4789,56 @@ function computeMustRead(root, activeSlices) {
   for (const slice of activeSlices || []) {
     if (Array.isArray(slice.context_docs)) contextDocs.push(...slice.context_docs);
   }
-  return Array.from(new Set([...changedFiles, ...contextDocs]));
+  return Array.from(new Set([...changedFiles, ...contextDocs]))
+    .filter((p) => !MUST_READ_EXCLUDED_PATHS.includes(p));
+}
+
+/**
+ * T-781 — repo-root-relative paths that never appear in `must_read`, by
+ * construction. These are the append-only ledgers and live-state files: they
+ * are far too large to read whole and are looked up by task id instead.
+ * Matched as exact root-relative paths (not basenames), so a nested file that
+ * merely shares a name is unaffected.
+ */
+const MUST_READ_EXCLUDED_PATHS = Object.freeze([
+  'BACKLOG.md',
+  'TASK_STATUS.md',
+  'PROCESS_STATE.json',
+  'PROCESS_STATE.md',
+  'EXECUTION_LOG.md',
+]);
+
+/** T-781 — default `artifact_budgets.must_read_max_chars`. */
+const MUST_READ_DEFAULT_MAX_CHARS = 40000;
+
+/**
+ * T-781 — split a must-read path list into files to read whole and oversized
+ * files whose UTF-8-decoded string length exceeds `maxChars`. Paths that
+ * cannot be read (absent on disk, directories, errors) pass through to
+ * `mustRead` unchanged; relative order of `mustRead` is preserved. Never throws.
+ *
+ * @param {string} root - Absolute path to the project root.
+ * @param {string[]} paths - Root-relative paths (output of computeMustRead).
+ * @param {number} [maxChars] - Budget; non-positive/non-finite falls back to the default.
+ * @returns {{mustRead: string[], oversized: Array<{path: string, chars: number}>}}
+ */
+function splitMustReadOversized(root, paths, maxChars) {
+  const budget = (typeof maxChars === 'number' && Number.isFinite(maxChars) && maxChars > 0)
+    ? maxChars
+    : MUST_READ_DEFAULT_MAX_CHARS;
+  const mustRead = [];
+  const oversized = [];
+  for (const p of paths || []) {
+    let chars = null;
+    try {
+      chars = fs.readFileSync(path.join(root, p), 'utf8').length;
+    } catch (_err) {
+      chars = null; // absent/unreadable — pass through unchanged
+    }
+    if (chars !== null && chars > budget) oversized.push({ path: p, chars });
+    else mustRead.push(p);
+  }
+  return { mustRead, oversized };
 }
 
 /**
@@ -4954,6 +5042,31 @@ function getCommitHashesReachable(root, revspec) {
  */
 function getCommitHashesReachableFromHead(root) {
   return getCommitHashesReachable(root, 'HEAD');
+}
+
+/**
+ * Read a repo-relative file as recorded at a git revision (T-791), for
+ * example docs/MODULES.md at HEAD. Uses an argument-array call (no shell), and
+ * degrades silently: returns null, never throws, when `root` is not a git
+ * repository, git is unavailable, the revision does not resolve, or the file
+ * does not exist at that revision.
+ *
+ * @param {string} root - Absolute path to the git working tree.
+ * @param {string} rev - A git revision (e.g. 'HEAD').
+ * @param {string} relPath - Repo-relative, forward-slash path.
+ * @returns {string|null} File text at that revision, or null when unavailable.
+ */
+function readFileAtRevision(root, rev, relPath) {
+  try {
+    return cp.execFileSync('git', ['show', `${rev}:${relPath}`], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -5398,6 +5511,180 @@ function formatWorktreePruneSuggestion(entries) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// T-782: always-loaded context collector (CLAUDE.md + recursive @ imports +
+// unscoped .claude/rules files), measured in characters.
+//
+// Import grammar follows the harness memory doc ("Import additional files"):
+// an @path token resolves relative to the IMPORTING file's directory, ~/ is
+// expanded, code spans and fenced blocks are skipped, the path ends at the
+// first unescaped space, quoted paths are ignored, and recursion is capped at
+// four hops. Two documented, deliberate narrowings: (1) an @ only starts an
+// import at the beginning of a line or after whitespace / an opening bracket,
+// so email-like tokens (word@host) never count; (2) trailing sentence
+// punctuation is trimmed from the path. Tokens that still look like imports
+// but name no file (e.g. a scoped package name in prose) are recorded as
+// missing with chars 0 — they never inflate the total.
+// ---------------------------------------------------------------------------
+
+const ALWAYS_LOADED_MAX_HOPS = 4;
+
+/** Blank out fenced blocks and inline code spans so @ inside them is ignored. */
+function stripCodeForImportScan(text) {
+  const kept = [];
+  let fence = null;
+  for (const line of String(text).split(/\r?\n/)) {
+    const m = line.match(/^\s*(```+|~~~+)/);
+    if (fence) {
+      if (m && m[1][0] === fence[0] && m[1].length >= fence.length) fence = null;
+      continue;
+    }
+    if (m) {
+      fence = m[1];
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join('\n').replace(/(`+)[\s\S]*?\1/g, ' ');
+}
+
+/** Extract raw @path tokens (unescaped, trailing punctuation trimmed). */
+function extractImportTokens(text) {
+  const scan = stripCodeForImportScan(text);
+  const tokens = [];
+  const re = /(^|[\s(\[])@((?:\\ |[^\s])+)/gm;
+  let m;
+  while ((m = re.exec(scan)) !== null) {
+    let raw = m[2];
+    if (/^["'“‘]/.test(raw)) continue; // quoted paths are ignored
+    raw = raw.replace(/[.,;:!?)\]]+$/, '').replace(/\\ /g, ' ');
+    if (raw) tokens.push(raw);
+  }
+  return tokens;
+}
+
+/** True when a rule file's frontmatter carries a parseable paths: key. */
+function ruleHasPathsFrontmatter(text) {
+  const fm = String(text).match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm) return false;
+  const lines = fm[1].split(/\r?\n/);
+  const idx = lines.findIndex((l) => /^paths:/.test(l));
+  if (idx === -1) return false;
+  if (lines[idx].replace(/^paths:/, '').trim()) return true;
+  for (let i = idx + 1; i < lines.length; i += 1) {
+    if (/^\s+-\s+\S/.test(lines[i])) return true;
+    if (/^\S/.test(lines[i])) break;
+  }
+  return false;
+}
+
+function defaultReadFile(absPath) {
+  try {
+    return fs.readFileSync(absPath, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function defaultListMarkdown(absDir) {
+  const out = [];
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile() && /\.md$/i.test(e.name)) out.push(p);
+    }
+  };
+  walk(absDir);
+  return out;
+}
+
+/**
+ * Measure the always-loaded context of a project root in characters.
+ *
+ * @param {string} root
+ * @param {{readFile?: (absPath:string)=>(string|null), listMarkdown?: (absDir:string)=>string[], maxHops?: number}} [opts]
+ *   readFile returns the file text or null/undefined when absent (injectable so
+ *   a later task can read from a git tree); listMarkdown enumerates .md files
+ *   under a directory (defaults to a recursive fs walk).
+ * @returns {{files: Array<{path:string, chars:number, kind:string, missing?:true}>,
+ *   path_scoped_rules: Array<{path:string, chars:number}>, external: string[], total_chars: number}}
+ */
+function collectAlwaysLoadedContext(root, opts = {}) {
+  const readFile = opts.readFile || defaultReadFile;
+  const listMarkdown = opts.listMarkdown || defaultListMarkdown;
+  const maxHops = opts.maxHops === undefined ? ALWAYS_LOADED_MAX_HOPS : opts.maxHops;
+  const absRoot = path.resolve(root);
+  const rel = (abs) => path.relative(absRoot, abs).split(path.sep).join('/');
+  const isInside = (abs) => abs === absRoot || abs.startsWith(absRoot + path.sep);
+
+  const files = [];
+  const pathScoped = [];
+  const external = [];
+  const seen = new Set();
+
+  const claudeAbs = path.join(absRoot, 'CLAUDE.md');
+  const claudeText = readFile(claudeAbs);
+  if (typeof claudeText === 'string') {
+    seen.add(claudeAbs);
+    files.push({ path: 'CLAUDE.md', chars: claudeText.length, kind: 'claude_md' });
+    // Breadth-first so a file reachable by several routes is judged at its
+    // shallowest hop depth.
+    let frontier = [{ abs: claudeAbs, text: claudeText }];
+    for (let hop = 1; hop <= maxHops && frontier.length > 0; hop += 1) {
+      const next = [];
+      for (const { abs, text } of frontier) {
+        for (const token of extractImportTokens(text)) {
+          let target;
+          if (token === '~' || token.startsWith('~/')) target = path.join(os.homedir(), token.slice(1));
+          else if (path.isAbsolute(token)) target = path.normalize(token);
+          else target = path.resolve(path.dirname(abs), token);
+          if (!isInside(target)) {
+            if (!external.includes(target)) external.push(target);
+            continue;
+          }
+          if (seen.has(target)) continue;
+          seen.add(target);
+          const body = readFile(target);
+          if (typeof body !== 'string') {
+            files.push({ path: rel(target), chars: 0, kind: 'import', missing: true });
+            continue;
+          }
+          files.push({ path: rel(target), chars: body.length, kind: 'import' });
+          next.push({ abs: target, text: body });
+        }
+      }
+      frontier = next;
+    }
+  }
+
+  for (const ruleAbs of listMarkdown(path.join(absRoot, '.claude', 'rules'))) {
+    if (seen.has(ruleAbs)) continue;
+    const body = readFile(ruleAbs);
+    if (typeof body !== 'string') continue;
+    seen.add(ruleAbs);
+    if (ruleHasPathsFrontmatter(body)) {
+      pathScoped.push({ path: rel(ruleAbs), chars: body.length });
+    } else {
+      files.push({ path: rel(ruleAbs), chars: body.length, kind: 'rule' });
+    }
+  }
+
+  return {
+    files,
+    path_scoped_rules: pathScoped,
+    external,
+    total_chars: files.reduce((sum, f) => sum + f.chars, 0),
+  };
+}
+
 module.exports = {
   ROOT,
   ackRecheck,
@@ -5418,9 +5705,13 @@ module.exports = {
   ACTION_TARGET_FOLLOWER_NOUNS,
   classifyWorktrees,
   clip,
+  collectAlwaysLoadedContext,
   collectOperatorData,
   computeDueRechecks,
   computeMustRead,
+  MUST_READ_EXCLUDED_PATHS,
+  MUST_READ_DEFAULT_MAX_CHARS,
+  splitMustReadOversized,
   DEFERRED_TASK_STATUS_HEADING,
   detectPermissionModeConflict,
   guardMutatingRoot,
@@ -5441,6 +5732,7 @@ module.exports = {
   generateProcessStateMd,
   getCommitHashesReachable,
   getCommitHashesReachableFromHead,
+  readFileAtRevision,
   getDeployPendingForRepo,
   getFilesChangedSincePreviousCloseSession,
   getNextTaskId,
@@ -5478,6 +5770,7 @@ module.exports = {
   parseIntervalDays,
   parseMidWaveArchivedTasks,
   parseModuleRegistry,
+  parseModuleRegistryFromText,
   parseOptimizerResponse,
   parseRepoMap,
   parseTaskHolds,

@@ -121,6 +121,16 @@ This duty is not retry-only (T-557): whenever the Main Agent already holds the r
 
 Pair this with the optional `Turn budget:` field in the sub-agent brief template (`CLAUDE.md` — "Sub-agent brief template"): fill it from `docs/AGENT_SPEC.md`'s per-role `maxTurns` table so the sub-agent can self-count against a known ceiling instead of an invisible one.
 
+## Context cost of a spawn
+
+Documented by the harness, not measured here (docs read 2026-10-23):
+
+- A non-fork sub-agent's initial context contains every `CLAUDE.md` level the main conversation loads, including project rules (code.claude.com/docs/en/sub-agents, "What loads at startup").
+- Imported files load together with the importing file, recursively to a maximum of four hops (code.claude.com/docs/en/memory, "Import additional files"). Rules with `paths:` frontmatter load when a matching file is accessed; rules without it load at launch.
+- The main conversation's auto memory is documented as not loaded into sub-agents. One adopter observation (architect role, 2026-10-23) saw `MEMORY.md` in a sub-agent context. This is an **open discrepancy**, not a fact; do not rely on either reading.
+
+Brief-composition consequence: every spawn pays once for layer 0 (see `.claude/rules/docs.md` — "Layers and archive-not-delete"), so keep layer 0 small and route per-task docs through `Module:` and context-bundle injection into the brief, not through always-loaded files.
+
 ## Role-scope check (brief-composition duty — before adding any item to a brief)
 
 Every item written into a sub-agent brief must fall within the target role's mandate as stated in its own spec file (`.claude/agents/<role>.md`), not the Main Agent's own guess at what the role "should" be able to handle. This is a brief-composition duty like the two above — checked before the spawn, not diagnosed after a cap-hit.

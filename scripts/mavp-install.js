@@ -169,6 +169,47 @@ function readUtf8(p) {
   catch { return null; }
 }
 
+// Project-owned root artifacts seeded from templates/ — single module-scope
+// definition shared by the fresh-install path and the --update branch (T-785).
+// A target is only ever created when missing; an existing file is never read,
+// rewritten or touched.
+const ARTIFACT_TEMPLATES = [
+  { template: 'BACKLOG_TEMPLATE.md', target: 'BACKLOG.md' },
+  { template: 'TASK_STATUS_TEMPLATE.md', target: 'TASK_STATUS.md' },
+  { template: 'PROCESS_STATE_TEMPLATE.md', target: 'PROCESS_STATE.md' },
+  // MODULES.md goes in docs/ — project declares its own module types
+  { template: 'MODULES.md', target: path.join('docs', 'MODULES.md') },
+  // REPO_MAP.md goes in docs/ — project declares its own repo entries
+  { template: 'REPO_MAP_TEMPLATE.md', target: path.join('docs', 'REPO_MAP.md') },
+  // ARCHITECTURE.md goes in docs/ — project fills in its own architecture details
+  { template: 'ARCHITECTURE.md', target: path.join('docs', 'ARCHITECTURE.md') },
+];
+
+/**
+ * Seed every missing ARTIFACT_TEMPLATES target in targetDir from templates/.
+ * Existing targets are skipped without being read. A missing template source
+ * is skipped silently. Returns the list of target paths (relative to targetDir)
+ * that were created, in ARTIFACT_TEMPLATES order. Callers own the printing.
+ * The --update caller skips this entirely on self-install (the canon must
+ * never receive these templates).
+ */
+function seedMissingArtifacts(targetDir) {
+  const templatesDir = path.join(FRAMEWORK_DIR, '..', 'templates');
+  const created = [];
+  for (const { template, target } of ARTIFACT_TEMPLATES) {
+    const targetPath = path.join(targetDir, target);
+    if (fs.existsSync(targetPath)) continue;
+    const src = readUtf8(path.join(templatesDir, template));
+    if (!src) continue;
+    // Ensure parent directory exists (e.g. docs/)
+    const parentDir = path.dirname(targetPath);
+    if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
+    fs.writeFileSync(targetPath, src, 'utf8');
+    created.push(target);
+  }
+  return created;
+}
+
 /**
  * Write an executable file atomically: temp file → chmod → rename.
  *
@@ -309,6 +350,11 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "  --prune-worktrees  Remove clean-and-integrated worktrees past the mtime safety window;"
   echo "                   defaults to dry-run"
   echo "  --reflect-skill <role>   Run skill reflection loop for a role (SkillOpt)"
+  echo "  --check-archive  Nothing-lost check for layer-0/1 docs (removed lines must reappear in a"
+  echo "                   perimeter doc or a same-commit docs/archive/ file; an added perimeter line"
+  echo "                   keeping >=80% of a removed line's words counts as amended, not removed);"
+  echo "                   read-only"
+  echo "                   Usage: --check-archive (--range A..B | --staged)"
   echo "  --validate       Run the MavP validator (artifact sync check)"
   echo "  --check-sync     Compare agent/skill files in known projects against mavericks source"
   echo "  --install        Bootstrap Mavericks into a target project directory"
@@ -406,6 +452,9 @@ elif [[ "\${1-}" == "--worktree-report" ]]; then
 elif [[ "\${1-}" == "--prune-worktrees" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-prune-worktrees.js" "$@"
+elif [[ "\${1-}" == "--check-archive" ]]; then
+  shift
+  node "$MAVERICKS/mavp-doc-archive-check.js" --root "$PROJECT_ROOT" "$@"
 elif [[ "\${1-}" == "--validate" ]]; then
   shift
   node "$MAVERICKS/mavp-validator.js" "$PROJECT_ROOT" "$@"
@@ -1021,6 +1070,14 @@ const HOOK_NAMES = ['pre-commit', 'pre-push'];
  * | 'skipped' (skipped when that hook's source is not found in this
  * framework checkout — degrades per-hook, not all-or-nothing, so an older
  * framework source missing pre-push still installs pre-commit).
+ *
+ * Adopter-owned extension points (T-788): this function writes ONLY the files
+ * named in HOOK_NAMES. It never writes or deletes .claude/hooks/pre-commit.local
+ * (the adopter's optional project check, invoked by a stanza inside the shipped
+ * pre-commit hook) and never deletes any other file in .claude/hooks/. The same
+ * holds for install and --update as a whole for .claude/rules/project-*.md.
+ * --strip is the accepted exception: it removes .claude/ wholesale and lists
+ * these files in its manifest before any prompt.
  */
 function installHook(targetDir) {
   const hooksDir = path.join(targetDir, '.claude', 'hooks');
@@ -1422,6 +1479,12 @@ async function main() {
     if (selfInstall) {
       console.log(`  ${DIM}skipped${RESET}  .claude/{${CLAUDE_DIRS.join(',')}} ${DIM}(self-install — framework files are the source)${RESET}`);
     } else {
+      // Adopter-owned boundary (T-788): this loop only COPIES framework files
+      // over their counterparts and never deletes anything in the destination.
+      // So .claude/rules/project-*.md (adopter rules) survive --update, and
+      // install/--update never write or delete .claude/hooks/pre-commit.local
+      // either (hooks are handled by installHook() below, not this loop).
+      // --strip removes .claude/ wholesale — accepted boundary, shown in its manifest.
       for (const dir of CLAUDE_DIRS) {
         const srcDir = path.join(CLAUDE_SOURCE, dir);
         if (!fs.existsSync(srcDir)) continue;
@@ -1666,8 +1729,23 @@ async function main() {
       updatedCount++;
     }
 
+    // Seed project-owned artifacts that are missing (T-785) — if-missing only, never
+    // overwriting, and never on self-install (the canon has no docs/ARCHITECTURE.md
+    // and must not receive the template).
+    let seededCount = 0;
+    if (!selfInstall) {
+      for (const target of seedMissingArtifacts(targetDir)) {
+        console.log(`  ${GREEN}new${RESET}  ${target} ${DIM}(from template)${RESET}`);
+        seededCount++;
+      }
+    }
+
     console.log(`\n${GREEN}✓ Update complete.${RESET} ${updatedCount} file(s) synced from mavericks.`);
-    console.log(`${DIM}Artifacts (BACKLOG.md, TASK_STATUS.md, PROCESS_STATE.*) were not touched.${RESET}\n`);
+    if (seededCount > 0) {
+      console.log(`${DIM}seeded ${seededCount} missing project artifact(s) from templates${RESET}\n`);
+    } else {
+      console.log(`${DIM}Artifacts (BACKLOG.md, TASK_STATUS.md, PROCESS_STATE.*) were not touched.${RESET}\n`);
+    }
     return;
   }
 
@@ -1862,29 +1940,10 @@ async function main() {
 
   // Bootstrap project root artifacts from templates (only if missing)
   const TEMPLATES_DIR = path.join(FRAMEWORK_DIR, '..', 'templates');
-  const ARTIFACT_TEMPLATES = [
-    { template: 'BACKLOG_TEMPLATE.md', target: 'BACKLOG.md' },
-    { template: 'TASK_STATUS_TEMPLATE.md', target: 'TASK_STATUS.md' },
-    { template: 'PROCESS_STATE_TEMPLATE.md', target: 'PROCESS_STATE.md' },
-    // MODULES.md goes in docs/ — project declares its own module types
-    { template: 'MODULES.md', target: path.join('docs', 'MODULES.md') },
-    // REPO_MAP.md goes in docs/ — project declares its own repo entries
-    { template: 'REPO_MAP_TEMPLATE.md', target: path.join('docs', 'REPO_MAP.md') },
-    // ARCHITECTURE.md goes in docs/ — project fills in its own architecture details
-    { template: 'ARCHITECTURE.md', target: path.join('docs', 'ARCHITECTURE.md') },
-  ];
 
+  // ARTIFACT_TEMPLATES / seedMissingArtifacts are module-scope (T-785).
   let artifactsCreated = 0;
-  for (const { template, target } of ARTIFACT_TEMPLATES) {
-    const targetPath = path.join(targetDir, target);
-    if (fs.existsSync(targetPath)) continue;
-    const srcPath = path.join(TEMPLATES_DIR, template);
-    const src = readUtf8(srcPath);
-    if (!src) continue;
-    // Ensure parent directory exists (e.g. docs/)
-    const parentDir = path.dirname(targetPath);
-    if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
-    fs.writeFileSync(targetPath, src, 'utf8');
+  for (const target of seedMissingArtifacts(targetDir)) {
     console.log(`  ${GREEN}✓${RESET} ${target} ${DIM}(from template)${RESET}`);
     artifactsCreated++;
   }

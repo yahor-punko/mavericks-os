@@ -98,4 +98,25 @@ if [[ -f "scripts/mavp-private-names-guard.js" ]]; then
   fi
 fi
 
+# Adopter-owned project check (T-788). No-op when .claude/hooks/pre-commit.local
+# does not exist. The file is NOT a git hook name, so git never runs it on its
+# own — only this stanza invokes it, from the repo root (git runs hooks there).
+# Install and --update never write or delete it, so an adopter can keep a
+# project-specific commit-time check here without it being re-synced away.
+# Present but not executable: warn once and proceed (never block on a mode bit).
+# Executable and exits non-zero: the commit is blocked.
+if [[ -f ".claude/hooks/pre-commit.local" ]]; then
+  if [[ -x ".claude/hooks/pre-commit.local" ]]; then
+    LOCAL_EXIT=0
+    ./.claude/hooks/pre-commit.local || LOCAL_EXIT=$?
+    if [[ $LOCAL_EXIT -ne 0 ]]; then
+      echo ""
+      echo "COMMIT BLOCKED: project pre-commit.local failed (see message above)."
+      exit 1
+    fi
+  else
+    echo "WARNING: .claude/hooks/pre-commit.local exists but is not executable — skipped. Run: chmod +x .claude/hooks/pre-commit.local"
+  fi
+fi
+
 exit 0

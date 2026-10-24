@@ -89,6 +89,12 @@ if [[ "${1-}" == "--help" ]]; then
   echo "  --prune-worktrees  Remove ONLY clean-and-integrated worktrees past the mtime safety"
   echo "                   window; defaults to dry-run (prints what would be removed)"
   echo "                   Usage: --prune-worktrees [--yes] [--main-ref <ref>] [--mtime-threshold <ms>]"
+  echo "  --check-archive  Nothing-lost check: every non-empty line removed from a layer-0/1 doc must"
+  echo "                   reappear verbatim in a perimeter doc or a docs/archive/ file touched by the"
+  echo "                   same commit, or an added perimeter line keeping >=80% of a removed line's"
+  echo "                   words counts as amended, not removed; read-only; exit 0 pass, 1 missing"
+  echo "                   lines, 2 usage/git error"
+  echo "                   Usage: --check-archive (--range A..B | --staged)"
   echo "  --validate       Run the MavP validator (artifact sync check)"
   echo "  --check-sync     Compare agent/skill files in known projects against mavericks source"
   echo "  --install        Bootstrap Mavericks into a target project directory"
@@ -186,6 +192,9 @@ elif [[ "${1-}" == "--worktree-report" ]]; then
 elif [[ "${1-}" == "--prune-worktrees" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-prune-worktrees.js" "$@"
+elif [[ "${1-}" == "--check-archive" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-doc-archive-check.js" --root "$(pwd)" "$@"
 elif [[ "${1-}" == "--validate" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-validator.js" "$(pwd)" "$@"

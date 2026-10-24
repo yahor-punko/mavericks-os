@@ -41,7 +41,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { buildDeployQueue, classifyNextAction, computeDueRechecks, computeMustRead, detectPermissionModeConflict, generateProcessStateMd, getDeployPendingForRepo, IN_FLIGHT_STATUSES, parseBlockedBy, parseHold, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { buildDeployQueue, classifyNextAction, computeDueRechecks, computeMustRead, detectPermissionModeConflict, splitMustReadOversized, generateProcessStateMd, getDeployPendingForRepo, IN_FLIGHT_STATUSES, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
@@ -49,7 +49,6 @@ const PROCESS_STATE_MD = path.join(ROOT, 'PROCESS_STATE.md');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
 const VALIDATOR = path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-validator.js');
-const { resolveModulesPath } = require(VALIDATOR);
 const MAVERICKS_VERSION_FILE = path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-version.js');
 
 function readUtf8(filePath) {
@@ -207,69 +206,6 @@ function parseBacklogTaskMeta(backlogMarkdown) {
     };
   }
   return meta;
-}
-
-/**
- * Parse module registry from docs/MODULES.md.
- * Reads from MAVERICKS_PROJECT_ROOT/docs/MODULES.md when in project context,
- * falling back to <framework-root>/docs/MODULES.md (self-mode).
- * Returns empty map if file not found — module enrichment is skipped gracefully.
- */
-function parseModuleRegistry() {
-  try {
-    const modulesPath = resolveModulesPath();
-    if (!modulesPath) return {};
-    const content = fs.readFileSync(modulesPath, 'utf8');
-    const registry = {};
-    // Split on ## <id> headings (skip ## How to use and similar meta sections)
-    const sections = content.split(/^(?=##\s+\S)/m).filter(Boolean);
-    for (const section of sections) {
-      const headingMatch = section.match(/^##\s+(\S+)/);
-      if (!headingMatch) continue;
-      const id = headingMatch[1].trim();
-      // Skip non-module sections (meta headings used in the schema spec and template)
-      const META_HEADINGS = new Set(['How', 'Module', 'What', 'Required', 'Example']);
-      if (META_HEADINGS.has(id)) continue;
-
-      const labelMatch = section.match(/^- \*\*label:\*\*\s+(.+)$/m);
-      const reposMatch = section.match(/^- \*\*repos:\*\*\s+(.+)$/m);
-      const contextDocsMatch = section.match(/^- \*\*context_docs:\*\*\s+(.+)$/m);
-      const ownerMatch = section.match(/^- \*\*default_owner:\*\*\s+(.+)$/m);
-
-      const contextDocs = contextDocsMatch
-        ? contextDocsMatch[1].split(',').map(s => s.trim()).filter(Boolean)
-        : [];
-
-      const repos = reposMatch
-        ? reposMatch[1].split(',').map(s => s.trim()).filter(Boolean)
-        : [];
-
-      // Collect qa_checklist items
-      const qaLines = [];
-      let inQa = false;
-      for (const line of section.split(/\r?\n/)) {
-        if (/^- \*\*qa_checklist:\*\*/.test(line)) { inQa = true; continue; }
-        if (inQa) {
-          if (/^-\s+/.test(line)) {
-            qaLines.push(line.replace(/^-\s+/, '').trim());
-          } else if (/^##/.test(line) || (/^- \*\*/.test(line) && !line.startsWith('  '))) {
-            inQa = false;
-          }
-        }
-      }
-
-      registry[id] = {
-        label: labelMatch ? labelMatch[1].trim() : id,
-        repos,
-        context_docs: contextDocs,
-        default_owner: ownerMatch ? ownerMatch[1].trim() : 'developer',
-        qa_checklist: qaLines,
-      };
-    }
-    return registry;
-  } catch {
-    return {};
-  }
 }
 
 // Status priority: lower number = higher priority. Module-scope (not
@@ -626,7 +562,10 @@ function main() {
 
   // Load module registry and backlog metadata for enriching active_slices output.
   // Registry is read from project-level docs/MODULES.md (respects MAVERICKS_PROJECT_ROOT).
-  const moduleRegistry = parseModuleRegistry();
+  // T-791: the single lib parser; the root is passed explicitly (env var, else cwd)
+  // to keep the registry-path resolution the removed local copy had (the validator's
+  // resolveModulesPath()), which differs from lib's ROOT default in self-mode.
+  const moduleRegistry = parseModuleRegistry(process.env.MAVERICKS_PROJECT_ROOT || process.cwd());
   let backlogMeta = {};
   let plannedTasks = [];
   let backlogTaskStatuses = {};
@@ -782,7 +721,14 @@ function main() {
   // resolved onto activeSlices above. Degrades silently (empty array) when
   // git is unavailable or ROOT isn't a git repo; field is omitted entirely
   // below when the combined set is empty.
-  const mustRead = computeMustRead(ROOT, activeSlices);
+  // T-781: ledgers are excluded inside computeMustRead; files over
+  // artifact_budgets.must_read_max_chars move to the additive must_read_oversized.
+  const mustReadBudgets = (readProcessStateJson() || {}).artifact_budgets;
+  const { mustRead, oversized: mustReadOversized } = splitMustReadOversized(
+    ROOT,
+    computeMustRead(ROOT, activeSlices),
+    mustReadBudgets && typeof mustReadBudgets === 'object' ? mustReadBudgets.must_read_max_chars : undefined
+  );
 
   // T-663: split effective-vs-declared permission-mode reporting.
   //
@@ -846,6 +792,7 @@ function main() {
     ...(updateNotice ? { UPDATE_AVAILABLE: updateNotice } : {}),
     ...(dueRechecks.length > 0 ? { due_rechecks: dueRechecks } : {}),
     ...(mustRead.length > 0 ? { must_read: mustRead } : {}),
+    ...(mustReadOversized.length > 0 ? { must_read_oversized: mustReadOversized } : {}),
   };
 
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);

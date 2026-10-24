@@ -52,6 +52,10 @@ const {
   buildReachableHashIndex,
   isHashReachable,
   findAnnotatedFieldVariant,
+  collectAlwaysLoadedContext,
+  parseModuleRegistry,
+  parseModuleRegistryFromText,
+  readFileAtRevision,
 } = require('./mavp-operator-lib');
 
 /**
@@ -393,6 +397,8 @@ function getSeverityForCheck(checkName) {
     next_action_volatile_facts: 'failure',
     artifact_size_budget: 'info',
     state_in_claude_md: 'info',
+    context_size_budget: 'info',
+    doc_limit_ratchet: 'info',
     blocked_by_open: 'failure',
     blocked_by_unresolvable: 'info',
     commit_unreachable: 'warning',
@@ -2291,6 +2297,9 @@ const DEFAULT_ARTIFACT_BUDGETS = {
   handoff_md_max_lines: 300,
   backlog_active_wave_max_lines: 200,
   task_status_active_tasks_max_lines: 150,
+  // T-782: character budgets for the always-loaded context (context_size_budget).
+  always_loaded_max_chars: 160000,
+  imported_doc_max_chars: 40000,
 };
 
 /**
@@ -2458,6 +2467,167 @@ function checkArtifactSizeBudget({ backlogMarkdown, taskStatusMarkdown, backlogP
     }
   }
 
+  return findings;
+}
+
+/**
+ * context_size_budget (T-782, info severity, NEVER blocks).
+ * Measures the always-loaded context in characters via
+ * collectAlwaysLoadedContext() (CLAUDE.md + recursive @ imports + unscoped
+ * .claude/rules files) and emits:
+ *   - one finding when the total exceeds always_loaded_max_chars, naming the
+ *     top five contributors by chars;
+ *   - one finding per imported doc, unscoped rule, or module context_docs file
+ *     whose chars exceed imported_doc_max_chars (CLAUDE.md itself is bounded by
+ *     the total budget and claude_md_max_lines, not the per-document one).
+ * Both budgets honour `artifact_budgets` overrides in PROCESS_STATE.json.
+ */
+function checkContextSizeBudget({ root, processStatePath }) {
+  const budgets = resolveArtifactBudgets(processStatePath);
+  const findings = [];
+  const ctxResult = collectAlwaysLoadedContext(root);
+
+  if (ctxResult.total_chars > budgets.always_loaded_max_chars) {
+    const top = [...ctxResult.files]
+      .sort((a, b) => b.chars - a.chars)
+      .slice(0, 5)
+      .map((f) => `${f.path} (${f.chars})`)
+      .join(', ');
+    findings.push(
+      createFinding({
+        checkName: 'context_size_budget',
+        taskId: null,
+        message: `Always-loaded context is ${ctxResult.total_chars} characters, exceeding the budget of ${budgets.always_loaded_max_chars}; top contributors: ${top}`,
+        repairTarget: 'CLAUDE.md',
+        suggestedAction: 'Trim the largest always-loaded documents, move content behind path-scoped rules, or raise always_loaded_max_chars in PROCESS_STATE.json artifact_budgets if the growth is intentional.',
+      })
+    );
+  }
+
+  const perDoc = ctxResult.files.filter((f) => f.kind !== 'claude_md').map((f) => ({ path: f.path, chars: f.chars }));
+  const counted = new Set(perDoc.map((f) => f.path));
+  let moduleRegistry = {};
+  try {
+    moduleRegistry = parseModuleRegistry(root);
+  } catch (_err) {
+    moduleRegistry = {};
+  }
+  for (const mod of Object.values(moduleRegistry)) {
+    for (const rawDoc of mod.context_docs || []) {
+      const docPath = rawDoc.replace(/^`|`$/g, '');
+      if (!docPath || counted.has(docPath)) continue;
+      counted.add(docPath);
+      try {
+        const text = fs.readFileSync(path.join(root, docPath), 'utf8');
+        perDoc.push({ path: docPath, chars: text.length });
+      } catch (_err) {
+        // Missing or unreadable context_docs entry — not this check's concern.
+      }
+    }
+  }
+  // T-791: a document's doc_limits exception in docs/MODULES.md replaces
+  // imported_doc_max_chars for that document.
+  const exceptions = collectDocLimitExceptions(moduleRegistry);
+  for (const doc of perDoc) {
+    const exception = Object.prototype.hasOwnProperty.call(exceptions, doc.path) ? exceptions[doc.path] : null;
+    const limit = exception ? exception.max_chars : budgets.imported_doc_max_chars;
+    if (doc.chars > limit) {
+      findings.push(
+        createFinding({
+          checkName: 'context_size_budget',
+          taskId: null,
+          message: exception
+            ? `${doc.path} is ${doc.chars} characters, exceeding its per-document exception of ${limit} (${exception.task})`
+            : `${doc.path} is ${doc.chars} characters, exceeding the per-document budget of ${limit}`,
+          repairTarget: doc.path,
+          suggestedAction: exception
+            ? `Split or trim the document, or revisit the max_chars exception owned by ${exception.task} in docs/MODULES.md.`
+            : 'Split or trim the document, or raise imported_doc_max_chars in PROCESS_STATE.json artifact_budgets if the growth is intentional.',
+        })
+      );
+    }
+  }
+  return findings;
+}
+
+/**
+ * Flatten every module's doc_limits into one {path: {max_chars, task}} map
+ * (T-791). When two modules declare the same path the larger limit wins.
+ */
+function collectDocLimitExceptions(moduleRegistry) {
+  const out = {};
+  for (const mod of Object.values(moduleRegistry || {})) {
+    for (const [docPath, limit] of Object.entries(mod.doc_limits || {})) {
+      if (!Object.prototype.hasOwnProperty.call(out, docPath) || limit.max_chars > out[docPath].max_chars) {
+        out[docPath] = limit;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * doc_limit_ratchet (T-791, info severity, NEVER blocks). Keeps the per-document
+ * max_chars exceptions in docs/MODULES.md decreasing-only. Fires, one finding
+ * per document, when a working-tree exception
+ *   - exceeds the value recorded for the same path in HEAD's docs/MODULES.md
+ *     (read via readFileAtRevision(); skipped silently when git, HEAD or the
+ *     file at HEAD is unavailable, or the path has no exception at HEAD), or
+ *   - is smaller than the document's current size in characters (skipped when
+ *     the document cannot be read).
+ */
+function checkDocLimitRatchet({ root }) {
+  const findings = [];
+  let working = {};
+  try {
+    working = collectDocLimitExceptions(parseModuleRegistry(root));
+  } catch (_err) {
+    return findings;
+  }
+  const paths = Object.keys(working);
+  if (paths.length === 0) return findings;
+
+  let atHead = {};
+  const headText = readFileAtRevision(root, 'HEAD', 'docs/MODULES.md');
+  if (typeof headText === 'string') {
+    try {
+      atHead = collectDocLimitExceptions(parseModuleRegistryFromText(headText));
+    } catch (_err) {
+      atHead = {};
+    }
+  }
+
+  for (const docPath of paths) {
+    const exception = working[docPath];
+    if (Object.prototype.hasOwnProperty.call(atHead, docPath) && exception.max_chars > atHead[docPath].max_chars) {
+      findings.push(
+        createFinding({
+          checkName: 'doc_limit_ratchet',
+          taskId: null,
+          message: `The max_chars exception for ${docPath} was raised to ${exception.max_chars} (${exception.task}) from ${atHead[docPath].max_chars} recorded in HEAD's docs/MODULES.md; exceptions may only decrease`,
+          repairTarget: 'docs/MODULES.md',
+          suggestedAction: `Lower the exception for ${docPath} to at most ${atHead[docPath].max_chars}, or trim the document instead of raising its limit.`,
+        })
+      );
+    }
+    let size = null;
+    try {
+      size = fs.readFileSync(path.join(root, docPath), 'utf8').length;
+    } catch (_err) {
+      size = null;
+    }
+    if (size !== null && exception.max_chars < size) {
+      findings.push(
+        createFinding({
+          checkName: 'doc_limit_ratchet',
+          taskId: null,
+          message: `The max_chars exception for ${docPath} is ${exception.max_chars} (${exception.task}), smaller than the document's current size of ${size} characters`,
+          repairTarget: 'docs/MODULES.md',
+          suggestedAction: `Set the exception for ${docPath} to the document's current size or trim the document below its limit.`,
+        })
+      );
+    }
+  }
   return findings;
 }
 
@@ -2946,6 +3116,14 @@ const CHECKS = [
   // state-in-CLAUDE.md advisory: info-level nudge when CLAUDE.md contains
   // task-state-shaped lines (### T-NNN headings or - **Status:** fields).
   { name: 'state_in_claude_md', run: (ctx) => checkStateInClaudeMd(ctx.backlogPath) },
+  // context size budget advisory (T-782): info-level nudge when the always-loaded
+  // context (CLAUDE.md + @ imports + unscoped rules) or one imported document
+  // exceeds its character budget.
+  { name: 'context_size_budget', run: (ctx) => checkContextSizeBudget({ root: ctx.root, processStatePath: ctx.processStatePath }) },
+  // doc limit ratchet advisory (T-791): info-level nudge when a per-document
+  // max_chars exception in docs/MODULES.md grew relative to HEAD, or is smaller
+  // than the document it covers.
+  { name: 'doc_limit_ratchet', run: (ctx) => checkDocLimitRatchet({ root: ctx.root }) },
   // Cross-repo Blocked by gate: failure/warning when a merged/qa_passed/
   // ready_for_qa task's Blocked by: reference resolves to a non-merged
   // blocker task in another repo; info when the reference is unresolvable.
@@ -3259,10 +3437,14 @@ module.exports = {
   NEXT_ACTION_VOLATILE_FACTS_CHECK: 'next_action_volatile_facts',
   ARTIFACT_SIZE_BUDGET_CHECK: 'artifact_size_budget',
   STATE_IN_CLAUDE_MD_CHECK: 'state_in_claude_md',
+  CONTEXT_SIZE_BUDGET_CHECK: 'context_size_budget',
+  DOC_LIMIT_RATCHET_CHECK: 'doc_limit_ratchet',
   BLOCKED_BY_OPEN_CHECK: 'blocked_by_open',
   BLOCKED_BY_UNRESOLVABLE_CHECK: 'blocked_by_unresolvable',
   COMMIT_UNREACHABLE_CHECK: 'commit_unreachable',
   DEFAULT_ARTIFACT_BUDGETS,
+  checkContextSizeBudget,
+  checkDocLimitRatchet,
   BACKLOG_ACTIVE_WAVE_PER_TASK_LINES,
   TASK_STATUS_ACTIVE_TASKS_PER_TASK_LINES,
   checkMergedNeedsFixRounds,

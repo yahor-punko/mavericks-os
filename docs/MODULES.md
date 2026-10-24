@@ -35,6 +35,29 @@ Each module entry must be a `## <id>` section with these fields:
 | `default_owner` | string | Default sub-agent role for tasks in this module |
 | `qa_checklist` | list | QA steps specific to this module |
 
+### Optional fields per entry
+
+| Field | Type | Description |
+|---|---|---|
+| `doc_limits` | comma-separated | Per-document character-limit exceptions for named `context_docs`, each written as `<path> max_chars: <N> (T-NNN)` |
+
+`doc_limits` lets one oversized context document carry its own character limit
+instead of the project-wide per-document budget (`imported_doc_max_chars`, 40000 by
+default) that the validator's `context_size_budget` advisory applies. Every exception
+names the task that owns it (`T-NNN`), so a limit raised "just for now" always has an
+owner who is accountable for shrinking it again.
+
+The field sits on its own line, so the comma-split of `context_docs` is unaffected:
+`context_docs` still lists plain paths, and `doc_limits` repeats only the paths that
+need an exception. Entries that do not match the `<path> max_chars: <N> (T-NNN)`
+shape are ignored.
+
+The limits are a ratchet, not a free setting. The `doc_limit_ratchet` advisory
+(info severity, never blocks) fires when an exception is raised above the value
+recorded for the same path in the last commit's `docs/MODULES.md`, and when an
+exception is smaller than the document's current size. To raise a limit, trim the
+document instead.
+
 ---
 
 ## Example entry (generic placeholder — replace with your own)
@@ -43,7 +66,8 @@ Each module entry must be a `## <id>` section with these fields:
 
     - **label:** My Module
     - **repos:** my-repo
-    - **context_docs:** docs/core/TASK_LIFECYCLE.md
+    - **context_docs:** docs/core/TASK_LIFECYCLE.md, docs/ARCHITECTURE.md
+    - **doc_limits:** docs/ARCHITECTURE.md max_chars: 60000 (T-123)
     - **default_owner:** developer
     - **qa_checklist:**
       - Describe one QA step specific to this module
