@@ -431,8 +431,140 @@ let e2Root; // reused by the (e4) coherence pin below
 }
 
 // ---------------------------------------------------------------------------
+// T-825 — `exclude` prefix entries (a key ending in "/") classify every tracked
+// path beneath them; isCanonicalRepo() judges exact exclude keys only and is
+// the ONE definition every consumer imports.
+// ---------------------------------------------------------------------------
+const ARCHIVE_FILE = 'docs/archive/X/Y.md';
+
+// Canonical fixture (exact exclude key tracked) with a `docs/archive/` prefix
+// key. `opts.archiveFile` (default true) tracks ARCHIVE_FILE; `opts.perFile`
+// ALSO lists it as an exact exclude key; `opts.withGuard` copies the guard.
+function makePrefixFixture(name, opts = {}) {
+  const archiveFile = opts.archiveFile !== false;
+  const root = path.join(TMP_DIR, name);
+  fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'docs'), { recursive: true });
+  initGitRepo(root);
+  copyCheckScriptWithDeps(root);
+  const ship = [
+    'scripts/publish-manifest.json',
+    'scripts/check-publish-manifest.js',
+    'scripts/mavp-publish-verify-provenance.js',
+  ];
+  if (opts.withGuard) {
+    fs.copyFileSync(GUARD_SCRIPT_SRC, path.join(root, 'scripts', 'mavp-manifest-guard.js'));
+    ship.push('scripts/mavp-manifest-guard.js');
+  }
+  const exclude = { 'docs/internal.md': 'internal only', 'docs/archive/': 'archive prefix' };
+  if (opts.perFile) exclude[ARCHIVE_FILE] = 'redundant per-file entry';
+  writeManifest(root, { ship, reset: {}, exclude });
+  fs.writeFileSync(path.join(root, 'docs', 'internal.md'), 'internal\n', 'utf8');
+  const toAdd = [...ship, 'docs/internal.md'];
+  if (archiveFile) {
+    fs.mkdirSync(path.join(root, 'docs', 'archive', 'X'), { recursive: true });
+    fs.writeFileSync(path.join(root, ARCHIVE_FILE), 'archived\n', 'utf8');
+    toAdd.push(ARCHIVE_FILE);
+  }
+  gitAdd(root, toAdd);
+  return root;
+}
+
+{
+  // (f1) prefix key + tracked path beneath it with NO per-file entry -> OK, exit 0.
+  const root = makePrefixFixture('prefix-ok');
+  for (const args of [[], ['--if-canonical']]) {
+    const result = runCheck(root, args);
+    assert.strictEqual(result.status, 0, `Test (f1) FAIL (${args.join(' ') || 'unflagged'}): expected exit 0, got ${result.status}\n${result.stdout}\n${result.stderr}`);
+    assert.ok(
+      result.stdout.includes('OK: publish manifest classifies every tracked path exactly once.'),
+      `Test (f1) FAIL: expected the OK line, got:\n${result.stdout}`
+    );
+  }
+  console.log('Test (f1) passed: a trailing-slash exclude key classifies a tracked path beneath it with no per-file entry (exit 0, OK line)');
+}
+
+{
+  // (f2) the per-file entry ALSO present -> DOUBLE-CLASSIFIED naming the path, exit 1.
+  const root = makePrefixFixture('prefix-double', { perFile: true });
+  const result = runCheck(root, []);
+  assert.strictEqual(result.status, 1, `Test (f2) FAIL: expected exit 1, got ${result.status}\n${result.stdout}\n${result.stderr}`);
+  const doubleLine = result.stderr.split('\n').find((l) => l.includes(ARCHIVE_FILE));
+  assert.ok(
+    result.stderr.includes('DOUBLE-CLASSIFIED') && doubleLine,
+    `Test (f2) FAIL: expected DOUBLE-CLASSIFIED naming ${ARCHIVE_FILE}, got:\n${result.stderr}`
+  );
+  console.log('Test (f2) passed: a per-file exclude entry under a prefix key is reported DOUBLE-CLASSIFIED naming the path (exit 1)');
+}
+
+{
+  // (f3) prefix key with zero tracked paths beneath it -> STALE naming the key, exit 1;
+  // and under --if-canonical it still ENFORCES (an emptied prefix must not flip the
+  // repo to non-canonical and fail open).
+  const root = makePrefixFixture('prefix-stale', { archiveFile: false });
+  for (const args of [[], ['--if-canonical']]) {
+    const result = runCheck(root, args);
+    assert.strictEqual(result.status, 1, `Test (f3) FAIL (${args.join(' ') || 'unflagged'}): expected exit 1, got ${result.status}\n${result.stdout}\n${result.stderr}`);
+    assert.ok(
+      result.stderr.includes('STALE') && result.stderr.includes('- docs/archive/'),
+      `Test (f3) FAIL: expected STALE naming the key docs/archive/, got:\n${result.stderr}`
+    );
+  }
+  console.log('Test (f3) passed: an emptied prefix key is reported STALE naming the key, in the unflagged run AND under --if-canonical (fails closed, never skips)');
+}
+
+{
+  // (f4) isCanonicalRepo(): exact keys only; false when none exist.
+  const { isCanonicalRepo } = require(CHECK_SCRIPT_SRC);
+  const tracked = ['docs/internal.md', ARCHIVE_FILE];
+  const m = (exclude) => ({ ship: [], reset: {}, exclude });
+  assert.strictEqual(isCanonicalRepo(m({ 'docs/internal.md': 'r', 'docs/archive/': 'r' }), tracked), true, 'Test (f4) FAIL: exact key tracked + prefix key beneath -> canonical');
+  assert.strictEqual(
+    isCanonicalRepo(m({ 'docs/internal.md': 'r', 'docs/archive/': 'r' }), ['docs/internal.md']),
+    true,
+    'Test (f4) FAIL: an EMPTIED prefix must stay canonical (so the checker can report it STALE), not flip to non-canonical'
+  );
+  assert.strictEqual(isCanonicalRepo(m({ 'docs/archive/': 'r' }), tracked), false, 'Test (f4) FAIL: only prefix keys -> false (no exact keys exist)');
+  assert.strictEqual(isCanonicalRepo(m({}), tracked), false, 'Test (f4) FAIL: empty exclude -> false');
+  assert.strictEqual(isCanonicalRepo({ ship: [], reset: {} }, tracked), false, 'Test (f4) FAIL: absent exclude -> false');
+  assert.strictEqual(
+    isCanonicalRepo(m({ 'docs/internal.md': 'r', 'docs/gone.md': 'r', 'docs/archive/': 'r' }), tracked),
+    false,
+    'Test (f4) FAIL: an untracked exact key -> non-canonical'
+  );
+  console.log('Test (f4) passed: isCanonicalRepo() judges exact exclude keys only and returns false when none exist');
+}
+
+{
+  // (f5) the creation-time guard classifies through the prefix too: silent for a
+  // new file under the prefix, still advisory for one outside it.
+  const root = makePrefixFixture('prefix-guard', { withGuard: true });
+  fs.mkdirSync(path.join(root, 'docs', 'archive', 'Z'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'docs', 'archive', 'Z', 'new.md'), 'new\n', 'utf8');
+  const quiet = runGuard(root, 'docs/archive/Z/new.md');
+  assert.strictEqual(quiet.status, 0, 'Test (f5) FAIL: guard must exit 0');
+  assert.strictEqual(quiet.stderr, '', `Test (f5) FAIL: expected silence for a path under the prefix, got: ${quiet.stderr}`);
+  fs.writeFileSync(path.join(root, 'docs', 'outside.md'), 'x\n', 'utf8');
+  const loud = runGuard(root, 'docs/outside.md');
+  assert.ok(loud.stderr.includes('docs/outside.md'), `Test (f5) FAIL: a path outside the prefix must still be advised, got: ${loud.stderr}`);
+  console.log('Test (f5) passed: the guard is silent for a new file beneath an exclude prefix key and still advises outside it');
+}
+
+{
+  // (f6) one definition: no script other than the checker inlines the canonical heuristic.
+  // The needle is assembled at runtime so this file does not match itself.
+  const needle = 'every((k) => trackedSet' + '.has(k))';
+  const offenders = fs
+    .readdirSync(path.join(REAL_ROOT, 'scripts'))
+    .filter((f) => f.endsWith('.js') && f !== 'check-publish-manifest.js')
+    .filter((f) => fs.readFileSync(path.join(REAL_ROOT, 'scripts', f), 'utf8').includes(needle));
+  assert.deepStrictEqual(offenders, [], `Test (f6) FAIL: inlined canonical-heuristic copies found in: ${offenders.join(', ')}`);
+  console.log('Test (f6) passed: no script inlines the canonical-repo heuristic; check-publish-manifest.js is the only definition');
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
 
-console.log('\nAll T-401/T-556 assertions passed.');
+console.log('\nAll T-401/T-556/T-825 assertions passed.');

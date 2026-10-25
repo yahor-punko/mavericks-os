@@ -70,11 +70,40 @@
  *     than 20% of a line's words (a clause cut, a long line replaced by a
  *     short summary) is a replacement, not an amendment, and is reported
  *     missing; git is the record of what it said.
- *   - Duplicate lines: matching is by trimmed text, not by position or count.
- *     A removed line whose text still occurs anywhere in the target set is
- *     found, even when several copies were removed and fewer remain. Short or
- *     structural lines (`---`, a repeated bullet, an @ import line) get no
- *     special handling: every non-empty trimmed line counts.
+ *   - Keyed amendment (T-816): a removed line that is neither found, archived
+ *     nor 80%-retained is still AMENDED-IN-PLACE when it is KEYED and its key
+ *     is rewritten in the same document. keyOf(line) is the bold text of a
+ *     list item whose content begins with a bold span after a `-`, `*`, `+`
+ *     or `N.`/`N)` marker, or the trimmed first cell of a table row; a table
+ *     separator row (`|---|`), a heading and any other line never key. The
+ *     rule applies when the key occurs exactly ONCE among the keyed lines of
+ *     the same file at the parent AND exactly once among the keyed lines of
+ *     that file at the child, and the child's keyed line is in the step's
+ *     ADDED set for that file. Same document only (a path rename is not
+ *     keyed), so pairing is one-to-one by construction; a repeated key such
+ *     as several `**Note:**` bullets never qualifies. Keyed amendments are
+ *     counted INSIDE amended-in-place (the four buckets still sum to the
+ *     removed total), reported as `AMENDED ... (key match: <key>)`, and
+ *     tallied on the extra `keyed-amendments: K` summary line. Accepted
+ *     boundary: a keyed body cut down to its bare lead passes (git is its
+ *     record); the human archive duty for a displaced convention-bullet body
+ *     is unchanged.
+ *   - Duplicate lines (T-806): found-in-working is count-based (multiset), not
+ *     set membership. For a removed text X let P(X) be its occurrences across
+ *     the parent perimeter files read at the parent and C(X) its occurrences
+ *     across the working perimeter union read at the child. The first
+ *     max(0, P(X) - C(X)) removed occurrences of X in the step (in file, then
+ *     diff order) are NOT credited as found-in-working: they fall through to
+ *     the archive / amended-in-place / missing judgment, and only the
+ *     remainder count as found-in-working. A line moved within or between
+ *     files (count unchanged) is therefore still found; removing one of
+ *     several identical lines with nothing archived is missing, even though
+ *     an identical line remains elsewhere. Matching is still by trimmed text,
+ *     never by position. Named boundary: a line whose tokenize() result is
+ *     empty (pure punctuation such as `---`) keeps the old set semantics and
+ *     is found whenever the text still occurs anywhere in the working set,
+ *     because structural separators are not content. Every other non-empty
+ *     trimmed line (a repeated bullet, an @ import line) is counted.
  *   - Range edge cases: --range walks `git rev-list --first-parent A..B`
  *     oldest first. A merge commit is judged by its diff against its FIRST
  *     parent; the files the merge "added or modified" are likewise those that
@@ -358,6 +387,56 @@ function lineSet(reader, files) {
   return set;
 }
 
+/** Occurrences of each non-empty trimmed line across the given files (T-806: multiset). */
+function lineCounts(reader, files) {
+  const counts = new Map();
+  for (const rel of files) {
+    const text = reader.read(rel);
+    if (typeof text !== 'string') continue;
+    for (const l of text.split(/\r?\n/)) {
+      const t = l.trim();
+      if (t) counts.set(t, (counts.get(t) || 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/**
+ * T-816: the key of a line, or null. A list item whose content begins with a
+ * bold span keys on that span's text; a table row keys on its trimmed first
+ * cell (a separator row never keys). Headings and every other line: null.
+ */
+function keyOf(line) {
+  const t = String(line).trim();
+  const item = t.match(/^(?:[-*+]|\d+[.)])\s+\*\*(.+?)\*\*/);
+  if (item) {
+    const k = item[1].trim();
+    return k || null;
+  }
+  if (t.startsWith('|')) {
+    const cells = t.replace(/^\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
+    if (cells.every((c) => /^:?-+:?$/.test(c))) return null;
+    return cells[0] || null;
+  }
+  return null;
+}
+
+/** Keyed lines of one file at a revision: Map key -> array of trimmed lines (T-816). */
+function keyedLines(reader, rel) {
+  const map = new Map();
+  const text = reader.paths.has(rel) ? reader.read(rel) : null;
+  if (typeof text !== 'string') return map;
+  for (const l of text.split(/\r?\n/)) {
+    const t = l.trim();
+    if (!t) continue;
+    const k = keyOf(t);
+    if (k === null) continue;
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(t);
+  }
+  return map;
+}
+
 /**
  * Judge one parent->child step. parentRev is null for a root commit / unborn HEAD.
  * Returns { label, perimeter, removed, working, archive, amended: [{file, text, retention}], missing: [{file, text}] }.
@@ -375,7 +454,16 @@ function judgeStep(root, { parentRev, childRev, label, readers }) {
 
   // Target sets, both read AFTER the step (at the child).
   const workingFiles = [...new Set([...parentPerimeter, ...childPerimeter])];
-  const workingLines = lineSet(childReader, workingFiles);
+  const workingCounts = lineCounts(childReader, workingFiles);
+  // T-806: occurrences at the parent, to compute per-text deficits P(X) - C(X).
+  const parentCounts = lineCounts(parentReader, parentPerimeter.filter((rel) => parentReader.paths.has(rel)));
+  const deficit = new Map(); // text -> removed occurrences still owed to the archive/amended/missing judgment
+  const deficitOf = (text) => {
+    if (!deficit.has(text)) {
+      deficit.set(text, Math.max(0, (parentCounts.get(text) || 0) - (workingCounts.get(text) || 0)));
+    }
+    return deficit.get(text);
+  };
   const archiveLines = lineSet(childReader, touchedArchiveFiles(root, parentRev, childRev));
 
   // Descendant candidates: lines the step ADDED to any working perimeter file
@@ -395,6 +483,15 @@ function judgeStep(root, { parentRev, childRev, label, readers }) {
     return candidates;
   };
 
+  // T-816: trimmed lines the step added to one file (cached per file).
+  const addedByFile = new Map();
+  const addedTrimmed = (rel) => {
+    if (!addedByFile.has(rel)) {
+      addedByFile.set(rel, new Set(diffLines(root, parentRev, childRev, rel).added.map((l) => l.trim()).filter(Boolean)));
+    }
+    return addedByFile.get(rel);
+  };
+
   for (const rel of parentPerimeter) {
     if (!parentReader.paths.has(rel)) continue;
     for (const raw of diffLines(root, parentRev, childRev, rel).removed) {
@@ -402,11 +499,27 @@ function judgeStep(root, { parentRev, childRev, label, readers }) {
       if (!text) continue;
       result.removed += 1;
       // Bucket precedence: working, then archive, then amended (see header).
-      if (workingLines.has(text)) { result.working += 1; continue; }
+      // T-806: count-based found-in-working; punctuation-only lines keep set semantics.
+      if (workingCounts.has(text)) {
+        if (tokenize(text).length === 0) { result.working += 1; continue; }
+        const owed = deficitOf(text);
+        if (owed > 0) deficit.set(text, owed - 1);
+        else { result.working += 1; continue; }
+      }
       if (archiveLines.has(text)) { result.archive += 1; continue; }
       const j = judgeAmended(text, addedCandidates());
-      if (j.amended) result.amended.push({ file: rel, text, retention: j.retention });
-      else result.missing.push({ file: rel, text });
+      if (j.amended) { result.amended.push({ file: rel, text, retention: j.retention }); continue; }
+      // T-816: keyed same-document rewrite (unique key at parent and child, child line added).
+      const key = keyOf(text);
+      if (key !== null) {
+        const atParent = keyedLines(parentReader, rel).get(key) || [];
+        const atChild = keyedLines(childReader, rel).get(key) || [];
+        if (atParent.length === 1 && atChild.length === 1 && addedTrimmed(rel).has(atChild[0])) {
+          result.amended.push({ file: rel, text, retention: 0, key });
+          continue;
+        }
+      }
+      result.missing.push({ file: rel, text });
     }
   }
   return result;
@@ -513,7 +626,8 @@ function run(argv) {
   }
 
   for (const a of amended) {
-    console.log(`  AMENDED ${a.commit} ${a.file} (${Math.round(a.retention * 100)}% retained): ${a.text}`);
+    const how = a.key !== undefined ? `key match: ${a.key}` : `${Math.round(a.retention * 100)}% retained`;
+    console.log(`  AMENDED ${a.commit} ${a.file} (${how}): ${a.text}`);
   }
   for (const m of missing) {
     console.log(`  MISSING ${m.commit} ${m.file}: ${m.text}`);
@@ -528,6 +642,7 @@ function run(argv) {
   console.log(`  found-in-working: ${working}`);
   console.log(`  found-in-archive: ${archive}`);
   console.log(`  amended-in-place: ${amended.length}`);
+  console.log(`  keyed-amendments: ${amended.filter((a) => a.key !== undefined).length}`);
   console.log(`  missing: ${missing.length}`);
   if (removed === 0) console.log('0 removed lines in perimeter');
   if (missing.length > 0) {
@@ -556,4 +671,4 @@ if (require.main === module) {
   process.exitCode = code;
 }
 
-module.exports = { parseArgs, run, computePerimeter, computePerimeterDetail, judgeStep, tokenize, judgeAmended, AMENDED_RETENTION_THRESHOLD };
+module.exports = { parseArgs, run, computePerimeter, computePerimeterDetail, judgeStep, tokenize, judgeAmended, keyOf, AMENDED_RETENTION_THRESHOLD };

@@ -11,10 +11,13 @@
 // classified in the first place. See docs/rca/2026-07-publish-manifest-registration.md
 // (RC-2, mechanism (e)) for the incident this closes.
 //
-// Canonical-detection heuristic (reused verbatim from
-// scripts/test-publish-overlay.js's Test 4 gate — do not invent a new one):
-// this is the canonical (private) repo iff EVERY key in the manifest's
-// `exclude` bucket is a git-tracked path. In the public mirror / adopter
+// Canonical-detection heuristic (T-825: imported from
+// scripts/check-publish-manifest.js's exported isCanonicalRepo(), the one
+// shared definition — do not inline a copy): this is the canonical (private)
+// repo iff EVERY exact (non-trailing-slash) key in the manifest's `exclude`
+// bucket is a git-tracked path, and there is at least one. A trailing-slash
+// `exclude` key is a prefix entry that classifies every file beneath it.
+// In the public mirror / adopter
 // repos, `exclude` paths are never tracked (they were never shipped), so the
 // heuristic naturally resolves to non-canonical there and the guard is inert.
 //
@@ -59,7 +62,9 @@ const CHECK_MANIFEST_SCRIPT = path.join(REPO_ROOT, 'scripts', 'check-publish-man
 // to the set the blocking pre-commit backstop (check-publish-manifest.js)
 // refuses. A guard-local predicate would be a fourth definition of manifest
 // validity — the exact drift class T-550 existed to kill.
-const { validateManifestBucketsShape } = require(CHECK_MANIFEST_SCRIPT);
+// T-825 — isCanonicalRepo() and the exclude-prefix test are likewise the
+// checker's single definitions (never inlined here).
+const { validateManifestBucketsShape, isCanonicalRepo, isCoveredByExcludePrefix } = require(CHECK_MANIFEST_SCRIPT);
 
 function loadManifest() {
   const raw = fs.readFileSync(MANIFEST_PATH, 'utf8');
@@ -69,14 +74,6 @@ function loadManifest() {
 function getTrackedFiles() {
   const out = execFileSync('git', ['ls-files'], { cwd: REPO_ROOT, encoding: 'utf8' });
   return out.split('\n').filter(Boolean);
-}
-
-// Canonical iff every `exclude` key is git-tracked (same heuristic as
-// scripts/test-publish-overlay.js Test 4 — see module comment above).
-function isCanonicalRepo(manifest, trackedList) {
-  const exclude = manifest.exclude && typeof manifest.exclude === 'object' ? manifest.exclude : {};
-  const trackedSet = new Set(trackedList);
-  return Object.keys(exclude).every((k) => trackedSet.has(k));
 }
 
 function isIgnored(relPath) {
@@ -160,7 +157,7 @@ function main() {
   const exclude = manifest.exclude && typeof manifest.exclude === 'object' ? manifest.exclude : {};
   const classified = new Set([...ship, ...Object.keys(reset), ...Object.keys(exclude)]);
 
-  if (classified.has(relPath)) {
+  if (classified.has(relPath) || isCoveredByExcludePrefix(manifest, relPath)) {
     process.exit(0);
   }
 

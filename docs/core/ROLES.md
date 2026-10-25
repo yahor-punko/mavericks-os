@@ -8,13 +8,13 @@
 | Security reviewer | Security review for new inputs/outputs, auth flows, integrations — `security_passed` or `security_needs_fix` (optional per task) | Sonnet | [`.claude/agents/security-reviewer.md`](../../.claude/agents/security-reviewer.md) |
 | Product/docs | Backlog clarity, process docs, artifact sync | Sonnet | [`.claude/agents/product-docs.md`](../../.claude/agents/product-docs.md) |
 | Technical writer | User-facing docs — README, getting-started guides, API reference, changelog | Sonnet | [`.claude/agents/technical-writer.md`](../../.claude/agents/technical-writer.md) |
-| Architect | Pre-task design brief and task decomposition (mandatory gate for every task, sole exception the XS fast lane — see [`docs/core/ORCHESTRATION_RULES.md`](ORCHESTRATION_RULES.md)) | Fable 5 | [`.claude/agents/architect.md`](../../.claude/agents/architect.md) |
-| Analyst | External technology and landscape research, ahead of architect review | Sonnet | [`.claude/agents/analyst.md`](../../.claude/agents/analyst.md) |
+| Architect | Pre-task design brief and task decomposition (mandatory gate for every task, sole exception the XS fast lane — see [`docs/core/ORCHESTRATION_RULES.md`](ORCHESTRATION_RULES.md)) | Fable | [`.claude/agents/architect.md`](../../.claude/agents/architect.md) |
+| Analyst | External technology and landscape research, ahead of architect review | Fable | [`.claude/agents/analyst.md`](../../.claude/agents/analyst.md) |
 | Frontend design | Visual/interaction design for frontend surfaces | Sonnet | [`.claude/agents/frontend-design.md`](../../.claude/agents/frontend-design.md) |
 | UI designer | UI component and layout design | Sonnet | [`.claude/agents/ui-designer.md`](../../.claude/agents/ui-designer.md) |
-| Exa researcher | Web research via the Exa search tool | Sonnet | [`.claude/agents/exa-researcher.md`](../../.claude/agents/exa-researcher.md) |
+| Exa researcher | Web research via the Exa search tool | Fable | [`.claude/agents/exa-researcher.md`](../../.claude/agents/exa-researcher.md) |
 
-Model and effort escalation policy — including per-role fallback and effort selection — lives in [`docs/AGENT_SPEC.md`](../AGENT_SPEC.md) — "Model selection", the single source of truth; the column above is not it.
+Model and effort policy — the Fable-only rule for Architect, Analyst and Exa researcher, worker model escalation, and effort selection — lives in [`docs/AGENT_SPEC.md`](../AGENT_SPEC.md) — "Model selection", the single source of truth; the column above is not it.
 
 Each role has a corresponding agent prompt in [`.claude/agents/`](../../.claude/agents/) — pass it to the sub-agent as context when spawning.
 

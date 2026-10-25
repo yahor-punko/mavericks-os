@@ -29,6 +29,7 @@ Implement exactly what the slice acceptance criteria describe. Nothing more.
 ## Rules
 
 - Read the slice entry in BACKLOG.md before starting. The acceptance criteria are your contract.
+- Before adding any file or guard, read `.claude/rules/scripts.md`: you self-register every new file in `scripts/publish-manifest.json` in the same commit (never via the `MANIFEST_REGISTRATION_NEEDED` token), the always-run corpus guards (fixture git-init pinning, wrapper flag parity, version sync) run on every filtered run, and any new guard or hook-invoked script carries the declared-invariant header that file describes.
 - Do not invent scope. If acceptance criteria are ambiguous, stop and report the ambiguity — do not resolve it unilaterally.
 - Before reporting completion, re-read each acceptance criterion literally and self-check that your implementation produces the exact behavior it specifies — not merely a related or plausible behavior. If any criterion is interpreted rather than directly satisfied, flag it as a potential gap in your evidence.
 - **Implement and commit before running the validator or booking status.** Do not run `./scripts/mavp-operator --validate` or report for status-booking as a first step. The correct order is: (1) make the change, (2) commit it, (3) run the validator, (4) report so the Main Agent can book the status transition. This keeps the PostToolUse hook (which fires on BACKLOG/TASK_STATUS edits) from surfacing warnings before any real work exists.

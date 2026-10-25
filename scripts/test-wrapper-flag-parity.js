@@ -1,4 +1,7 @@
 'use strict';
+// mavp-corpus-guard: always-run
+// Corpus-wide guard: run-tests.js appends this to every --filter run (.claude/rules/scripts.md).
+// mavp-declared-in: .claude/rules/scripts.md :: Wrapper flag parity
 // Regression test: T-685 — the adopter wrapper produced by buildBashWrapper()
 // in mavp-install.js must dispatch every flag the canonical wrapper
 // (scripts/mavp-operator) dispatches. T-685 fixed five flags that were

@@ -8,7 +8,8 @@
  * 2. Prompts operator to mark tasks as merged / needs_fix / keep
  * 3. Updates TASK_STATUS.md and PROCESS_STATE.md
  * 4. Runs the MavP validator and reports health
- * 5. If all tasks merged (wave complete), prompts git push
+ * 5. If all tasks merged, prompts git push (the wave itself is advanced only
+ *    by --close-wave — T-820; this command never touches the wave counter)
  *
  * Usage:
  *   ./scripts/mavp-operator --close-session
@@ -46,7 +47,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, formatWorktreePruneSuggestion, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, resolvePermissionMode, printRepoIdentityHeader, guardMutatingRoot, getCommitHashesReachable, isShallowRepository, extractCommitHashesFromEvidence, buildReachableHashIndex, isHashReachable, isSelfHostedRoot, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError, pruneStaleActiveSlices } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { normalizeDeployField, generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, formatWorktreePruneSuggestion, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, resolvePermissionMode, printRepoIdentityHeader, guardMutatingRoot, getCommitHashesReachable, isShallowRepository, extractCommitHashesFromEvidence, buildReachableHashIndex, isHashReachable, isSelfHostedRoot, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError, pruneStaleActiveSlices, parseFeedbackNotes, listIntakeItems, listFeedbackDrafts, formatFeedbackDraftLine, resolveIntakeDir, findPreviousCloseSessionCommit, FEEDBACK_ALIAS_PATTERN } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 // T-530: checkVersionBump()'s release-awareness reads the public mirror's
 // tags EXCLUSIVELY through these check-changelog-frozen.js exports — never
@@ -201,6 +202,7 @@ function printDeployedDevAdvisory(activeTasks, deployContours) {
   if (deployContours < 2) return;
   const deployedDevCount = activeTasks.filter(t => t.status === 'deployed_dev').length;
   if (deployedDevCount > 0) {
+    recordAdvisory(`${deployedDevCount} task(s) at deployed_dev awaiting prod promotion (T-749)`);
     console.log(`\n${YELLOW}⚠ ${deployedDevCount} task(s) at deployed_dev awaiting prod promotion${RESET}`);
   }
 }
@@ -376,6 +378,28 @@ function parseTasksEvidence(markdown, taskIds) {
 }
 
 /**
+ * T-815: set of task IDs (from taskIds) whose BACKLOG block carries a
+ * `Deploy: none` field (trimmed, case-insensitive). Block-bounded: the scan
+ * resets on every task heading and every level-2 heading.
+ */
+function parseBacklogNoDeploy(markdown, taskIds) {
+  const result = new Set();
+  const idSet = new Set(taskIds);
+  if (idSet.size === 0 || !markdown) return result;
+  let currentId = null;
+  for (const line of markdown.split(/\r?\n/)) {
+    const headingMatch = line.match(/^###\s+(T-\d+)/);
+    if (headingMatch) { currentId = headingMatch[1]; continue; }
+    if (/^##\s+/.test(line) && !/^###/.test(line)) { currentId = null; continue; }
+    if (currentId && idSet.has(currentId)) {
+      const m = line.match(/^-\s+\*\*Deploy:\*\*\s+(.+)$/i);
+      if (m && normalizeDeployField(m[1]) === 'none') result.add(currentId);
+    }
+  }
+  return result;
+}
+
+/**
  * Parse Repo: field for given task IDs from BACKLOG.md.
  * Returns a Map of taskId -> repo string (or null).
  */
@@ -521,20 +545,25 @@ function isCommitReachableFromRemote(root, commitHash) {
  * @param {string|null} status - task's current status (from TASK_STATUS.md)
  * @param {string|null} evidenceCommit - evidence commit hash, or null
  * @param {string} root - absolute path to the git working tree
+ * @param {boolean} [noDeploy] - T-815: true when the task's BACKLOG block
+ *   carries `Deploy: none`. Replaces the deploy_contours>=2 merged label and
+ *   the contours 0/1 reachable-true label with NO_DEPLOY_LABEL; the HELD
+ *   (reachable-false) label and the deployed_* labels are unchanged.
  * @returns {string}
  */
-function getDeployLabel(deployContours, status, evidenceCommit, root) {
+const NO_DEPLOY_LABEL = '— без деплоя';
+function getDeployLabel(deployContours, status, evidenceCommit, root, noDeploy) {
   if (deployContours >= 2) {
     if (status === 'deployed_prod') return '✓ в проде';
     if (status === 'deployed_dev') return '✓ в dev';
-    if (status === 'merged') return '⏳ не задеплоен';
+    if (status === 'merged') return noDeploy === true ? NO_DEPLOY_LABEL : '⏳ не задеплоен';
     return '⏳ не смёрджен';
   }
 
   // deploy_contours 0 or 1
   const terminalLabel = deployContours === 0 ? '✓ задеплоен' : '✓ авто-деплой';
   const reachable = isCommitReachableFromRemote(root, evidenceCommit);
-  if (reachable === true) return terminalLabel;
+  if (reachable === true) return noDeploy === true ? NO_DEPLOY_LABEL : terminalLabel;
   if (reachable === false) return '⚠ смёрджен — HELD, не запушен';
   // reachable === null: can't verify (no remote / no commit / git unavailable) — degrade
   return status || '—';
@@ -584,6 +613,41 @@ function findExecutionLogOmissions(completedTaskRecords, executionLogContent) {
 }
 
 /**
+ * T-845: module-level advisory collector. The omission printers (T-629,
+ * T-718) push ONE summary line each when they fire; both close-session paths
+ * print the collected lines as a recap immediately before `Session closed.`,
+ * so reading only the tail of the output never misses a late advisory.
+ * Reset at the start of each run (see resetAdvisoryCollector()). Pure
+ * output bookkeeping: no exit code, commit decision or file write depends
+ * on it.
+ */
+const collectedAdvisories = [];
+
+function resetAdvisoryCollector() {
+  collectedAdvisories.length = 0;
+}
+
+function recordAdvisory(line) {
+  if (line) collectedAdvisories.push(String(line));
+}
+
+/**
+ * T-845: print the recap block. `Advisories this close (N):` plus one line
+ * per collected advisory, or the single line `Advisories this close: none`.
+ * Called immediately before the `Session closed.` line on both paths.
+ */
+function printAdvisoryRecap() {
+  if (collectedAdvisories.length === 0) {
+    console.log(`${DIM}Advisories this close: none${RESET}`);
+    return;
+  }
+  console.log(`${YELLOW}${BOLD}Advisories this close (${collectedAdvisories.length}):${RESET}`);
+  for (const line of collectedAdvisories) {
+    console.log(`${YELLOW}  - ${line}${RESET}`);
+  }
+}
+
+/**
  * Print the T-629 warning, if any ids are missing. Non-blocking by design:
  * never throws, never changes the close's exit code, reads EXECUTION_LOG.md
  * defensively (a missing file degrades to "every id missing" rather than
@@ -606,6 +670,7 @@ function printExecutionLogOmissionWarning(completedTaskRecords, executionLogPath
   }
   const missing = findExecutionLogOmissions(completedTaskRecords, content);
   if (missing.length === 0) return;
+  recordAdvisory(`EXECUTION_LOG.md has no entry for: ${missing.join(', ')} (T-629)`);
   console.log(
     `\n${YELLOW}${BOLD}⚠ EXECUTION_LOG.md has no entry for: ${missing.join(', ')}${RESET}` +
       `${YELLOW} — per-spawn logging convention not observed (RC-2, docs/rca/2026-08-operator-channel-state-artifacts.md). Non-blocking.${RESET}`
@@ -822,6 +887,7 @@ function printChangelogShipOmissionWarning(completedTaskRecords, taskStatusConte
   }
   if (!missing || missing.length === 0) return;
 
+  recordAdvisory(`CHANGELOG.md has no entry for: ${missing.join(', ')} (T-718)`);
   console.log(
     `\n${YELLOW}${BOLD}⚠ CHANGELOG.md has no entry for: ${missing.join(', ')}${RESET}` +
       `${YELLOW} — evidence commit touched a ship-classified file with no release note (T-718). Non-blocking.${RESET}`
@@ -845,6 +911,7 @@ function printSessionCompletedTable(sessionCompletedIds, taskStatusContent, back
   const gitRoot = root || ROOT;
   const evidenceMap = parseTasksEvidence(taskStatusContent, sessionCompletedIds);
   const repoMap = parseBacklogRepos(backlogContent, sessionCompletedIds);
+  const noDeployIds = parseBacklogNoDeploy(backlogContent, sessionCompletedIds);
 
   const COL_TASK = 28;
   const COL_COMMIT = 12;
@@ -868,7 +935,7 @@ function printSessionCompletedTable(sessionCompletedIds, taskStatusContent, back
     const commitStr = ev.commit ? ev.commit.slice(0, 7) : '—';
     const branchStr = ev.branch || '—';
     const status = taskStatusMap ? taskStatusMap.get(id) : null;
-    const deploy = getDeployLabel(deployContours, status, ev.commit, gitRoot);
+    const deploy = getDeployLabel(deployContours, status, ev.commit, gitRoot, noDeployIds.has(id));
     console.log(` ${pad(taskLabel, COL_TASK)}${pad(commitStr, COL_COMMIT)}${pad(branchStr, COL_BRANCH)}${deploy}`);
   }
   console.log('');
@@ -1039,6 +1106,7 @@ function sweepTerminalSkipTasks(content, activeTasks, skipIds = new Set()) {
     if (task.status === 'deferred') {
       const result = moveTaskBlockToSection(updated, task.id, DEFERRED_TASK_STATUS_HEADING);
       if (!result.ok) {
+        recordAdvisory(`${task.id} (deferred) could not be relocated in TASK_STATUS.md (T-845)`);
         console.log(`${YELLOW}⚠ ${task.id} (deferred) — could not relocate: ${result.error}${RESET}`);
         continue;
       }
@@ -1048,6 +1116,7 @@ function sweepTerminalSkipTasks(content, activeTasks, skipIds = new Set()) {
       const before = updated;
       updated = moveTaskToCompleted(updated, task.id);
       if (updated === before) {
+        recordAdvisory(`${task.id} (deprecated) could not be relocated into Recently completed tasks (T-845)`);
         console.log(`${YELLOW}⚠ ${task.id} (deprecated) — could not relocate into "## Recently completed tasks"${RESET}`);
         continue;
       }
@@ -1216,6 +1285,8 @@ function syncBacklogMergedTasks(mergedTaskRecords, waveNumber) {
 
   const archiveResult = archiveMergedTasksFromActiveWave(BACKLOG_MD, waveNumber);
   if (!archiveResult.ok) {
+    // The warning text spans several lines; the recap line stays one line.
+    recordAdvisory(`BACKLOG.md archive warning: ${String(archiveResult.warning).replace(/\s+/g, ' ').trim()} (T-845)`);
     console.log(`${YELLOW}⚠ BACKLOG.md archive warning: ${archiveResult.warning}${RESET}`);
   } else if (archiveResult.archivedIds.length > 0) {
     console.log(`  ${GREEN}✓ BACKLOG.md — archived ${archiveResult.archivedIds.length} task(s) out of Active Wave: ${archiveResult.archivedIds.join(', ')}${RESET}`);
@@ -1648,19 +1719,25 @@ function buildVolatileNextActionNotice(allMerged, currentNextAction) {
  * T-445: build the explicit wave-completion announcement line, unified across
  * both interactive and non-interactive close-session runs so the same state
  * (e.g. an empty Active tasks section) always produces the same decision AND
- * the same visible message. On completion, names the wave being archived +
- * incremented. When the wave stays open, names the specific task(s) still
- * blocking completion so "wave stays open" is never a silent, unexplained
- * no-op — pure function, no I/O, unit-testable directly.
+ * the same visible message. When the wave stays open, names the specific
+ * task(s) still blocking completion so "wave stays open" is never a silent,
+ * unexplained no-op — pure function, no I/O, unit-testable directly.
+ *
+ * T-820: --close-session never advances the wave. When every task has left
+ * the Active tasks section (`waveComplete` true — a statement about the task
+ * list only, never a decision to advance) the line says so and names the only
+ * path that does advance the wave: the operator's confirmation + --close-wave.
  *
  * @param {boolean} waveComplete - whether every task has left the Active tasks section
- * @param {number} sessionWave - the wave number being evaluated (not yet incremented)
+ * @param {number} sessionWave - the wave number being evaluated
  * @param {Array<{id: string, status: string}>} remainingTasks - tasks still in the Active tasks section
+ * @param {string|null} [waveGoal] - the wave's recorded goal (empty/absent prints "not set")
  * @returns {string} the announcement line (no color codes — caller wraps in color)
  */
-function buildWaveCompletionAnnouncement(waveComplete, sessionWave, remainingTasks) {
+function buildWaveCompletionAnnouncement(waveComplete, sessionWave, remainingTasks, waveGoal) {
   if (waveComplete) {
-    return `Wave ${sessionWave} complete — archiving + incrementing`;
+    const goalText = typeof waveGoal === 'string' && waveGoal.trim() ? waveGoal : 'not set';
+    return `Wave ${sessionWave} — all tasks merged; wave stays open until the operator confirms the goal is met and --close-wave runs (goal: ${goalText})`;
   }
   const reasons = remainingTasks.map(t => `${t.id} still ${t.status}`).join(', ');
   return `Wave ${sessionWave} stays open — ${reasons}`;
@@ -1902,15 +1979,149 @@ function printShippedUnbookedAdvisory(markdown, root) {
   const { proposals, standDown } = computeShippedUnbookedAdvisory(markdown, root);
   if (standDown) {
     console.log(`${DIM}${standDown}${RESET}`);
+    recordAdvisory('shipped-but-unbooked check stood down — shallow git clone, no merge-booking proposals made (T-637)');
     return;
+  }
+  if (proposals.length > 0) {
+    recordAdvisory(`shipped but not booked: ${proposals.map(pr => pr.id).join(', ')} (T-637)`);
   }
   for (const proposal of proposals) {
     console.log(`${CYAN}${formatShippedUnbookedProposal(proposal)}${RESET}`);
   }
 }
 
+// T-833: session-end feedback capture advisory. Names the `mavp-feedback:` note lines the
+// coordinator added to EXECUTION_LOG.md this session (and any drafts already waiting in the
+// feedback inbox) so the coordinator can draft them and raise the operator approval modal.
+// Non-blocking: it prints, never writes, never changes the exit code.
+const FEEDBACK_TRAILER_NON_INTERACTIVE =
+  'If an operator is present: raise the approval modal now (harness question tool, multi-select over the drafts above by title + summary, plus "Send none"); ' +
+  'submit only approved drafts with ./scripts/mavp-operator --feedback --file <draft>; unselected drafts stay drafts. ' +
+  'Headless: drafts are kept and listed again at the next interactive session. ' +
+  'GitHub publication additionally needs --feedback --github --operator-confirmed "<the operator\'s statement>".';
+const FEEDBACK_TRAILER_INTERACTIVE =
+  'To submit a draft, run ./scripts/mavp-operator --feedback --file <path> (running it is your approval); drafts not submitted are listed again next session.';
+const FEEDBACK_SET_ALIAS_LINE =
+  './scripts/mavp-operator --feedback --set-alias <your-alias>   # <your-alias> is a placeholder: pick a lowercase alias of 2-24 letters and digits, starting with a letter';
+
+function shellDoubleQuote(value) {
+  return `"${String(value).replace(/(["\\$`])/g, '\\$1')}"`;
+}
+
+/**
+ * The text this session added to EXECUTION_LOG.md: the diff of the previous close-session
+ * commit against the working tree (added lines only). When there is no such commit, git is
+ * unavailable, or the file did not exist at that commit, the whole file is returned and
+ * `wholeFile` is true. Returns null when EXECUTION_LOG.md does not exist.
+ */
+function collectAddedExecutionLogText(root) {
+  const logPath = path.join(root, 'EXECUTION_LOG.md');
+  if (!fs.existsSync(logPath)) return null;
+  const whole = () => ({ text: fs.readFileSync(logPath, 'utf8'), wholeFile: true });
+  const prev = findPreviousCloseSessionCommit(root);
+  if (!prev) return whole();
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
+  const runGit = (args) => spawnSync('git', ['-C', root, ...args], { env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const existed = runGit(['cat-file', '-e', `${prev}:EXECUTION_LOG.md`]);
+  if (existed.error || existed.status !== 0) return whole();
+  const diff = runGit(['diff', '--unified=0', '--no-color', '--no-ext-diff', prev, '--', 'EXECUTION_LOG.md']);
+  if (diff.error || diff.status !== 0) return whole();
+  const added = [];
+  let inHunk = false;
+  for (const line of String(diff.stdout).split('\n')) {
+    if (line.startsWith('@@')) { inHunk = true; continue; }
+    if (inHunk && line.startsWith('+')) added.push(line.slice(1));
+  }
+  return { text: added.join('\n'), wholeFile: false };
+}
+
+/**
+ * Build the advisory text for `--close-session`, or null. Returns null in a framework root
+ * (a scripts/mavp-operator-lib.js exists under it — the adopter-tree heuristic --check-archive
+ * uses) and when there are neither undrafted notes nor drafts. Never throws.
+ *
+ * @param {string} root - project root
+ * @param {{mode?: 'non-interactive'|'interactive', intakeDir?: string}} [options]
+ * @returns {string|null}
+ */
+function buildFeedbackCaptureAdvisory(root, options = {}) {
+  try {
+    if (fs.existsSync(path.join(root, 'scripts', 'mavp-operator-lib.js'))) return null;
+    const mode = options.mode === 'interactive' ? 'interactive' : 'non-interactive';
+
+    let alias = null;
+    try {
+      const ps = JSON.parse(fs.readFileSync(path.join(root, 'PROCESS_STATE.json'), 'utf8'));
+      if (typeof ps.feedback_alias === 'string' && FEEDBACK_ALIAS_PATTERN.test(ps.feedback_alias.trim())) {
+        alias = ps.feedback_alias.trim();
+      }
+    } catch { /* no alias persisted */ }
+
+    const inbox = options.intakeDir || resolveIntakeDir();
+    const items = alias ? listIntakeItems(inbox).filter((e) => e.alias === alias && e.item) : [];
+    const drafts = alias ? listFeedbackDrafts(inbox, alias) : [];
+    const keyOf = (title) => String(title || '').trim().toLowerCase();
+    const submittedByTitle = new Map();
+    for (const e of items) {
+      const k = keyOf(e.item.title);
+      if (k && !submittedByTitle.has(k)) submittedByTitle.set(k, e.id);
+    }
+    const draftByTitle = new Map();
+    for (const d of drafts) {
+      const k = keyOf(d.title);
+      if (k && !draftByTitle.has(k)) draftByTitle.set(k, d.path);
+    }
+
+    const collected = collectAddedExecutionLogText(root);
+    const notes = collected ? parseFeedbackNotes(collected.text) : [];
+    const seen = new Set();
+    const undrafted = [];
+    const deduped = [];
+    for (const note of notes) {
+      const k = keyOf(note.title);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      if (submittedByTitle.has(k)) deduped.push({ note, why: `already submitted: ${submittedByTitle.get(k)}` });
+      else if (draftByTitle.has(k)) deduped.push({ note, why: `draft exists: ${draftByTitle.get(k)}` });
+      else undrafted.push(note);
+    }
+    if (undrafted.length === 0 && drafts.length === 0) return null;
+
+    const hints = (n) => {
+      const parts = [];
+      if (n.area) parts.push(`area: ${n.area}`);
+      if (n.kind) parts.push(`kind: ${n.kind}`);
+      return parts.length ? ` (${parts.join('; ')})` : '';
+    };
+    const lines = [];
+    const scope = collected && collected.wholeFile
+      ? ' (no previous close-session commit readable — scanned the whole EXECUTION_LOG.md)'
+      : '';
+    lines.push(`${BOLD}Feedback from this session: ${undrafted.length} noted, ${drafts.length} drafted${RESET}${scope}`);
+    if (!alias) lines.push(`  ${FEEDBACK_SET_ALIAS_LINE}`);
+    for (const note of undrafted) {
+      lines.push(`  note: ${note.title}${hints(note)}`);
+      let cmd = `./scripts/mavp-operator --feedback --draft ${shellDoubleQuote(note.title)}`;
+      if (note.area) cmd += ` --area ${shellDoubleQuote(note.area)}`;
+      if (note.kind) cmd += ` --kind ${note.kind}`;
+      lines.push(`    ${cmd}`);
+    }
+    for (const { note, why } of deduped) lines.push(`  note: ${note.title}${hints(note)} — ${why}`);
+    for (const d of drafts) lines.push(`  ${formatFeedbackDraftLine(d)}`);
+    lines.push(mode === 'interactive' ? FEEDBACK_TRAILER_INTERACTIVE : FEEDBACK_TRAILER_NON_INTERACTIVE);
+    return lines.join('\n');
+  } catch {
+    return null;
+  }
+}
+
 async function runNonInteractive(args) {
+  resetAdvisoryCollector();
   const today = new Date().toISOString().slice(0, 10);
+
+  // T-833: computed before any artifact write or the session commit, so the diff base cannot move.
+  const feedbackAdvisory = buildFeedbackCaptureAdvisory(ROOT, { mode: 'non-interactive' });
 
   console.log(`\n${BOLD}MavP Close Session${RESET} ${DIM}${today}${RESET} ${DIM}[non-interactive]${RESET}\n`);
 
@@ -1927,6 +2138,7 @@ async function runNonInteractive(args) {
   const noEvidenceTasks = findTasksWithNoEvidence(taskStatusContent);
   if (noEvidenceTasks.length > 0) {
     for (const t of noEvidenceTasks) {
+      recordAdvisory(`${t.id} (${t.status}) has no evidence recorded`);
       console.log(`${YELLOW}WARN: ${t.id} (${t.status}) — no evidence recorded${RESET}`);
     }
     console.log('');
@@ -1936,6 +2148,7 @@ async function runNonInteractive(args) {
   {
     const worktreeAdvisory = buildWorktreeHygieneAdvisory(ROOT);
     if (worktreeAdvisory) {
+      recordAdvisory('worktree hygiene — see the Worktree hygiene line above (T-559)');
       console.log(`${DIM}${worktreeAdvisory}${RESET}`);
       console.log('');
     }
@@ -1949,12 +2162,14 @@ async function runNonInteractive(args) {
   let sessionWave = 1;
   let sessionNumber = 1;
   let currentNextAction = null;
+  let currentWaveGoalText = null;
   try {
     if (fs.existsSync(PROCESS_STATE_JSON)) {
       const ps = JSON.parse(readUtf8(PROCESS_STATE_JSON));
       sessionWave = Number(ps.wave) || 1;
       sessionNumber = Number(ps.wave_session) || 1;
       currentNextAction = ps.next_action || null;
+      currentWaveGoalText = ps.wave_goal != null ? ps.wave_goal : null;
     }
   } catch { /* use defaults */ }
 
@@ -1966,6 +2181,7 @@ async function runNonInteractive(args) {
   for (const taskId of args.markMerged) {
     const task = activeTasks.find(t => t.id === taskId);
     if (!task) {
+      recordAdvisory(`${taskId} not found in active tasks — skipped`);
       console.log(`${YELLOW}⚠ ${taskId} not found in active tasks — skipping${RESET}`);
       continue;
     }
@@ -2019,7 +2235,7 @@ async function runNonInteractive(args) {
   // interactive path via buildWaveCompletionAnnouncement() so identical state
   // always produces identical messaging in both modes.
   {
-    const announcement = buildWaveCompletionAnnouncement(allMerged, sessionWave, remainingTasks);
+    const announcement = buildWaveCompletionAnnouncement(allMerged, sessionWave, remainingTasks, currentWaveGoalText);
     console.log(`${allMerged ? `${CYAN}${BOLD}` : YELLOW}${announcement}${RESET}`);
   }
 
@@ -2030,46 +2246,36 @@ async function runNonInteractive(args) {
   // prints, never writes.
   printShippedUnbookedAdvisory(updatedContent, ROOT);
 
-  // Resolved next_action: preserve existing Main Agent value when wave is still open
-  const resolvedNextAction = allMerged
-    ? (nextAction || null)
-    : (currentNextAction || nextAction || null);
+  // T-833: session-end feedback capture — directly after the shipped-but-unbooked advisory.
+  if (feedbackAdvisory) {
+    recordAdvisory('feedback notes awaiting drafting — see the feedback capture block above (T-833)');
+    console.log(feedbackAdvisory);
+  }
+
+  // Resolved next_action: preserve the existing Main Agent value. T-820: the
+  // wave never advances here, so the wave stays open even with an empty Active
+  // tasks section — the existing value is preserved in that case too (the
+  // computed `nextAction` is only a fallback).
+  const resolvedNextAction = currentNextAction || nextAction || null;
 
   // T-350: when we preserved an existing next_action (rather than the freshly
   // computed one) and that preserved value carries volatile facts (a copied
   // framework version, unpushed-commit count, etc. with no invalidation
   // trigger), print a one-line advisory. Non-blocking — no behavior/exit-code
   // change; the value is still preserved as before.
-  const volatileNextActionNotice = buildVolatileNextActionNotice(allMerged, currentNextAction);
+  const volatileNextActionNotice = buildVolatileNextActionNotice(false, currentNextAction);
   if (volatileNextActionNotice) {
+    recordAdvisory('preserved next_action carries volatile facts — keep it a directive (T-350)');
     console.log(`${YELLOW}${volatileNextActionNotice}${RESET}`);
   }
 
-  // Compute summary: explicit --summary wins, otherwise auto-generate — but only once the wave is
-  // actually complete (T-361). Auto-generating on a mid-wave close would clobber the prior wave's
-  // summary with a partial one; explicit --summary is exempt from this gate and may still always
-  // write, regardless of wave completion.
-  //
-  // T-366: this function (runNonInteractive) is only ever reached via the non-interactive path
-  // resolved by resolveMode() — including the flagless, non-TTY (agent Bash) case where no explicit
-  // --non-interactive flag is passed. Gating on args.autoSummary / args.nonInteractive here was wrong:
-  // those reflect the CLI flag, not the resolved mode, so a flagless non-TTY close left the gate false
-  // and the stale wave_summary was silently preserved. Auto-summary is now the unconditional
-  // non-interactive default; args.autoSummary is still parsed for CLI backward compat but is a no-op
-  // in this condition.
-  let effectiveSummary = args.summary;
-
-  if (!effectiveSummary && allMerged) {
-    // Auto-generate from merged/deployed tasks in BACKLOG.md's Active Wave section (the wave being
-    // closed right now) — not TASK_STATUS.md's `## Recently completed tasks` section, which
-    // accumulates every wave back to Wave 1 and would make the summary grow without bound.
-    const backlogContentForSummary = fs.existsSync(BACKLOG_MD) ? readUtf8(BACKLOG_MD) : '';
-    // T-420: pass sessionWave so titles archived mid-wave via --archive-merged
-    // (moved out of Active Wave into "## Wave <N> — Archived (mid-wave)")
-    // are still included in the wave-complete summary.
-    const mergedTitles = parseActiveWaveMergedTitles(backlogContentForSummary, sessionWave);
-    effectiveSummary = buildAutoSummary(sessionWave, mergedTitles);
-  }
+  // wave_summary: only an explicit --summary writes it. T-820: the auto
+  // summary describes a CLOSED wave and is written solely by --close-wave —
+  // --close-session never closes the wave, so it no longer auto-generates one
+  // (an auto write here would overwrite the prior wave's summary with a
+  // partial one). args.autoSummary is still parsed for CLI backward compat but
+  // is a no-op.
+  const effectiveSummary = args.summary;
 
   // T-438: run the validator BEFORE any PROCESS_STATE.json mutation. A blocked
   // (exit 2) close must leave PROCESS_STATE.json byte-for-byte unchanged —
@@ -2084,11 +2290,13 @@ async function runNonInteractive(args) {
   if (validatorResult.ok) {
     console.log(`${GREEN}✓ Validator passed — artifacts in sync${RESET}`);
   } else {
+    recordAdvisory(`validator reported issues (exit ${validatorResult.code})`);
     console.log(`${RED}✗ Validator issues (exit ${validatorResult.code}):${RESET}`);
     console.log(validatorResult.output);
   }
 
   if (validatorResult.code === 2) {
+    recordAdvisory('PROCESS_STATE mutation SKIPPED — validator exit 2, state left unchanged');
     console.log(`${RED}✗ PROCESS_STATE mutation SKIPPED — validator exit 2 (repair required); state left unchanged, re-run --close-session after repair${RESET}`);
   } else {
     // Update legacy PROCESS_STATE.md using resolved value (will be overwritten by
@@ -2099,21 +2307,9 @@ async function runNonInteractive(args) {
       console.log(`${GREEN}✓ PROCESS_STATE.md updated${RESET}`);
     }
 
-    const { wave: newWave } = updateProcessStateJson(nextAction, allMerged, effectiveSummary, { summaryKey: 'wave_summary' });
-    console.log(`${GREEN}✓ PROCESS_STATE.json updated${allMerged ? ` — wave → ${newWave}` : ''}${RESET}`);
-
-    // Archive Active Wave heading in BACKLOG.md when wave is complete
-    if (allMerged) {
-      const closedWaveNumber = newWave - 1;
-      const archiveResult = archiveActiveWaveInBacklog(BACKLOG_MD, closedWaveNumber);
-      if (!archiveResult.ok) {
-        console.log(`${YELLOW}⚠ BACKLOG.md wave archive warning:${RESET}\n${archiveResult.warning}`);
-      } else if (archiveResult.archived) {
-        console.log(`${GREEN}✓ BACKLOG.md — Wave ${closedWaveNumber} heading archived${RESET}`);
-      } else if (archiveResult.warning) {
-        console.log(`${YELLOW}⚠ ${archiveResult.warning}${RESET}`);
-      }
-    }
+    // T-820: waveComplete is unconditionally false — only --close-wave advances the wave.
+    updateProcessStateJson(nextAction, false, effectiveSummary, { summaryKey: 'wave_summary' });
+    console.log(`${GREEN}✓ PROCESS_STATE.json updated${RESET}`);
 
     // Regenerate PROCESS_STATE.md from JSON
     generateProcessStateMd(PROCESS_STATE_JSON, PROCESS_STATE_MD);
@@ -2132,6 +2328,7 @@ async function runNonInteractive(args) {
   // "session commit SKIPPED" line so a silent skip (the T-431 bug) can never
   // happen again.
   if (validatorResult.code === 2) {
+    recordAdvisory('session commit SKIPPED — validator exit 2 (T-431)');
     console.log(`${RED}✗ session commit SKIPPED — validator exit 2 (repair required); commit manually after repair${RESET}`);
   } else {
     try {
@@ -2145,6 +2342,7 @@ async function runNonInteractive(args) {
       if (msg.includes('nothing to commit') || msg.includes('nothing added')) {
         console.log(`${DIM}  (no uncommitted changes to commit)${RESET}`);
       } else {
+        recordAdvisory('session commit not made — the commit step was skipped');
         console.log(`${YELLOW}⚠ git commit skipped: ${msg.trim() || e.message}${RESET}`);
       }
     }
@@ -2233,13 +2431,14 @@ async function runNonInteractive(args) {
           // T-689 (b): genuinely post-push here — the push above just ran.
           console.log(CI_CHECK_POST_PUSH_LINE);
         } else {
+          recordAdvisory('push failed or skipped — push manually if needed');
           console.log(`${YELLOW}⚠ Push failed or skipped — push manually if needed${RESET}`);
         }
       }
     } else {
       // T-689 (c): a reminder to push, not a post-push confirmation — the
       // suffix must not claim a push has happened yet.
-      console.log(`\n${CYAN}${BOLD}Wave complete — run \`git push\` to close the wave${RESET}${CI_CHECK_REMINDER_SUFFIX}`);
+      console.log(`\n${CYAN}${BOLD}All tasks merged — run \`git push\` to publish this session${RESET}${CI_CHECK_REMINDER_SUFFIX}`);
       // T-763: directly under the push reminder it qualifies.
       if (suiteReceiptLine) console.log(suiteReceiptLine);
     }
@@ -2249,6 +2448,7 @@ async function runNonInteractive(args) {
   // T-649: a following line names the changed path(s) when available.
   const versionDrift = checkVersionBump();
   if (versionDrift && versionDrift.kind === 'bump') {
+    recordAdvisory('scripts/ changed since the last version bump — consider bumping before pushing (T-530)');
     console.log(`\n${VERSION_BUMP_LINE}`);
     const pathsLine = formatVersionBumpPathsLine(versionDrift.paths);
     if (pathsLine) console.log(pathsLine);
@@ -2263,6 +2463,7 @@ async function runNonInteractive(args) {
   // Active-tasks-only scoping and deploy_contours gating.
   printDeployedDevAdvisory(activeTasks, deployContours);
 
+  printAdvisoryRecap();
   console.log(`${BOLD}Session closed.${RESET}`);
 
   // Emit RENAME_SESSION line for /rename command
@@ -2271,7 +2472,11 @@ async function runNonInteractive(args) {
 }
 
 async function runInteractive() {
+  resetAdvisoryCollector();
   const today = new Date().toISOString().slice(0, 10);
+
+  // T-833: computed before any artifact write or the session commit, so the diff base cannot move.
+  const feedbackAdvisory = buildFeedbackCaptureAdvisory(ROOT, { mode: 'interactive' });
 
   console.log(`\n${BOLD}MavP Close Session${RESET} ${DIM}${today}${RESET}\n`);
 
@@ -2303,6 +2508,7 @@ async function runInteractive() {
   const noEvidenceTasks = findTasksWithNoEvidence(taskStatusContent);
   if (noEvidenceTasks.length > 0) {
     for (const t of noEvidenceTasks) {
+      recordAdvisory(`${t.id} (${t.status}) has no evidence recorded`);
       console.log(`${YELLOW}WARN: ${t.id} (${t.status}) — no evidence recorded${RESET}`);
     }
     console.log('');
@@ -2312,6 +2518,7 @@ async function runInteractive() {
   {
     const worktreeAdvisory = buildWorktreeHygieneAdvisory(ROOT);
     if (worktreeAdvisory) {
+      recordAdvisory('worktree hygiene — see the Worktree hygiene line above (T-559)');
       console.log(`${DIM}${worktreeAdvisory}${RESET}`);
       console.log('');
     }
@@ -2408,7 +2615,7 @@ async function runInteractive() {
   // buildWaveCompletionAnnouncement() with runNonInteractive so identical
   // state always produces identical messaging in both modes.
   {
-    const announcement = buildWaveCompletionAnnouncement(waveComplete, sessionWave, remainingTasks);
+    const announcement = buildWaveCompletionAnnouncement(waveComplete, sessionWave, remainingTasks, currentWaveGoal);
     console.log(`${waveComplete ? `${CYAN}${BOLD}` : YELLOW}${announcement}${RESET}\n`);
   }
 
@@ -2416,16 +2623,11 @@ async function runInteractive() {
   const operatorExplicit = nextAnswer.trim().length > 0;
   if (operatorExplicit) nextAction = nextAnswer.trim();
 
-  // Prompt for wave_goal when it's not already set OR the wave is
-  // completing (T-648): a wave-complete close clears the stale goal in
-  // updateProcessStateJson() regardless of the answer here, so the prompt
-  // must fire unconditionally on completion to offer a replacement — a
-  // non-empty currentWaveGoal must never suppress its own replacement
-  // prompt. Mid-wave, the prior gating (offer only when unset) still
-  // applies so an existing goal survives untouched unless the operator
-  // explicitly types a new one.
+  // Prompt for wave_goal only when it's not already set. T-820: the wave never
+  // advances in this command, so an existing goal is never replaced here (the
+  // former wave-complete replacement prompt now belongs to --close-wave).
   let waveGoalToSave = undefined;
-  if (waveComplete || !currentWaveGoal) {
+  if (!currentWaveGoal) {
     const goalAnswer = await prompt(rl, `Enter wave goal (or press Enter to skip): `);
     const trimmed = goalAnswer.trim();
     if (trimmed) waveGoalToSave = trimmed;
@@ -2447,24 +2649,6 @@ async function runInteractive() {
   // sync mid-wave (see syncBacklogMergedTasks doc comment above).
   syncBacklogMergedTasks(mergedTaskRecords, sessionWave);
 
-  // T-367: on a wave-complete interactive close, also compute the scoped
-  // wave_summary (mirrors the non-interactive T-361/T-366 contract) so
-  // "wave_summary is written automatically... at the end of each wave"
-  // holds for interactive closes too. Read BACKLOG.md's Active Wave content
-  // now, BEFORE archiveActiveWaveInBacklog() renames the heading below —
-  // parseActiveWaveMergedTitles() only matches a live "## Active Wave"
-  // heading. A mid-wave (non-complete) close must not touch wave_summary,
-  // so this is left undefined otherwise and updateProcessStateJson() skips
-  // the write, preserving whatever value is already on disk.
-  let autoWaveSummary;
-  if (waveComplete) {
-    const backlogContentForSummary = fs.existsSync(BACKLOG_MD) ? readUtf8(BACKLOG_MD) : '';
-    // T-420: pass sessionWave so titles archived mid-wave via --archive-merged
-    // are still included in the wave-complete summary.
-    const mergedTitles = parseActiveWaveMergedTitles(backlogContentForSummary, sessionWave);
-    autoWaveSummary = buildAutoSummary(sessionWave, mergedTitles);
-  }
-
   // T-438: run the validator BEFORE any PROCESS_STATE.json mutation. A blocked
   // (exit 2) close must leave PROCESS_STATE.json byte-for-byte unchanged —
   // otherwise wave/wave_session would already be bumped, and a subsequent
@@ -2478,31 +2662,18 @@ async function runInteractive() {
   if (validatorResult.ok) {
     console.log(`${GREEN}✓ Validator passed — artifacts in sync${RESET}`);
   } else {
+    recordAdvisory(`validator reported issues (exit ${validatorResult.code})`);
     console.log(`${RED}✗ Validator issues (exit ${validatorResult.code}):${RESET}`);
     console.log(validatorResult.output);
   }
 
   if (validatorResult.code === 2) {
+    recordAdvisory('PROCESS_STATE mutation SKIPPED — validator exit 2, state left unchanged');
     console.log(`${RED}✗ PROCESS_STATE mutation SKIPPED — validator exit 2 (repair required); state left unchanged, re-run --close-session after repair${RESET}`);
   } else {
-    const { wave: newWave } = updateProcessStateJson(nextAction, waveComplete, waveGoalToSave, { explicitNextAction: operatorExplicit, waveSummary: autoWaveSummary });
-    console.log(`${GREEN}✓ PROCESS_STATE.json updated${waveComplete ? ` — wave → ${newWave}` : ''}${RESET}`);
-    if (autoWaveSummary) {
-      console.log(`  ${DIM}wave_summary written: ${autoWaveSummary}${RESET}`);
-    }
-
-    // Archive Active Wave heading in BACKLOG.md when wave is complete
-    if (waveComplete) {
-      const closedWaveNumber = newWave - 1;
-      const archiveResult = archiveActiveWaveInBacklog(BACKLOG_MD, closedWaveNumber);
-      if (!archiveResult.ok) {
-        console.log(`${YELLOW}⚠ BACKLOG.md wave archive warning:${RESET}\n${archiveResult.warning}`);
-      } else if (archiveResult.archived) {
-        console.log(`${GREEN}✓ BACKLOG.md — Wave ${closedWaveNumber} heading archived${RESET}`);
-      } else if (archiveResult.warning) {
-        console.log(`${YELLOW}⚠ ${archiveResult.warning}${RESET}`);
-      }
-    }
+    // T-820: waveComplete is unconditionally false — only --close-wave advances the wave.
+    updateProcessStateJson(nextAction, false, waveGoalToSave, { explicitNextAction: operatorExplicit });
+    console.log(`${GREEN}✓ PROCESS_STATE.json updated${RESET}`);
 
     // Regenerate PROCESS_STATE.md from JSON
     generateProcessStateMd(PROCESS_STATE_JSON, PROCESS_STATE_MD);
@@ -2517,6 +2688,7 @@ async function runInteractive() {
   // "session commit SKIPPED" line so a silent skip (the T-431 bug) can never
   // happen again.
   if (validatorResult.code === 2) {
+    recordAdvisory('session commit SKIPPED — validator exit 2 (T-431)');
     console.log(`${RED}✗ session commit SKIPPED — validator exit 2 (repair required); commit manually after repair${RESET}`);
   } else {
     try {
@@ -2530,6 +2702,7 @@ async function runInteractive() {
       if (msg.includes('nothing to commit') || msg.includes('nothing added')) {
         console.log(`${DIM}  (no uncommitted changes to commit)${RESET}`);
       } else {
+        recordAdvisory('session commit not made — the commit step was skipped');
         console.log(`${YELLOW}⚠ git commit skipped: ${msg.trim() || e.message}${RESET}`);
       }
     }
@@ -2539,6 +2712,7 @@ async function runInteractive() {
   // T-649: a following line names the changed path(s) when available.
   const versionDrift = checkVersionBump();
   if (versionDrift && versionDrift.kind === 'bump') {
+    recordAdvisory('scripts/ changed since the last version bump — consider bumping before pushing (T-530)');
     console.log(`\n${VERSION_BUMP_LINE}`);
     const pathsLine = formatVersionBumpPathsLine(versionDrift.paths);
     if (pathsLine) console.log(pathsLine);
@@ -2600,10 +2774,16 @@ async function runInteractive() {
   const backlogContent = fs.existsSync(BACKLOG_MD) ? readUtf8(BACKLOG_MD) : '';
   printSessionCompletedTable(sessionCompletedIds, updatedContent, backlogContent, deployContours, finalStatusMap, ROOT);
 
+  // T-833: session-end feedback capture — before the push prompt, after the results table.
+  if (feedbackAdvisory) {
+    recordAdvisory('feedback notes awaiting drafting — see the feedback capture block above (T-833)');
+    console.log(`\n${feedbackAdvisory}`);
+  }
+
   // Wave complete → prompt git push. The [Y/n] prompt IS the human
   // authorization — valid because the results table above already printed.
   if (waveComplete) {
-    console.log(`\n${CYAN}${BOLD}Wave complete.${RESET} All tasks merged.`);
+    console.log(`\n${CYAN}${BOLD}All tasks merged.${RESET} The wave stays open until --close-wave.`);
     // T-763: before the [Y/n] prompt, so the human answering it has seen the
     // receipt state the pre-push hook is about to judge.
     const suiteReceiptLine = buildSuiteReceiptLine(ROOT);
@@ -2620,13 +2800,15 @@ async function runInteractive() {
         // T-689 (a): genuinely post-push here — the confirmed push above just ran.
         console.log(CI_CHECK_POST_PUSH_LINE);
       } else {
+        recordAdvisory('push failed or skipped — push manually if needed');
         console.log(`${YELLOW}⚠ Push failed or skipped — push manually if needed${RESET}`);
       }
     } else {
-      console.log(`${DIM}Push skipped — remember to push before closing the wave${RESET}`);
+      console.log(`${DIM}Push skipped — remember to push this session's work${RESET}`);
     }
   }
 
+  printAdvisoryRecap();
   console.log(`${BOLD}Session closed.${RESET}`);
 
   // Emit RENAME_SESSION line for /rename command
@@ -2660,4 +2842,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE, findExecutionLogOmissions, printExecutionLogOmissionWarning, loadShipManifestSet, getCommitChangedFiles, findShipTouchingChangelogOmissions, printChangelogShipOmissionWarning, CI_CHECK_COMMAND, CI_CHECK_POST_PUSH_LINE, CI_CHECK_REMINDER_SUFFIX, buildSuiteReceiptLine };
+module.exports = { NO_DEPLOY_LABEL, parseBacklogNoDeploy, moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE, findExecutionLogOmissions, printExecutionLogOmissionWarning, loadShipManifestSet, getCommitChangedFiles, findShipTouchingChangelogOmissions, printChangelogShipOmissionWarning, resetAdvisoryCollector, recordAdvisory, printAdvisoryRecap, CI_CHECK_COMMAND, CI_CHECK_POST_PUSH_LINE, CI_CHECK_REMINDER_SUFFIX, buildSuiteReceiptLine, buildFeedbackCaptureAdvisory };

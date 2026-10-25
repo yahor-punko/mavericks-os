@@ -163,6 +163,7 @@ try {
     // .mavp-hook-ts gitignore entry ensured.
     const gitignore = readOrNull(path.join(root, '.gitignore')) || '';
     check(gitignore.split('\n').map(l => l.trim()).includes('.mavp-hook-ts'), '(a) .gitignore contains .mavp-hook-ts');
+    check(gitignore.split('\n').map(l => l.trim()).includes('HANDOFF.md'), '(a) .gitignore contains HANDOFF.md (T-809, --update path)');
   }
 
   // --- (a2) self-install --update via a SYMLINKED target ---
@@ -350,6 +351,21 @@ try {
       gitignore.split('\n').map(l => l.trim()).includes('.mavp-hook-ts'),
       '(d) --hooks-only ensured .mavp-hook-ts gitignore entry'
     );
+    check(
+      gitignore.split('\n').map(l => l.trim()).includes('HANDOFF.md'),
+      '(d) --hooks-only ensured HANDOFF.md gitignore entry (T-809)'
+    );
+    // Repeated run must not duplicate the line (idempotence).
+    execFileSync(
+      'node',
+      [path.join(frameworkRoot, 'scripts', 'mavp-install.js'), '--hooks-only', hooksOnlyRoot],
+      { encoding: 'utf8' }
+    );
+    const gitignoreAgain = readOrNull(path.join(hooksOnlyRoot, '.gitignore')) || '';
+    check(
+      gitignoreAgain.split('\n').map(l => l.trim()).filter(l => l === 'HANDOFF.md').length === 1,
+      '(d) repeated --hooks-only leaves exactly one HANDOFF.md gitignore line (T-809)'
+    );
   }
 
   // --- (e) T-753: pre-commit AND pre-push both land in .claude/hooks/ on
@@ -377,6 +393,16 @@ try {
     check(
       fs.existsSync(path.join(adopterHooksDir, 'pre-push')),
       '(e) fresh install: .claude/hooks/pre-push landed'
+    );
+    const freshGitignoreLines = (readOrNull(path.join(adopterRoot, '.gitignore')) || '')
+      .split('\n').map(l => l.trim());
+    check(
+      freshGitignoreLines.includes('HANDOFF.md'),
+      '(e) fresh install: .gitignore contains HANDOFF.md (T-809)'
+    );
+    check(
+      freshGitignoreLines.filter(l => l === 'HANDOFF.md').length === 1,
+      '(e) fresh install: exactly one HANDOFF.md gitignore line (T-809)'
     );
 
     // Remove both to prove --update is what re-creates them (not leftover

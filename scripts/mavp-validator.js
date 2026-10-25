@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// mavp-declared-in: CLAUDE.md :: Run validator
 
 /**
  * mavp-validator: artifact-sync validator parser + comparison engine + report renderer.

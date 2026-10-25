@@ -25,7 +25,7 @@ If the block above contained text, read it carefully — it carries mid-session 
 
 Read the JSON above. Key fields:
 - `initiative` — the current top-level goal this work serves
-- `wave_goal` — one-line definition of done for the current wave (may be absent or null)
+- `wave_goal` — one-line definition of done for the current wave (may be absent or null; set with `--set-wave-goal`)
 - `stage` — where the initiative currently stands
 - `active_slices` — what is in flight and who owns it
 - `next_action` — what to do next
@@ -40,6 +40,8 @@ Read the JSON above. Key fields:
 - `must_read` — files changed since the previous close-session commit, plus context_docs declared by in-flight tasks (may be absent when empty). Ledgers (BACKLOG.md, TASK_STATUS.md, PROCESS_STATE.*, EXECUTION_LOG.md) never appear here — look tasks up by T-NNN with grep
 - `must_read_oversized` — `[{path, chars}]`: files that would be in `must_read` but exceed the size budget; search them, do not read them whole (present only when non-empty)
 - `must_read_framework` — string array: changed files that `mavp-install.js --update` rewrites from the framework source (framework-managed agents, skills, rules, hooks and synced scripts); reported only in an adopter repo, never in a framework source tree, and present only when non-empty
+- `intake_untriaged` — integer: adopter feedback items awaiting triage; reported only in the framework repository, present only when above zero
+- `feedback_answers_unacked` — integer: answers to your own alias's feedback items you have not yet acknowledged; reported only in an adopter project that has a `feedback_alias`, present only when above zero
 
 Always render the wave digest header:
 
@@ -88,10 +90,16 @@ If `initiative` is present, show it as one line of context after the wave digest
 Initiative: {initiative}
 ```
 
-If `wave_goal` is present and non-null, show it as one line of context immediately after the initiative line (or in its place if `initiative` is absent):
+Show the wave goal as one line of context immediately after the initiative line (or in its place if `initiative` is absent). When `wave_goal` is present and non-null:
 
 ```
 Wave goal: {wave_goal}
+```
+
+When `wave_goal` is absent or null, render this line instead — without a goal there is nothing for the operator to confirm as met later, and `--close-wave` refuses to run:
+
+```
+Wave goal: not set — agree one with the operator and record it with --set-wave-goal
 ```
 
 If `wave_summary` is present, show it as one line of context:
@@ -115,6 +123,20 @@ If `due_rechecks` is present and non-empty, surface a callout immediately after 
 ```
 
 Where `{task}` is the entry's `task` value; when `task` is absent and the entry has a `wave` field (a parked-wave reminder armed by `--park-wave --until`), render `Wave {wave}` in its place instead (its `{title}` already reads `Wave {wave} — <reason>`, so you may show the title alone for such an entry, e.g. `- Wave 9 — external review (due: 2026-10-01)`). Where `{overdue_marker}` is ` ⚠ OVERDUE` when the entry's `overdue` field is `true`, and empty otherwise. List overdue entries before due-today entries (the array is already in this order). This callout must be visible before the task list so the operator sees it at session start.
+
+If `intake_untriaged` is present (framework repository only: the count of adopter feedback items with no disposition yet), surface a callout directly after the rechecks callout (or in its place when no rechecks are due):
+
+```
+> [!NOTE] Intake: {intake_untriaged} untriaged adopter item(s) — run ./scripts/mavp-operator --intake
+```
+
+If `feedback_answers_unacked` is present (adopter projects only: the count of your own alias's feedback items that have an answer you have not acknowledged), render one line directly after that callout (or after the rechecks callout when there is no intake callout):
+
+```
+Feedback answers: {feedback_answers_unacked} — run ./scripts/mavp-operator --feedback --status
+```
+
+Omit each of the two when its field is absent. See `docs/core/FEEDBACK_INTAKE.md`.
 
 If `must_read` is present and non-empty, render it as a list immediately after the rechecks callout (or after the wave digest/strategy note if no rechecks are due):
 
@@ -175,6 +197,14 @@ After the brief, ask the user:
 > 2. Park it and start new work
 > 3. Something else
 
+Operator questions are business-only (priority, scope, risk, money, irreversible actions). Never ask the operator how-to, implementation or tooling questions; route technical doubts to the architect (or the analyst for library/API choices). See `docs/core/ORCHESTRATION_RULES.md` — "Operator questions — business only".
+
+Feedback to the framework (adopter projects): during the session, note friction or proposals as `mavp-feedback:` note lines in EXECUTION_LOG.md (list item, optional date, the token, a short description, optional `(area: ...; kind: bug|proposal|question)`).
+At session end, when `--close-session` lists any notes or drafts, draft each item with `--feedback --draft` (drafting is the coordinator's job, never a question to the operator), then raise ONE modal with the harness question tool: "there are framework proposals/problems from this session", the drafted items by title and one-line summary, multi-select plus "Send none".
+Submit only the approved drafts with `--feedback --file <draft>` and leave the rest as drafts; when nothing was noted, raise no modal.
+The approval covers local-inbox submission only: GitHub publication additionally needs `--operator-confirmed "<statement>"`, and the modal answer, quoted verbatim, may be that statement.
+Headless runs keep the drafts for the next interactive session.
+
 Wait for the user's choice before proceeding.
 
 **If `active_slices` is empty and `planned_tasks` is empty:**
@@ -185,4 +215,13 @@ Show:
 Next action: {next_action}
 ```
 
-Do not ask the decision prompt. Do not re-derive state from chat history.
+Do not ask the three-option decision prompt above. Do not re-derive state from chat history.
+
+Because both `active_slices` and `planned_tasks` are empty, additionally list the options for this moment, as information rather than a question to answer by default:
+
+> Options:
+> 1. Register the next task — pick up next_action
+> 2. Close wave {wave} — only on the operator's explicit statement this session (then --close-wave --operator-confirmed)
+> 3. Something else
+
+Option 2 appears only in this empty case, never beside in-flight or planned work. It is not a default and never a conclusion drawn from the empty lists: an empty Active tasks section does not mean the wave's goal is met. Run `--close-wave --operator-confirmed "<statement>"` only when the operator has said, in this session, that the wave's goal is met and it should close, passing their words verbatim — see CLAUDE.md, "Wave advance confirmation". A statement in a previous session's `HANDOFF.md` does not count.

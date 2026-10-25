@@ -491,3 +491,148 @@ Two adjacent conventions were tightened as part of closing this out. First, `CLA
 - **No `scripts/` change.** The by-value coupling in `scripts/test-agent-spec-sync.js` (which parses the architect frontmatter-default clause out of `docs/AGENT_SPEC.md` and compares the two `Model self-report:` literals between the spec files) is deliberately left intact and was worked *around* by preserving both parsed strings verbatim — not relaxed to accommodate the rewording.
 
 **Documented in:** `docs/core/DECISIONS.md` (this record); `docs/AGENT_SPEC.md` — "Model selection" / Architect (the terminology split, the canonical escalation threshold), "Model self-report" (the reworded rationale), "Why aliases, not full-ids" (the two-channel narrowing); `.claude/agents/architect.md` — "Model selection" and "Model self-report" (the operative copies); `docs/core/ORCHESTRATION_RULES.md` — "Architect model spawn rule"; `CLAUDE.md` — the architect model spawn rule bullet; `TASK_STATUS.md` — T-734's evidence block (the measurement record); `BACKLOG.md` — T-734's deprecated block and its reopen trigger; `docs/core/BOOTSTRAP_GUIDE.md` — "Fallback model safety chain" (cited, not modified).
+
+---
+
+## DR-016 — The architect and the analyst run on the fable family only: no fallback model, no floor, `xhigh` effort fixed, family-only model names; the stop rule replaces escalation
+
+**Date:** 2026-10-25
+
+**Supersedes:** DR-015 — clauses (a) (the terminology ruling that reserved "fallback" for the escalation re-spawn, and that treated the frontmatter value as the enforcement of an Opus floor) and (b)'s fallback half (the `model: opus` re-spawn and the never-below-Opus floor it enforced), plus the `opus` row of DR-015's frontmatter option table. DR-015's clause (b) *criterion* — two consecutive loud spawn failures, retry once after the first — survives unchanged, but as the trigger of a stop-and-report, not of an escalation. DR-015's clause (c) (the two-channel alias narrowing and the full-id ban) is **kept**. DR-015 itself is not edited.
+
+**Informed by:** the operator directive of 2026-10-25 (architect and analyst run on the fable family only — no Opus fallback, no Opus floor; effort `xhigh` fixed; model names are family names only, never versions; these rules apply to sub-agents only, never to the orchestrator); T-734 (measured — the frontmatter channel does not honour the `fable` alias; full record in T-734's evidence block in `TASK_STATUS.md`); the 2026-10-25 re-measurement recorded below; the Main Agent's 2026-07-01 full-id notes (**Main-Agent-reported, not in-repo** — no artifact in this repository carries them, so nothing here can be re-checked against one); DR-015.
+
+**Tasks:** T-822 (specs, `docs/AGENT_SPEC.md` policy sections and test roster pins), T-823 (this record and the layer-0/1 process-doc alignment)
+
+**Problem:** DR-015 ruled that Opus is the policy's own sanctioned floor and kept an `opus` escalation re-spawn after two loud Fable failures. The operator has withdrawn that: the architect and the analyst are to run on the fable family or not at all. Four surfaces still instructed the Opus re-spawn and floor (`CLAUDE.md`, `docs/core/ORCHESTRATION_RULES.md`, plus the specs and `docs/AGENT_SPEC.md` already flipped by T-822), two role tables named a versioned Fable and an "Opus fallback", the per-spawn outcome convention had no value for a report discarded because it came from the wrong family, and no decision record superseded the clauses doing the instructing.
+
+**Measurement (2026-10-25, re-run by the Main Agent after T-822 integrated).** The same architect spec, whose frontmatter now declares `model: fable`, was spawned twice. With **no** `model` parameter its opening self-report line read `claude-opus-5-5 (Opus 5.5)`; with `model: fable` it read `fable-5.1`. The frontmatter channel therefore **still does not honour `fable` as of 2026-10-25 (re-measured)**: the T-734 finding of 2026-09-01 reproduces. These two strings are quoted verbatim as measurement evidence and are the only versioned model strings this record carries; every other surface in the policy uses family names only.
+
+**What was considered — the frontmatter `model:` value.** Every value the field can hold, with its evidence tier:
+
+| Frontmatter value | Status | Evidence label | Why |
+|---|---|---|---|
+| `fable` | **Adopted** — declared intent, not an enforced channel | **Measured not honoured** (T-734, 2026-09-01; re-measured 2026-10-25) | It states the policy in the field a reader and the harness's own documentation look at. It does not bind: an override-less spawn lands on Opus (measured), so the spawn-time `model: fable` override stays the only channel that reaches the family, and the discard rule (below) is what makes a miss visible. Adopted anyway because the alternatives are worse and because it is correct the day the channel is fixed. |
+| `opus` | **Rejected** | **Measured** (the binding behaviour, T-734 and the 2026-10-25 re-measurement) | It is the removed model: it would bind on every override-less spawn and make the forgotten-override case a *sanctioned* outcome instead of a detectable defect. DR-015 adopted it only to enforce a floor this record abolishes. |
+| any full model-id | **Rejected** | The spawn parameter's rejection of full ids is **Main-Agent-reported (2026-07-01 notes), not in-repo, UNEXECUTED here**; the degradation of a full id to an older generation is in-repo (T-288, cited by DR-015) | Independent grounds, all pre-existing: the spawn parameter does not accept one; a pinned id once degraded silently to an older generation; and a versioned id violates the family-only naming rule. The full-id ban of DR-015 clause (c) is unchanged. |
+| `inherit`, or omitting `model:` | **Rejected** | **Documentation-tier, UNEXECUTED here** (harness documentation, as in DR-015) | The role would land on the session's model, which an adopter controls and this framework does not: a session on a worker-grade model gets a silently worker-grade gate, the unbounded degradation class T-733/T-734 closed. |
+| `sonnet` / `haiku` | **Rejected** | Assumed (by policy, no measurement needed) | Not the fable family; ruled out by the directive itself. |
+
+**What was adopted:**
+
+1. **Fable-only.** The architect and the analyst run on the fable family only. Every spawn passes a spawn-time `model: fable` override **and** `effort: xhigh`; neither varies with the slice. Their specs declare `model: fable` in frontmatter as intent.
+2. **Stop rule, no fallback.** Two consecutive loud spawn failures on `model: fable` (retry once after the first) mean stop and report a blocker to the operator. The role is never re-spawned on another model. There is no Opus floor and no Opus fallback anywhere in the sub-agent policy.
+3. **Discard rule, keyed on the family.** A report whose opening `Model self-report:` line does not name the fable family is discarded unintegrated and re-spawned once with the same override; a second miss is a blocker. Both roles now carry the self-report line (the analyst gained it). The spawn is booked `outcome: model_mismatch`, a fourth value beside `completed|cap_hit|infra_failure`; "an architect spawn's model label" generalises to architect or analyst.
+4. **Family-only model names.** Specs and policy text name a model by family (`fable`, `opus`, `sonnet`, `haiku`) and never by version, enforced for `.claude/agents/*.md` and `docs/AGENT_SPEC.md` by `scripts/test-agent-spec-sync.js`; this task extended the same discipline to the layer-0/1 process docs by hand.
+5. **Sub-agents only.** The rule never reaches the orchestrator. The Main Agent's own session model and settings, including any extended-context suffix on it, are out of scope and unchanged.
+
+**Accepted risk:** a fable outage now halts every mandatory gate. The architect gate is mandatory before every task, so with the family unavailable no task can be decomposed and registered; only the XS `--quick-merge` lane (the sanctioned exception to the gate) keeps moving. DR-015's dominance argument (a fallback changes the outcome only in worlds where outages are model-specific) is not re-litigated: the operator has ruled that a stopped gate is preferable to a gate on another model, and this record takes that preference as given rather than as a finding.
+
+**Explicit non-changes, stated so a later reader does not infer them:**
+- The worker `sonnet` → `opus` escalation table in `docs/AGENT_SPEC.md` is unchanged — it governs workers, never these two roles.
+- Every `maxTurns` value in every spec is unchanged.
+- `exa-researcher` and every other worker role are untouched.
+- The orchestrator's and any session's model settings are untouched, including any 1M-context suffix on the Main Agent model and the `fallbackModel` seeding, `effortLevel` text and `--update` handling in `docs/core/BOOTSTRAP_GUIDE.md` (only that guide's parenthetical describing the sub-agent policy was updated, to stop naming a fallback).
+- Code literals stay as they are: the installer's `fallbackModel` migration fingerprint and the skill-reflect SDK model id are code, not policy text, and are outside the family-name sweep.
+- The two `docs/AGENT_SPEC.md` sentences parsed by `scripts/test-agent-spec-sync.js` and the `Model self-report: <model-name>` literal are not reworded.
+- DR-015 is not edited; the supersession lives in this record.
+
+**Documented in:** `docs/core/DECISIONS.md` (this record); `docs/AGENT_SPEC.md` — "Model selection" / "Fable-only roles (architect, analyst)", "Model self-report", "Why aliases, not full-ids"; `.claude/agents/architect.md` and `.claude/agents/analyst.md` — "Model selection" and "Model self-report" (the operative copies); `docs/core/ORCHESTRATION_RULES.md` — "Fable-only spawn rule (architect, analyst)" and "Cap-hit triage" (the `model_mismatch` outcome); `CLAUDE.md` — the Fable-only spawn rule bullet and the per-spawn outcome convention; `docs/core/ROLES.md` (role table and policy pointer); `docs/core/BOOTSTRAP_GUIDE.md` — "Fallback model safety chain" (parenthetical only).
+
+---
+
+## DR-017 — The Main Agent pre-registers a docs task's new file in the publish manifest before spawning, so docs roles stop hitting the pre-commit backstop
+
+**Date:** 2026-10-25
+
+**Informed by:** the `EXECUTION_LOG.md` entries "T-823 product-docs merged" and "T-832 technical-writer merged" (both Wave 106); DR-002 and DR-007 (the doctrine this extends, not edited).
+
+**Tasks:** T-823, T-832 (the two occurrences), T-836 (this record and the procedure's codification)
+
+**Problem:** Two docs-role tasks in one wave each created a new tracked file (T-823 an archive file, T-832 `docs/core/FEEDBACK_INTAKE.md`) and each writer returned `verdict=blocked`: `.claude/hooks/pre-commit` runs the manifest checker as a blocking backstop, the unclassified new file failed it, and the writer — scope-forbidden from `scripts/` — could only emit the `MANIFEST_REGISTRATION_NEEDED` token and stop. The Main Agent then applied the entry (DR-002) and committed the writer's staged set under the writer's message. Nothing was lost, but each task paid a blocked round, a Main-Agent hand-commit of someone else's work, and a `blocked` verdict for a step that was predictable at planning time: the brief already named the new file. The cause is commit order, not a missing rule: the entry arrives after the commit it is needed by.
+
+**What was considered:**
+1. **A `ship` prefix entry for `docs/core/`** — rejected. `ship` is exact-path by contract across the assembler, the overlay and provenance; a prefix there would change what publishes for every future file under the directory and remove the by-name review that a new shipped file gets today.
+2. **A pre-spawn helper command** (an operator command that writes the entry) — deferred, not rejected. It would be a mutating script for a one-line JSON edit the Main Agent may already apply directly under DR-002. Reopen trigger: a hand-typed pre-spawn entry blocks a commit twice.
+3. **Same-commit checker acceptance** (let the checker accept an entry that lands in the same commit as its file) — rejected as a change; it is already the status quo. The checker accepts a classification present in the working tree whether or not it is committed. The blocked round was caused by commit order, so there is nothing in the checker to change.
+4. **Docs-role self-registration** (add `scripts/` or the manifest to `product-docs` and `technical-writer` scope) — rejected. It moves `scripts/` into role scopes and contradicts the reasoning DR-002 and DR-007 rest on, that these roles are scope-forbidden and the token is their path. Reopen trigger: the pre-spawn procedure misses twice because the paths were not known at planning.
+5. **A checker exemption for unclassified new files** — rejected by DR-007 §1 and not reopened: it removes the fail-closed property the backstop exists for.
+
+**What was adopted:** a Main-Agent procedure, before spawning a `product-docs` or `technical-writer` task whose brief names a new tracked file at a known path. (a) Commit the task registration first. (b) Add the `ship` or `exclude` entry to `scripts/publish-manifest.json` in the working tree, uncommitted — a registration entry, which DR-002 already lets the Main Agent apply directly. (c) Name the path in the brief's `Files to modify` as pre-registered, with no token. (d) Let the entry ride into the booking commit. The `MANIFEST_REGISTRATION_NEEDED` token is unchanged and remains the fallback for a path not known at spawn. An entry whose file never appears is reported as `STALE manifest entries` by the checker at the next commit and is removed then; a stale entry blocks, so it cannot be forgotten silently. DR-002, DR-007, the checker and the backstop are unchanged.
+
+**Preconditions:** the procedure works only while both hold. (1) Docs roles carry no `isolation: worktree` in `.claude/agents/product-docs.md` and `.claude/agents/technical-writer.md`, so they commit on the shared checkout where the uncommitted working-tree entry is visible to them. If a docs role ever gains `isolation: worktree`, the entry becomes invisible to it and this record must be revisited. (2) `scripts/check-publish-manifest.js` reads the manifest from the working tree while the tracked paths come from `git ls-files`, so an uncommitted entry classifies a staged new file.
+
+**Documented in:** `docs/core/DECISIONS.md` (this record); `CLAUDE.md`'s "Publish-manifest registration" convention; `.claude/rules/docs.md`; `.claude/rules/scripts.md`.
+
+---
+
+## DR-018 — The exa-researcher joins the Fable-only roster on the model axis only: `model: fable` on every spawn, effort stays on the ordinary table row
+
+**Date:** 2026-10-25
+
+**Supersedes:** DR-016 — only its explicit non-change clause stating that `exa-researcher` and every other worker role are untouched. Everything else in DR-016 (the stop rule, the discard rule, family-only names, the `xhigh` fixing for the architect and the analyst, the supersession of DR-015) stands unchanged. DR-016 itself is not edited.
+
+**Informed by:** the operator decision of 2026-10-25 (the exa-researcher runs on the fable family, like the architect and the analyst); DR-016; the T-822 discriminating pair recorded in DR-016's measurement paragraph (frontmatter `model: fable` not honoured, spawn-time override honoured, on the architect spec); the architect brief for T-841 and T-842.
+
+**Tasks:** T-841 (the role spec's "Model selection" and "Model self-report" sections, `docs/AGENT_SPEC.md` roster and effort row, test roster pin), T-842 (this record and the layer-0/1 process-doc alignment)
+
+**Problem:** DR-016 listed the exa-researcher among the untouched workers, so it kept the `sonnet` default and, like every worker, the `sonnet` to `opus` escalation table. The operator has ruled that its research passes run on the fable family too. The roster was spelled out as "architect, analyst" in several layer-0/1 sentences and in the per-spawn outcome convention, so a roster change that updated only the spec would have left the rule text, the discard-and-respawn remedy and the role table contradicting it.
+
+**Measurement (2026-10-25, T-841, after integration on main).** The same exa-researcher spec, whose frontmatter now declares `model: fable`, was spawned twice with a trivial brief. With **no** `model` parameter its opening self-report line read `Model self-report: Sonnet 5.5 (claude-sonnet-5-5)`; with a spawn-time `model: fable` it read `Model self-report: Fable 5.1 (claude-fable-5-1)`. Frontmatter binding on this spec is therefore **measured, not untested**: the frontmatter channel does not honour `fable` on this spec either, which reproduces the T-734 and DR-016 finding on a second role. These two strings are quoted verbatim as measurement evidence; every other surface in the policy uses family names only. Caveat, as for every self-report: the line is a detector, not proof of the serving model.
+
+**What was considered:**
+1. **Wholesale membership, including the fixed `xhigh`** — rejected. It would make the exa-researcher's effort as immovable as the gate roles', although it does retrieval and summarising passes whose cost the operator wants to scale with the slice. The fixing of `xhigh` exists for the roles whose output gates every task; this role gates nothing.
+2. **The model flip without the self-report line** — rejected. The frontmatter value is declared intent only (measured above), so a forgotten spawn override is silent: a report from the wrong model reads exactly like one from the fable family. Without the opening line, the discard rule has nothing to key on and the model change would be unverifiable, which is the failure DR-016 introduced the line to close.
+3. **Staying on `sonnet` with the existing `opus` escalation** — rejected. It leaves the operator's ruling unmet, and the escalation table is a per-slice judgment the operator has replaced with a fixed family for this role.
+4. **Adopted design: roster membership on the model axis, wholesale; effort by the ordinary table row.** The exa-researcher gets the spawn-time `model: fable` override, the stop rule, the discard rule and the self-report line exactly as the other two do, and its effort is the table row `Exa researcher (all invocations) | high` in `docs/AGENT_SPEC.md` (session default, per-invocation override per the worker rows). One roster, two independent axes: model membership is by role, effort is by table row. This keeps the three rule sentences identical in structure and puts the one difference, effort, where it already lives.
+
+**What was adopted:**
+1. **Fable-only on the model axis.** Every exa-researcher spawn passes a spawn-time `model: fable` override, on every slice. Its spec declares `model: fable` in frontmatter as intent.
+2. **Effort not fixed.** `xhigh` stays fixed for the architect and the analyst only. The exa-researcher runs on the session default and may be overridden per invocation per "Effort selection".
+3. **Stop rule and discard rule apply unchanged.** Two consecutive loud spawn failures on `model: fable` (retry once after the first) mean stop and report a blocker; the role is never re-spawned on another model. A report whose opening `Model self-report:` line does not name the fable family is discarded unintegrated and re-spawned once; a second miss is a blocker.
+4. **Outcome convention generalised.** `outcome: model_mismatch` and the spawn model label apply to a Fable-only role (architect, analyst, exa-researcher), not to a two-role pair.
+5. **Worker wording.** Worker sub-agents other than these three run on the `sonnet` alias and follow the escalation table.
+
+**Accepted risk:** a fable outage now halts research passes as well as the architect gate. This is lower stakes than the mandatory gate: a research pass is optional per task, no task registration depends on it, and the operator can proceed on the architect's and analyst's own sources or wait. The same preference DR-016 took as given is taken here: a stopped pass is preferable to a pass on another model.
+
+**Explicit non-changes, stated so a later reader does not infer them:**
+- The exa-researcher's `maxTurns` (15) is unchanged, as is its "Budget awareness" section.
+- Its tool list and deny-tools are unchanged; it stays a report-only role.
+- The report-only roster and every other role's spec are unchanged.
+- The `sonnet` to `opus` escalation table is unchanged for the eight remaining workers (developer, qa, ux, product-docs, technical-writer, security-reviewer, frontend-design, ui-designer); only the exa-researcher leaves it.
+- The orchestrator's and any session's model settings are untouched, including the `fallbackModel` seeding in `docs/core/BOOTSTRAP_GUIDE.md` (only that paragraph's parenthetical naming the sub-agent roster was updated).
+- Code literals stay as they are: the installer's `fallbackModel` migration fingerprint and the skill-reflect SDK model id are code, not policy text.
+- DR-016 and DR-017 are not edited; the supersession lives in this record.
+
+**Evidence label:** the claim that frontmatter binding on this spec does not honour `fable` is **measured** (T-841's discriminating pair, quoted above), not UNEXECUTED; the earlier pair in DR-016 was on the architect spec only. The spawn-time override and the discard rule are load-bearing for this role for that reason.
+
+**Documented in:** `docs/core/DECISIONS.md` (this record); `docs/AGENT_SPEC.md` — "Model selection" / "Fable-only roles (architect, analyst, exa-researcher)", "Model self-report", "Effort selection"; `.claude/agents/exa-researcher.md` — "Model selection" and "Model self-report" (the operative copies); `docs/core/ORCHESTRATION_RULES.md` — "Fable-only spawn rule (architect, analyst, exa-researcher)" and "Cap-hit triage" (the `model_mismatch` outcome); `CLAUDE.md` — the Fable-only spawn rule bullet and the per-spawn outcome convention; `docs/core/ROLES.md` (role table and policy pointer); `docs/core/BOOTSTRAP_GUIDE.md` — "Fallback model safety chain" (parenthetical only); `CHANGELOG.md` — the `## [0.52.0]` adopter note.
+
+---
+
+## DR-019 — Sub-agents carry no persistent memory; durable role knowledge lives only in the role spec, the reflection loop and Main-Agent brief injection
+
+**Date:** 2026-10-25
+
+**Informed by:** the operator decision of 2026-07-11 (sub-agents stay stateless; no per-role or shared memory store is introduced); the operator directive of 2026-10-25 (framework-operating knowledge must not live only in an operator's local memory); DR-013 (the portability test that sends a framework-portable lesson to a framework route, which is what put this ruling in front of the framework instead of leaving it in one operator's memory).
+
+**Tasks:** T-844 (this record)
+
+**Problem:** The stance that sub-agents carry no persistent memory was decided on 2026-07-11 and has since been applied in every spawn, but it was recorded only in one operator's local memory. An adopter, or a later maintainer, who asks "should the developer role keep notes between spawns?" would find no ruling in the repository and could reasonably re-open a settled question, or build a memory feature on the assumption that nothing had been decided. DR-013's portability test says such a lesson is equally true for any operator on any machine and therefore belongs in the framework.
+
+**What was considered:**
+1. **Per-role free-form auto-memory** — each role keeps its own notes between spawns, written and read by the sub-agent itself.
+2. **A shared cross-role memory store** — one store that every sub-agent can read from and append to, so a lesson one role learns reaches the others.
+3. **Adopted stance: stateless sub-agents** — no persistent memory of any kind for a sub-agent; durable role knowledge has exactly three homes (see "What was adopted").
+
+**Why rejected (1, 2):**
+- **It breaks the human-review gate of artifact-first truth.** The framework's premise is that state and rules become real only as reviewable artifacts (specs, briefs, `BACKLOG.md`, git). Free-form memory a sub-agent writes to itself changes its future behavior without passing any review: a person reading the diff of a spec or a brief would not see it.
+- **Behavior must be explainable from the brief plus the spec.** When a sub-agent's output surprises someone, the explanation has to be recoverable from the two inputs the Main Agent controls. Hidden accumulated notes add a third input nobody can enumerate, so a defect can no longer be traced or reproduced.
+- **Specs are shared across bootstrapped projects, so memory would leak project to project.** A role spec is copied into every adopter by the installer. A memory attached to the role, rather than to one project's artifacts, would carry one project's incidents, names and conventions into another's spawns.
+- **Ephemeral agents have no curator, so write-heavy memory rots.** A sub-agent lives for one slice. Nobody prunes, deduplicates or invalidates what it wrote, so entries go stale and contradict each other while still being trusted as if current.
+
+**What was adopted:** sub-agents are stateless. A durable lesson about how a role should behave reaches that role only by one of three routes, all of them reviewable: (a) an edit to the role spec in `.claude/agents/`, (b) a bounded proposal from the reflection loop in `docs/SKILL_OPTIMIZATION.md`, which lands in `SKILL_PROPOSALS/` and needs human review before it is applied, or (c) the Main Agent injecting the relevant content into the brief of the spawn that needs it. Each of the three is a text artifact in the repository or the brief, so it can be read, diffed and grepped. Which route a given lesson takes follows `docs/core/RCA_CODIFICATION.md`.
+
+**Scope limit:** this decision adds no validator check, no hook and no new file, and it governs sub-agents only. It does not restrict the Main Agent's or an operator's own per-operator memory, whose use DR-013 already bounds (route (c) there is residual, chosen by the portability test). It does not forbid a sub-agent from reading the repository's artifacts, which is how it gets its context. Reopen trigger: a role whose spec and briefs demonstrably cannot carry a lesson that recurs across spawns, shown by the reflection loop's evidence, not by preference.
+
+**Documented in:** `docs/core/DECISIONS.md` (this record); `docs/SKILL_OPTIMIZATION.md` (the reflection loop, one of the three routes); `docs/core/RCA_CODIFICATION.md` (routing of a durable lesson); `CHANGELOG.md` — the `## [0.52.0]` entry for T-844.

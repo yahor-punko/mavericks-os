@@ -28,6 +28,14 @@
 // Part 1 has a real leaked-value regression to detect (not just a fresh
 // "planning" that happened to already be correct).
 //
+// T-820 — the wave no longer advances in --close-session at all. The clears
+// above now happen ONLY in --close-wave (updateProcessStateJson(..., true)):
+// Part 1 asserts --close-session on a wave-complete state leaves wave,
+// wave_goal, wave_strategy_note and wave_status byte-unchanged, and that the
+// SAME clears then happen via --close-wave's agent path. Part 3 is the
+// interactive --close-session (no goal prompt replacement, no increment) plus
+// the --close-wave terminal path's goal prompt for wave N+1.
+//
 // Node built-ins only — no npm dependencies (see .claude/rules/scripts.md).
 
 const fs = require('node:fs');
@@ -38,6 +46,7 @@ const { spawnSync, spawn } = require('node:child_process');
 
 const SCRIPTS_DIR = __dirname;
 const CLOSE_SESSION_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-close-session.js');
+const CLOSE_WAVE_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-close-wave.js');
 
 const TMP_ROOT = path.join(os.tmpdir(), 't648-test-' + Date.now());
 fs.mkdirSync(TMP_ROOT, { recursive: true });
@@ -81,9 +90,9 @@ function runCloseSession(dir, argv = ['--non-interactive'], input = '') {
  *   line is written to stdin
  * @returns {Promise<{status: number|null, out: string}>}
  */
-function runCloseSessionInteractiveSequential(dir, argv, steps) {
+function runCloseSessionInteractiveSequential(dir, argv, steps, scriptPath = CLOSE_SESSION_PATH) {
   return new Promise((resolve, reject) => {
-    const child = spawn('node', [CLOSE_SESSION_PATH, ...argv], {
+    const child = spawn('node', [scriptPath, ...argv], {
       cwd: dir,
       env: { ...process.env, MAVERICKS_PROJECT_ROOT: dir, MAVERICKS_SCRIPTS: SCRIPTS_DIR },
     });
@@ -104,6 +113,32 @@ function runCloseSessionInteractiveSequential(dir, argv, steps) {
     child.on('exit', (code) => { clearTimeout(timer); resolve({ status: code, out }); });
     child.on('error', (err) => { clearTimeout(timer); reject(err); });
   });
+}
+
+// --close-wave commits, so its fixture needs a real (pinned-branch) git repo.
+function initGit(dir) {
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) if (k.startsWith('GIT_')) delete env[k];
+  const git = (...a) => spawnSync('git', a, { cwd: dir, env, encoding: 'utf8' });
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 'fixture@example.com');
+  git('config', 'user.name', 'Fixture');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'fixture init');
+}
+
+function runCloseWave(dir, argv, input = '') {
+  const r = spawnSync('node', [CLOSE_WAVE_PATH, ...argv], {
+    cwd: dir,
+    env: { ...process.env, MAVERICKS_PROJECT_ROOT: dir, MAVERICKS_SCRIPTS: SCRIPTS_DIR },
+    input,
+    encoding: 'utf8',
+  });
+  return { status: r.status, out: (r.stdout || '') + (r.stderr || '') };
+}
+
+function runCloseWaveInteractiveSequential(dir, argv, steps) {
+  return runCloseSessionInteractiveSequential(dir, argv, steps, CLOSE_WAVE_PATH);
 }
 
 function readState(dir) {
@@ -180,32 +215,52 @@ function buildFixture(dir, taskStatus, processStateOverrides) {
 // ---------------------------------------------------------------------------
 const completeDir = newFixtureDir('wave-complete');
 buildFixture(completeDir, 'merged');
+initGit(completeDir);
 
+// 1a — --close-session NEVER advances the wave (T-820): the same empty-Active-
+// tasks state that used to complete the wave now leaves every wave-scoped
+// field and the Active Wave heading byte-unchanged.
 const completeOut = runCloseSession(completeDir).out;
 assert.ok(
-  completeOut.includes('Wave 5 complete'),
-  `Part 1 FAIL: expected the close to announce "Wave 5 complete", got:\n${completeOut}`
+  completeOut.includes('Wave 5 \u2014 all tasks merged; wave stays open until the operator confirms the goal is met and --close-wave runs (goal: old goal)'),
+  `Part 1 FAIL: expected the T-820 announcement for an empty Active tasks section, got:\n${completeOut}`
 );
 
+const keptState = readState(completeDir);
+assert.strictEqual(keptState.wave, 5, `Part 1 FAIL: --close-session must not advance the wave, got ${keptState.wave}`);
+assert.strictEqual(keptState.wave_session, 4, `Part 1 FAIL: wave_session must still increment on --close-session, got ${keptState.wave_session}`);
+assert.strictEqual(keptState.wave_goal, 'old goal', `Part 1 FAIL: wave_goal must be untouched by --close-session, got ${JSON.stringify(keptState.wave_goal)}`);
+assert.strictEqual(keptState.wave_strategy_note, 'old note', `Part 1 FAIL: wave_strategy_note must be untouched by --close-session, got ${JSON.stringify(keptState.wave_strategy_note)}`);
+assert.strictEqual(keptState.wave_status, 'architect_reviewed', `Part 1 FAIL: wave_status must be untouched by --close-session, got ${JSON.stringify(keptState.wave_status)}`);
+assert.ok(
+  fs.readFileSync(path.join(completeDir, 'BACKLOG.md'), 'utf8').includes('## Active Wave'),
+  'Part 1 FAIL: the Active Wave heading must survive --close-session'
+);
+
+// 1b — the T-648/T-653 clears now belong to --close-wave. Kills the "clearing
+// removed entirely" mutant: without the waveComplete-gated clear in
+// updateProcessStateJson(), the three fields below would keep their old values.
+const closeWaveRun = runCloseWave(completeDir, ['--operator-confirmed', 'fixture statement']);
+assert.strictEqual(closeWaveRun.status, 0, `Part 1 FAIL: --close-wave expected exit 0, got ${closeWaveRun.status}:\n${closeWaveRun.out}`);
 const completeState = readState(completeDir);
-assert.strictEqual(completeState.wave, 6, `Part 1 FAIL: expected wave 5 → 6, got ${completeState.wave}`);
+assert.strictEqual(completeState.wave, 6, `Part 1 FAIL: expected wave 5 \u2192 6 via --close-wave, got ${completeState.wave}`);
 assert.strictEqual(
   completeState.wave_goal,
   null,
-  `Part 1 FAIL: expected wave_goal cleared to null on wave-complete close, got ${JSON.stringify(completeState.wave_goal)}`
+  `Part 1 FAIL: expected wave_goal cleared to null on --close-wave, got ${JSON.stringify(completeState.wave_goal)}`
 );
 assert.strictEqual(
   completeState.wave_strategy_note,
   null,
-  `Part 1 FAIL: expected wave_strategy_note cleared to null on wave-complete close, got ${JSON.stringify(completeState.wave_strategy_note)}`
+  `Part 1 FAIL: expected wave_strategy_note cleared to null on --close-wave, got ${JSON.stringify(completeState.wave_strategy_note)}`
 );
 assert.strictEqual(
   completeState.wave_status,
   'planning',
-  `Part 1 FAIL: expected wave_status reset to "planning" on wave-complete close, got ${JSON.stringify(completeState.wave_status)}`
+  `Part 1 FAIL: expected wave_status reset to "planning" on --close-wave, got ${JSON.stringify(completeState.wave_status)}`
 );
 
-console.log('Part 1 (wave-complete close clears wave_goal, wave_strategy_note AND resets wave_status) passed.');
+console.log('Part 1 (--close-session leaves wave fields untouched; --close-wave clears wave_goal, wave_strategy_note AND resets wave_status) passed.');
 
 // ---------------------------------------------------------------------------
 // Part 2 — the SAME fixture shape but mid-wave (one task still in_progress)
@@ -256,47 +311,55 @@ console.log('Part 2 (mid-wave close preserves wave_goal, wave_strategy_note AND 
 // doc comment for why a static piped-input buffer cannot deliver both.
 // ---------------------------------------------------------------------------
 async function runPart3() {
+  // 3a — interactive --close-session on a wave-complete state: a preset goal is
+  // NOT replaced (the replacement prompt moved to --close-wave), so only the
+  // "Next action" prompt and the push prompt fire; the wave does not advance.
   const interactiveDir = newFixtureDir('interactive-wave-complete');
   buildFixture(interactiveDir, 'merged');
+  initGit(interactiveDir);
 
   const { out: interactiveOut } = await runCloseSessionInteractiveSequential(interactiveDir, ['--interactive'], [
     { match: 'Next action [', answer: '' },
-    { match: 'Enter wave goal', answer: '' },
-    // A wave-complete close ends with a separate "Run git push?" prompt
-    // (its own readline interface, after PROCESS_STATE.json is already
-    // written) — decline it so the child process exits.
+    // An empty Active tasks section still ends with the separate "Run git
+    // push?" prompt — decline it so the child process exits.
     { match: 'Run git push?', answer: 'n' },
   ]);
 
   assert.ok(
-    interactiveOut.includes('Wave 5 complete'),
-    `Part 3 FAIL: expected the interactive close to announce "Wave 5 complete", got:\n${interactiveOut}`
+    interactiveOut.includes('wave stays open until the operator confirms the goal is met and --close-wave runs (goal: old goal)'),
+    `Part 3 FAIL: expected the interactive close to print the T-820 announcement, got:\n${interactiveOut}`
   );
   assert.ok(
-    interactiveOut.includes('Enter wave goal'),
-    `Part 3 FAIL: expected the wave-goal prompt to fire on a wave-complete close despite a preset goal, got:\n${interactiveOut}`
+    !interactiveOut.includes('Enter wave goal'),
+    `Part 3 FAIL: the wave-goal replacement prompt must not fire on --close-session when a goal is preset, got:\n${interactiveOut}`
   );
+  const keptInteractive = readState(interactiveDir);
+  assert.strictEqual(keptInteractive.wave, 5, `Part 3 FAIL: interactive --close-session must not advance the wave, got ${keptInteractive.wave}`);
+  assert.strictEqual(keptInteractive.wave_goal, 'old goal', `Part 3 FAIL: preset wave_goal must survive, got ${JSON.stringify(keptInteractive.wave_goal)}`);
+  assert.strictEqual(keptInteractive.wave_strategy_note, 'old note', `Part 3 FAIL: wave_strategy_note must survive, got ${JSON.stringify(keptInteractive.wave_strategy_note)}`);
+  assert.strictEqual(keptInteractive.wave_status, 'architect_reviewed', `Part 3 FAIL: wave_status must survive, got ${JSON.stringify(keptInteractive.wave_status)}`);
 
-  const interactiveState = readState(interactiveDir);
-  assert.strictEqual(interactiveState.wave, 6, `Part 3 FAIL: expected wave 5 → 6 interactively, got ${interactiveState.wave}`);
+  // 3b — the terminal --close-wave path: the typed wave number confirms, the
+  // "Goal for wave N+1" prompt fires, and an empty answer leaves wave_goal null
+  // (never restoring the stale value).
+  const { out: terminalOut } = await runCloseWaveInteractiveSequential(interactiveDir, ['--interactive'], [
+    { match: 'Type the wave number', answer: '5' },
+    { match: 'Goal for wave 6 (Enter to leave unset):', answer: '' },
+    { match: 'Run git push?', answer: 'n' },
+  ]);
+  assert.ok(terminalOut.includes('Wave 5 closed'), `Part 3 FAIL: expected the terminal close to finish, got:\n${terminalOut}`);
+  const terminalState = readState(interactiveDir);
+  assert.strictEqual(terminalState.wave, 6, `Part 3 FAIL: expected wave 5 \u2192 6 via the terminal path, got ${terminalState.wave}`);
   assert.strictEqual(
-    interactiveState.wave_goal,
+    terminalState.wave_goal,
     null,
-    `Part 3 FAIL: expected an empty prompt answer to leave wave_goal null (not restore "old goal"), got ${JSON.stringify(interactiveState.wave_goal)}`
+    `Part 3 FAIL: expected an empty prompt answer to leave wave_goal null (not restore "old goal"), got ${JSON.stringify(terminalState.wave_goal)}`
   );
-  assert.strictEqual(
-    interactiveState.wave_strategy_note,
-    null,
-    `Part 3 FAIL: expected wave_strategy_note cleared on the interactive wave-complete close, got ${JSON.stringify(interactiveState.wave_strategy_note)}`
-  );
-  assert.strictEqual(
-    interactiveState.wave_status,
-    'planning',
-    `Part 3 FAIL: expected wave_status reset to "planning" on the interactive wave-complete close, got ${JSON.stringify(interactiveState.wave_status)}`
-  );
+  assert.strictEqual(terminalState.wave_strategy_note, null, `Part 3 FAIL: expected wave_strategy_note cleared, got ${JSON.stringify(terminalState.wave_strategy_note)}`);
+  assert.strictEqual(terminalState.wave_status, 'planning', `Part 3 FAIL: expected wave_status reset to "planning", got ${JSON.stringify(terminalState.wave_status)}`);
 
-  console.log('Part 3 (interactive wave-complete close: prompt fires despite preset goal; empty answer leaves null; wave_status resets to planning) passed.');
-  console.log('\nAll T-648 wave_goal/wave_strategy_note scoping assertions passed.');
+  console.log('Part 3 (interactive --close-session: no increment, no goal replacement; --close-wave terminal path: goal prompt for N+1, empty answer leaves null) passed.');
+  console.log('\nAll T-648/T-820 wave_goal/wave_strategy_note scoping assertions passed.');
 }
 
 runPart3().catch((err) => {

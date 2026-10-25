@@ -83,6 +83,8 @@ assert.strictEqual(
 // ---------------------------------------------------------------------------
 // Case 3: wave-complete reset — current.next_action not empty, waveComplete: true
 //         →  result = null (when no nextAction passed)
+//         T-820: waveComplete: true is reached ONLY by --close-wave; Case 5
+//         below asserts that end to end and that --close-session never does.
 // ---------------------------------------------------------------------------
 writeState({
   wave: 2,
@@ -132,6 +134,64 @@ assert.strictEqual(
   'T-600 → qa → explicit override',
   'Case 4 FAIL: explicit nextAction should override current.next_action'
 );
+
+// ---------------------------------------------------------------------------
+// Case 5 (T-820): end to end on an empty Active tasks section with a leftover
+//         next_action pointer. --close-session preserves next_action and does
+//         NOT increment the wave; --close-wave is the only path that increments
+//         it and clears the pointer (the Case 3 contract, reached for real).
+// ---------------------------------------------------------------------------
+{
+  const { spawnSync } = require('node:child_process');
+  const dir = path.join(TMP_DIR, 'case5');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'BACKLOG.md'), '# BACKLOG\n\n## Active Wave\n\n', 'utf8');
+  fs.writeFileSync(path.join(dir, 'TASK_STATUS.md'), '# TASK_STATUS\n\n## Active tasks\n\n## Recently completed tasks\n', 'utf8');
+  fs.writeFileSync(path.join(dir, 'PROCESS_STATE.json'), JSON.stringify({
+    initiative: 'T-820 case 5',
+    stage: 'execution',
+    wave: 4,
+    wave_session: 2,
+    wave_status: 'execution',
+    wave_goal: 'case 5 goal',
+    parked_waves: [],
+    active_slices: [],
+    next_action: 'T-400 → developer → leftover pointer',
+    blocker: null,
+    stage_owner: 'main_agent',
+    last_task_id: 400,
+    last_updated: '2020-01-01',
+    deploy_contours: 0,
+    wave_summary: null,
+    rechecks: [],
+  }, null, 2) + '\n', 'utf8');
+  const cleanEnv = { ...process.env };
+  for (const k of Object.keys(cleanEnv)) if (k.startsWith('GIT_')) delete cleanEnv[k];
+  const git = (...a) => spawnSync('git', a, { cwd: dir, env: cleanEnv, encoding: 'utf8' });
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 'fixture@example.com');
+  git('config', 'user.name', 'Fixture');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'fixture init');
+
+  const env = { ...cleanEnv, MAVERICKS_PROJECT_ROOT: dir, MAVERICKS_SCRIPTS: __dirname };
+  const session = spawnSync('node', [path.join(__dirname, 'mavp-operator-close-session.js'), '--non-interactive'], { cwd: dir, env, input: '', encoding: 'utf8' });
+  assert.strictEqual(session.status, 0, `Case 5 FAIL: --close-session exited ${session.status}:\n${session.stdout}${session.stderr}`);
+  const afterSession = JSON.parse(fs.readFileSync(path.join(dir, 'PROCESS_STATE.json'), 'utf8'));
+  assert.strictEqual(afterSession.wave, 4, `Case 5 FAIL: --close-session must not increment the wave, got ${afterSession.wave}`);
+  assert.strictEqual(afterSession.wave_session, 3, `Case 5 FAIL: wave_session must tick 2 → 3, got ${afterSession.wave_session}`);
+  assert.strictEqual(
+    afterSession.next_action,
+    'T-400 → developer → leftover pointer',
+    `Case 5 FAIL: --close-session must preserve next_action on an empty Active tasks section, got ${JSON.stringify(afterSession.next_action)}`
+  );
+
+  const wave = spawnSync('node', [path.join(__dirname, 'mavp-operator-close-wave.js'), '--operator-confirmed', 'case 5 statement'], { cwd: dir, env, input: '', encoding: 'utf8' });
+  assert.strictEqual(wave.status, 0, `Case 5 FAIL: --close-wave exited ${wave.status}:\n${wave.stdout}${wave.stderr}`);
+  const afterWave = JSON.parse(fs.readFileSync(path.join(dir, 'PROCESS_STATE.json'), 'utf8'));
+  assert.strictEqual(afterWave.wave, 5, `Case 5 FAIL: --close-wave must increment the wave to 5, got ${afterWave.wave}`);
+  assert.strictEqual(afterWave.next_action, null, `Case 5 FAIL: --close-wave must clear next_action, got ${JSON.stringify(afterWave.next_action)}`);
+}
 
 // ---------------------------------------------------------------------------
 // Cleanup

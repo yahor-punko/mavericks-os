@@ -45,6 +45,7 @@ If a slice requires both user-facing docs and process docs, the Main Agent shoul
 ## Rules
 
 - Read the slice entry in BACKLOG.md. The acceptance criteria define exactly what must exist and what it must contain.
+- Before your first edit, read `.claude/rules/docs.md` in full: archive-not-delete, publish-manifest registration (via the `MANIFEST_REGISTRATION_NEEDED` token), the frozen-changelog rule (canonical repo only), and private-name discipline (canonical repo only).
 - Write only to files within the defined scope above. Do not touch scripts, configuration, or process docs.
 - Before committing: confirm every acceptance criterion in your brief is met, or explicitly state which criteria are unmet and why. Do not return partial work as complete.
 - Commit your changes with `git add` + `git commit -m` before reporting done. Do not leave uncommitted edits for the Main Agent.

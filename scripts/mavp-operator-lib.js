@@ -1354,7 +1354,7 @@ function collectOperatorData() {
 
   const deployContours = processState._deployContours || 0;
   const deployPendingTasks = deployContours >= 2
-    ? parseTasksWithRepo(taskStatusContent, backlogContent).filter(t => t.status === 'merged' || t.status === 'deployed_dev')
+    ? parseTasksWithRepo(taskStatusContent, backlogContent).filter(t => (t.status === 'merged' || t.status === 'deployed_dev') && !isDeployOptOut(t))
     : [];
 
   // Compute due/overdue rechecks from PROCESS_STATE.json rechecks[] registry (read-only).
@@ -3056,7 +3056,7 @@ function summarizeTrajectories({ dir }) {
  *
  * @param {string} taskStatusMarkdown - Content of TASK_STATUS.md
  * @param {string} backlogMarkdown    - Content of BACKLOG.md
- * @returns {Array<{id:string,title:string,status:string,repo:string|null}>}
+ * @returns {Array<{id:string,title:string,status:string,repo:string|null,deploy:'none'|null}>}
  */
 function parseTasksWithRepo(taskStatusMarkdown, backlogMarkdown) {
   const lines = taskStatusMarkdown.split(/\r?\n/);
@@ -3071,8 +3071,9 @@ function parseTasksWithRepo(taskStatusMarkdown, backlogMarkdown) {
   const section = lines.slice(start + 1, end).join('\n');
   const blocks = section.split(/\n(?=###\s+T-)/).map((b) => b.trim()).filter(Boolean);
 
-  // Build repo map from BACKLOG.md
+  // Build repo map (and the BACKLOG-only `Deploy:` opt-out map, T-815) from BACKLOG.md
   const backlogRepoMap = {};
+  const backlogDeployMap = {};
   if (backlogMarkdown) {
     const bblocks = backlogMarkdown.split(/\n(?=###\s+T-)/).filter(Boolean);
     for (const block of bblocks) {
@@ -3080,6 +3081,9 @@ function parseTasksWithRepo(taskStatusMarkdown, backlogMarkdown) {
       if (!idMatch) continue;
       const repoMatch = block.match(/^- \*\*Repos?:\*\*\s+(.+)$/m);
       if (repoMatch) backlogRepoMap[idMatch[1]] = repoMatch[1].trim();
+      const deployMatch = block.match(/^- \*\*Deploy:\*\*\s+(.+)$/m);
+      const deployValue = deployMatch ? normalizeDeployField(deployMatch[1]) : null;
+      if (deployValue) backlogDeployMap[idMatch[1]] = deployValue;
     }
   }
 
@@ -3097,8 +3101,29 @@ function parseTasksWithRepo(taskStatusMarkdown, backlogMarkdown) {
       title: headingMatch ? headingMatch[2].trim() : 'unknown',
       status: statusMatch ? statusMatch[1].trim() : 'unknown',
       repo,
+      deploy: backlogDeployMap[id] || null,
     };
   }).filter(Boolean);
+}
+
+/**
+ * T-815: normalize the raw value of a BACKLOG-only `- **Deploy:**` field.
+ * Returns the string 'none' when the trimmed value equals "none"
+ * (case-insensitive); every other value (including empty) returns null —
+ * other values are reserved and deliberately ignored. Reporting-only: this
+ * never gates a status transition and the validator does not read it.
+ *
+ * @param {string|null|undefined} raw
+ * @returns {'none'|null}
+ */
+function normalizeDeployField(raw) {
+  if (typeof raw !== 'string') return null;
+  return raw.trim().toLowerCase() === 'none' ? 'none' : null;
+}
+
+/** True when a parsed task or backlog-meta entry carries `Deploy: none`. */
+function isDeployOptOut(entry) {
+  return !!entry && entry.deploy === 'none';
 }
 
 /**
@@ -3122,6 +3147,7 @@ function buildDeployQueue(activeTasks, backlogMeta, deployContours) {
   if (deployContours <= 1) return [];
   return activeTasks
     .filter((t) => t.status === 'merged' || deployedStatuses.has(t.status))
+    .filter((t) => !isDeployOptOut(backlogMeta[t.id]))
     .map((t) => {
       const bm = backlogMeta[t.id] || {};
       const prodPrerequisites = bm.prodPrerequisites || [];
@@ -3152,6 +3178,7 @@ function getDeployPendingForRepo(tasks, repoName, deployContours) {
   const name = repoName.trim();
   return tasks.filter((t) => {
     if (t.status !== 'merged') return false;
+    if (isDeployOptOut(t)) return false;
     if (!t.repo) return false;
     const repos = t.repo.split(',').map((r) => r.trim());
     return repos.includes(name);
@@ -4130,18 +4157,23 @@ function resolveModuleRegistryPath(root) {
 
 /**
  * Parse the optional `doc_limits` module field (T-791): a comma-separated list
- * of `<path> max_chars: <N> (T-NNN)` entries, kept on its own field line so the
- * comma-split of `context_docs` is untouched. Entries that do not match the
- * grammar are skipped (never thrown on).
+ * of `<path> max_chars: <N> (<owner>)` entries, kept on its own field line so the
+ * comma-split of `context_docs` is untouched. The owner is any single
+ * whitespace-free token in the trailing parentheses (`T-NNN`, `DR-NNN`, or a
+ * short handle such as `docs-owner`; T-805) and names who removes the
+ * exception. Entries that do not match the grammar are skipped (never thrown on).
  *
  * @param {string} raw - The text after `- **doc_limits:**`.
- * @returns {Object<string, {max_chars:number, task:string}>}
+ * @returns {Object<string, {max_chars:number, task:string, owner:string}>} `task`
+ *   mirrors `owner` for backward compatibility.
  */
 function parseDocLimits(raw) {
   const limits = {};
   for (const part of String(raw || '').split(',')) {
-    const m = part.trim().match(/^`?([^\s`]+)`?\s+max_chars:\s*(\d+)\s*\((T-\d+)\)$/);
-    if (m) limits[m[1]] = { max_chars: Number(m[2]), task: m[3] };
+    const m = part.trim().match(/^`?([^\s`]+)`?\s+max_chars:\s*(\d+)\s*\(([^\s()]+)\)$/);
+    // `owner` is the parenthesised token verbatim; `task` mirrors it so every
+    // existing consumer (the validator's messages) keeps working unchanged.
+    if (m) limits[m[1]] = { max_chars: Number(m[2]), task: m[3], owner: m[3] };
   }
   return limits;
 }
@@ -4155,7 +4187,7 @@ function parseDocLimits(raw) {
  * @param {string} content - Raw docs/MODULES.md text.
  * @returns {Object<string, {label:string, repos:string[], context_docs:string[],
  *   default_owner:string, qa_checklist:string[],
- *   doc_limits:Object<string,{max_chars:number, task:string}>}>}
+ *   doc_limits:Object<string,{max_chars:number, task:string, owner:string}>}>}
  */
 function parseModuleRegistryFromText(content) {
   try {
@@ -4186,10 +4218,14 @@ function parseModuleRegistryFromText(content) {
       for (const line of section.split(/\r?\n/)) {
         if (/^- \*\*qa_checklist:\*\*/.test(line)) { inQa = true; continue; }
         if (inQa) {
-          if (/^-\s+/.test(line)) {
-            qaLines.push(line.replace(/^-\s+/, '').trim());
-          } else if (/^##/.test(line) || (/^- \*\*/.test(line) && !line.startsWith('  '))) {
+          // T-805: the terminator runs BEFORE the item branch — a top-level
+          // `- **<field>:**` line or a `##` heading ends the list, so a
+          // following `- **doc_limits:** ...` is never swallowed as an item.
+          // Items may be indented (the documented form) or unindented.
+          if (/^##/.test(line) || /^- \*\*/.test(line)) {
             inQa = false;
+          } else if (/^\s*-\s+/.test(line)) {
+            qaLines.push(line.replace(/^\s*-\s+/, '').trim());
           }
         }
       }
@@ -4219,7 +4255,7 @@ function parseModuleRegistryFromText(content) {
  * @param {string} [root] - Optional root override (used by tests). Defaults to ROOT.
  * @returns {Object<string, {label:string, repos:string[], context_docs:string[],
  *   default_owner:string, qa_checklist:string[],
- *   doc_limits:Object<string,{max_chars:number, task:string}>}>}
+ *   doc_limits:Object<string,{max_chars:number, task:string, owner:string}>}>}
  */
 function parseModuleRegistry(root) {
   try {
@@ -4790,7 +4826,8 @@ function computeMustRead(root, activeSlices) {
     if (Array.isArray(slice.context_docs)) contextDocs.push(...slice.context_docs);
   }
   return Array.from(new Set([...changedFiles, ...contextDocs]))
-    .filter((p) => !MUST_READ_EXCLUDED_PATHS.includes(p));
+    .filter((p) => !MUST_READ_EXCLUDED_PATHS.includes(p))
+    .filter((p) => !MUST_READ_EXCLUDED_PREFIXES.some((prefix) => p.startsWith(prefix)));
 }
 
 /**
@@ -4806,6 +4843,17 @@ const MUST_READ_EXCLUDED_PATHS = Object.freeze([
   'PROCESS_STATE.json',
   'PROCESS_STATE.md',
   'EXECUTION_LOG.md',
+]);
+
+/**
+ * T-805 — repo-root-relative path PREFIXES that never appear in `must_read`
+ * (nor in `must_read_oversized` / `must_read_framework`, which are derived from
+ * computeMustRead's output). Archived documents are history, not reading. A
+ * plain `startsWith` on the root-relative path, so `docs/archived-notes.md` and
+ * a nested `sub/docs/archive/y.md` are unaffected.
+ */
+const MUST_READ_EXCLUDED_PREFIXES = Object.freeze([
+  'docs/archive/',
 ]);
 
 /**
@@ -5782,8 +5830,1079 @@ function collectAlwaysLoadedContext(root, opts = {}) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Adopter feedback items (T-828) — schema, parser/renderer, intake resolver.
+// templates/FEEDBACK_ITEM_TEMPLATE.md is the single source of the item format;
+// the constants below mirror its field and section names.
+// ---------------------------------------------------------------------------
+
+const FEEDBACK_SCHEMA_VERSION = 1;
+const FEEDBACK_ALIAS_PATTERN = /^[a-z][a-z0-9]{1,23}$/;
+const FEEDBACK_KINDS = ['bug', 'proposal', 'question'];
+const FEEDBACK_SEVERITIES = ['blocking', 'high', 'normal', 'low'];
+const FEEDBACK_CHANNELS = ['local', 'github'];
+// Canonical bold-field order; renderFeedbackItem() writes in this order.
+const FEEDBACK_FIELD_ORDER = [
+  'Schema', 'Item', 'Adopter', 'Framework version', 'Kind', 'Severity', 'Area', 'Summary',
+  'Submitted', 'Channel', 'Issue', 'Workaround', 'Disposition', 'Ships in',
+  'Retire workaround', 'Triaged', 'Published', 'Acknowledged',
+];
+// Always rendered even when empty; every other field is omitted when empty.
+const FEEDBACK_ALWAYS_RENDERED_FIELDS = [
+  'Schema', 'Item', 'Adopter', 'Framework version', 'Kind', 'Severity', 'Area',
+  'Submitted', 'Channel',
+];
+const FEEDBACK_SECTION_ORDER = ['Observed', 'Evidence', 'Proposal', 'Answer'];
+const FEEDBACK_ITEM_FILE_PATTERN = /^([a-z][a-z0-9]{1,23})-(\d{1,9})\.md$/;
+
+// Linear-time heading and body trimming for feedback items (T-840). Item text can come from an
+// outside party (a pulled GitHub issue body), so none of this may use a lazy group followed by a
+// trailing-whitespace anchor: that shape retries the anchor at every position inside a long run of
+// whitespace and is quadratic. `trimEnd()` strips exactly the characters `\s` matches.
+const NOT_DOT_CHAR = /[\r\n\u2028\u2029]/; // the characters a bare `.` does not match
+
+/**
+ * Decide whether `line` is a markdown heading of `level` (1 for `# `, 2 for `## `) and return its
+ * name, or null. Matches exactly what the former pattern (hashes, whitespace, a lazy name, then
+ * trailing whitespace to the end of the line) did: the name runs from the first non-whitespace
+ * character to the last one and may not contain a line terminator (a lone carriage return inside
+ * the name is not a heading). A line that is only the hashes followed by whitespace is a heading
+ * when that whitespace runs to two or more characters and one of those after the first is not a
+ * line terminator — the old pattern read one such character as the name; the returned name is that
+ * character, never a known section. One space, or a space and a carriage return, is not a heading.
+ *
+ * @param {string} line
+ * @param {number} level
+ * @returns {string|null}
+ */
+function matchMarkdownHeading(line, level) {
+  if (!line.startsWith('#'.repeat(level)) || !/\s/.test(line.charAt(level))) return null;
+  const tail = line.slice(level);
+  const first = tail.search(/\S/);
+  if (first === -1) {
+    for (let i = tail.length - 1; i >= 1; i--) if (!NOT_DOT_CHAR.test(tail[i])) return tail[i];
+    return null;
+  }
+  const name = tail.slice(first).trimEnd();
+  return NOT_DOT_CHAR.test(name) ? null : name;
+}
+
+// Split a title heading's text on its first whitespace-flanked em dash into [id, title], or null.
+// Same match as the former lazy-name pattern for text produced by matchMarkdownHeading, without its
+// quadratic retries over a long whitespace run.
+function splitFeedbackTitle(text) {
+  const ws = (c) => c !== undefined && /\s/.test(c);
+  let idx = text.indexOf('—', 2);
+  while (idx !== -1) {
+    if (ws(text[idx - 1]) && ws(text[idx + 1])) {
+      let nameEnd = idx - 1;
+      while (nameEnd > 1 && ws(text[nameEnd - 1])) nameEnd--;
+      const rest = text.slice(idx + 1);
+      const restStart = rest.search(/\S/);
+      if (restStart === -1) return null;
+      return [text.slice(0, nameEnd), rest.slice(restStart)];
+    }
+    idx = text.indexOf('—', idx + 1);
+  }
+  return null;
+}
+
+// Strip leading newlines and all trailing whitespace; identical to the former global replace of
+// leading newlines or trailing whitespace with nothing.
+function trimFeedbackBody(text) {
+  let i = 0;
+  while (text.charCodeAt(i) === 10) i++;
+  return text.slice(i).trimEnd();
+}
+
+/**
+ * Parse a feedback item document. Bold-field idiom (`- **Name:** value`) in the
+ * header region (before the first `## ` heading outside a code fence); fields
+ * not in FEEDBACK_FIELD_ORDER are ignored; sections are the `## Name` headings
+ * in FEEDBACK_SECTION_ORDER (headings inside fenced code blocks do not split).
+ * Throws when Schema is missing/non-numeric or above FEEDBACK_SCHEMA_VERSION.
+ *
+ * @param {string} markdown
+ * @returns {{title: string|null, id: string|null, fields: Object<string,string>, sections: Object<string,string>}}
+ */
+function parseFeedbackItem(markdown) {
+  const lines = String(markdown || '').split('\n');
+  let title = null;
+  let titleId = null;
+  const fields = {};
+  const sections = {};
+  let currentSection = null;
+  let seenSection = false;
+  let sectionLines = [];
+  let inFence = false;
+  const flush = () => {
+    if (currentSection !== null) sections[currentSection] = trimFeedbackBody(sectionLines.join('\n'));
+    sectionLines = [];
+  };
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
+    if (!inFence) {
+      const h2 = matchMarkdownHeading(line, 2);
+      if (h2 !== null) {
+        flush();
+        seenSection = true;
+        currentSection = FEEDBACK_SECTION_ORDER.includes(h2) ? h2 : null;
+        continue;
+      }
+    }
+    if (seenSection) {
+      if (currentSection !== null) sectionLines.push(line);
+      continue;
+    }
+    if (title === null && !inFence) {
+      const h1 = matchMarkdownHeading(line, 1);
+      if (h1 !== null) {
+        const parts = splitFeedbackTitle(h1);
+        if (parts) {
+          titleId = parts[0].trim();
+          title = parts[1].trim();
+        } else {
+          title = h1.trim();
+        }
+        continue;
+      }
+    }
+    const f = line.match(/^\s*-\s+\*\*([^*:]+):\*\*[ \t]*(.*)$/);
+    if (f) {
+      const name = f[1].trim();
+      if (FEEDBACK_FIELD_ORDER.includes(name) && !(name in fields)) fields[name] = f[2].trim();
+    }
+  }
+  flush();
+  const schemaRaw = fields.Schema;
+  if (schemaRaw === undefined || !/^\d+$/.test(schemaRaw)) {
+    throw new Error(`feedback item has no numeric Schema field (this build reads schema version ${FEEDBACK_SCHEMA_VERSION})`);
+  }
+  if (Number(schemaRaw) > FEEDBACK_SCHEMA_VERSION) {
+    throw new Error(
+      `feedback item uses schema version ${schemaRaw}, newer than the supported version ${FEEDBACK_SCHEMA_VERSION}; update the framework to read it`
+    );
+  }
+  return { title, id: fields.Item || titleId, fields, sections };
+}
+
+/**
+ * Render a feedback item to markdown. Inverse of parseFeedbackItem for known
+ * fields. `item.id` (or fields.Item) heads the title line.
+ *
+ * @param {{title: string, id?: string, fields?: Object<string,string>, sections?: Object<string,string>}} item
+ * @returns {string}
+ */
+function renderFeedbackItem(item) {
+  const fields = Object.assign({}, item.fields || {});
+  const id = item.id || fields.Item || '';
+  if (!fields.Item && id) fields.Item = id;
+  if (!fields.Schema) fields.Schema = String(FEEDBACK_SCHEMA_VERSION);
+  const out = [`# ${id} — ${item.title || ''}`, ''];
+  for (const name of FEEDBACK_FIELD_ORDER) {
+    const value = fields[name] === undefined || fields[name] === null ? '' : String(fields[name]).trim();
+    if (!value && !FEEDBACK_ALWAYS_RENDERED_FIELDS.includes(name)) continue;
+    out.push(value ? `- **${name}:** ${value}` : `- **${name}:**`);
+  }
+  const sections = item.sections || {};
+  for (const name of FEEDBACK_SECTION_ORDER) {
+    const body = sections[name] === undefined || sections[name] === null ? '' : trimFeedbackBody(String(sections[name]));
+    if (!body && name === 'Answer') continue;
+    out.push('', `## ${name}`, '', body);
+  }
+  return out.join('\n').trimEnd() + '\n';
+}
+
+/**
+ * Set (replace or insert) one known bold field in raw feedback markdown while
+ * leaving every other byte untouched. An insert goes after the last header
+ * bullet that precedes the field in FEEDBACK_FIELD_ORDER.
+ */
+function setFeedbackField(markdown, fieldName, value) {
+  const lines = String(markdown).split('\n');
+  const bullet = `- **${fieldName}:** ${value}`;
+  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const fieldRe = new RegExp(`^\\s*-\\s+\\*\\*${escaped}:\\*\\*`);
+  const firstH2 = lines.findIndex((l) => /^##\s/.test(l));
+  const headerEnd = firstH2 === -1 ? lines.length : firstH2;
+  for (let i = 0; i < headerEnd; i++) {
+    if (fieldRe.test(lines[i])) {
+      lines[i] = bullet;
+      return lines.join('\n');
+    }
+  }
+  const rank = FEEDBACK_FIELD_ORDER.indexOf(fieldName);
+  let insertAt = -1;
+  for (let i = 0; i < headerEnd; i++) {
+    const m = lines[i].match(/^\s*-\s+\*\*([^*:]+):\*\*/);
+    if (!m) continue;
+    const r = FEEDBACK_FIELD_ORDER.indexOf(m[1].trim());
+    if (r !== -1 && r < rank) insertAt = i + 1;
+  }
+  if (insertAt === -1) insertAt = headerEnd;
+  lines.splice(insertAt, 0, bullet);
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Workaround retirement (T-831) — tag convention, CHANGELOG supersedes phrases,
+// harness memory directory resolver, retirability classifier. Read-only helpers
+// behind `--migrate` (scripts/mavp-operator-migrate.js) and the post-`--update`
+// advisory in scripts/mavp-install.js.
+// ---------------------------------------------------------------------------
+
+// The literal tag an adopter places beside a stop-gap: `mavp-workaround:<alias>-NNN`
+// (the same shape `--feedback --file` records in an item's Workaround field).
+// Capture group 1 is the item id. Not global: build a `g` copy to scan a line.
+const WORKAROUND_TAG_PATTERN = /mavp-workaround:([a-z][a-z0-9]{1,23}-\d+)/;
+
+/**
+ * Read the `**Supersedes adopter workarounds:**` lines out of CHANGELOG text.
+ * Phrases are the backticked spans following the marker on that line; each belongs
+ * to the nearest preceding `## [x.y.z]` or `## [Unreleased]` heading (reported as
+ * version "Unreleased"). Sections with no such line are omitted.
+ *
+ * @param {string} changelogText
+ * @returns {Array<{version: string, phrases: string[]}>}
+ */
+function parseChangelogSupersedes(changelogText) {
+  const out = [];
+  let current = null;
+  for (const line of String(changelogText || '').split('\n')) {
+    const heading = line.match(/^##\s+\[([^\]]+)\]/);
+    if (heading) {
+      const label = heading[1].trim();
+      if (/^unreleased$/i.test(label)) current = 'Unreleased';
+      else if (/^\d+\.\d+\.\d+$/.test(label)) current = label;
+      else current = null;
+      continue;
+    }
+    if (current === null) continue;
+    const marker = line.indexOf('**Supersedes adopter workarounds:**');
+    if (marker === -1) continue;
+    const phrases = [];
+    for (const m of line.slice(marker).matchAll(/`([^`]+)`/g)) {
+      const phrase = m[1].trim();
+      if (phrase) phrases.push(phrase);
+    }
+    if (phrases.length === 0) continue;
+    const existing = out.find((s) => s.version === current);
+    if (existing) existing.phrases.push(...phrases);
+    else out.push({ version: current, phrases });
+  }
+  return out;
+}
+
+/**
+ * The harness's per-project memory directory: <home>/.claude/projects/<slug>/memory,
+ * where <slug> is the absolute project root with every path separator replaced
+ * by a hyphen. Returns null when that directory does not exist. `options.home`
+ * overrides the home directory (test hook); otherwise os.homedir() is used.
+ *
+ * @param {string} projectRoot
+ * @param {{home?: string}} [options]
+ * @returns {string|null}
+ */
+function resolveHarnessMemoryDir(projectRoot, options = {}) {
+  const home = options.home || os.homedir();
+  const slug = path.resolve(String(projectRoot)).replace(/[\\/]/g, '-');
+  const dir = path.join(home, '.claude', 'projects', slug, 'memory');
+  try {
+    return fs.statSync(dir).isDirectory() ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Classify one listIntakeItems() entry (`{id, item}`) by whether its fix is installed
+ * at `installedVersion`, regardless of whether the item records a Workaround.
+ * Returns null for an unreadable entry (`item` null). Status:
+ *   retire        Disposition is `fixed-in T-NNN` and Ships in is `released in V`
+ *                 with V semver-less-or-equal to installedVersion
+ *   keep-pending  fixed, but not released yet or released after installedVersion
+ *   keep-open     any other disposition (or none)
+ * `shipsIn` is the released version, `unreleased`, or null when unknown.
+ * `--migrate` uses this per tag it finds; the aggregate below filters on Workaround.
+ */
+function classifyFeedbackItem(entry, installedVersion) {
+  if (!entry || !entry.item) return null;
+  const fields = entry.item.fields || {};
+  const fixed = String(fields.Disposition || '').trim().match(/^fixed-in (T-\d+)\b/);
+  let status = 'keep-open';
+  let shipsIn = null;
+  if (fixed) {
+    const ships = String(fields['Ships in'] || '').trim();
+    const released = ships.match(/^released in (\d+\.\d+\.\d+)/);
+    if (released) {
+      shipsIn = released[1];
+      status = semverCompare(released[1], String(installedVersion)) <= 0 ? 'retire' : 'keep-pending';
+    } else {
+      shipsIn = /^unreleased/i.test(ships) ? 'unreleased' : null;
+      status = 'keep-pending';
+    }
+  }
+  return {
+    id: entry.id,
+    tag: `mavp-workaround:${entry.id}`,
+    status,
+    fixedIn: fixed ? fixed[1] : null,
+    shipsIn,
+    // Additive (T-835): the GitHub issue a posted item tracks as `<slug>#N`, or null.
+    issue: (() => {
+      if (String(fields.Channel || '').trim() !== 'github') return null;
+      const ref = parseFeedbackIssueRef(fields.Issue);
+      return ref ? `${ref.slug}#${ref.number}` : null;
+    })(),
+  };
+}
+
+/**
+ * Classify the TAGGED items among `items` (listIntakeItems() entries) by whether
+ * the workaround they track is retirable at `installedVersion`. An item is tagged
+ * when its Workaround field is non-empty; items without one and unreadable
+ * entries are omitted from the result. Status values are those of
+ * classifyFeedbackItem(): `retire`, `keep-pending`, `keep-open`.
+ *
+ * @returns {Array<{id: string, tag: string, status: 'retire'|'keep-pending'|'keep-open', fixedIn: string|null, shipsIn: string|null}>}
+ */
+function computeRetirableWorkarounds(items, installedVersion) {
+  const results = [];
+  for (const entry of items || []) {
+    if (!entry || !entry.item) continue;
+    if (!String((entry.item.fields || {}).Workaround || '').trim()) continue;
+    results.push(classifyFeedbackItem(entry, installedVersion));
+  }
+  return results;
+}
+
+/** Per-user feedback inbox: MAVERICKS_INTAKE_DIR when set, else <home>/.mavericks-intake. */
+function resolveIntakeDir() {
+  const override = process.env.MAVERICKS_INTAKE_DIR;
+  if (override) return path.resolve(override);
+  return path.join(os.homedir(), '.mavericks-intake');
+}
+
+/**
+ * List the feedback items in an intake directory, sorted by alias then number.
+ * Returns [] when the directory does not exist. Each entry:
+ * {id, alias, number, file, path, item, error} — `item` is the parsed item or
+ * null with `error` set when the file cannot be parsed (e.g. newer schema).
+ */
+function listIntakeItems(dir) {
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const entries = [];
+  for (const file of names) {
+    const m = file.match(FEEDBACK_ITEM_FILE_PATTERN);
+    if (!m) continue;
+    const full = path.join(dir, file);
+    let item = null;
+    let error = null;
+    try {
+      item = parseFeedbackItem(fs.readFileSync(full, 'utf8'));
+    } catch (err) {
+      error = err.message;
+    }
+    entries.push({ id: `${m[1]}-${m[2]}`, alias: m[1], number: Number(m[2]), file, path: full, item, error });
+  }
+  entries.sort((a, b) => (a.alias < b.alias ? -1 : a.alias > b.alias ? 1 : a.number - b.number));
+  return entries;
+}
+
+/**
+ * Allocate the next `<alias>-NNN` id in `dir` (highest existing N for the alias
+ * plus one, zero-padded to 3 digits) and create its file with an exclusive-create
+ * open (flag `wx`), re-scanning and retrying on collision so two concurrent
+ * allocations never share an id. `render` (optional) is called with the id and
+ * its result is written into the reserved file; without it an empty file
+ * reserves the id.
+ *
+ * @returns {{id: string, path: string}}
+ */
+function allocateFeedbackItemId(dir, alias, render) {
+  if (!FEEDBACK_ALIAS_PATTERN.test(String(alias))) {
+    throw new Error(`invalid feedback alias "${alias}" (must match ${FEEDBACK_ALIAS_PATTERN})`);
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    let highest = 0;
+    for (const file of fs.readdirSync(dir)) {
+      const m = file.match(FEEDBACK_ITEM_FILE_PATTERN);
+      if (m && m[1] === alias) highest = Math.max(highest, Number(m[2]));
+    }
+    const id = `${alias}-${String(highest + 1).padStart(3, '0')}`;
+    const target = path.join(dir, `${id}.md`);
+    let fd;
+    try {
+      fd = fs.openSync(target, 'wx');
+    } catch (err) {
+      if (err.code === 'EEXIST') continue;
+      throw err;
+    }
+    try {
+      if (typeof render === 'function') fs.writeSync(fd, render(id));
+    } catch (err) {
+      fs.closeSync(fd);
+      fs.unlinkSync(target);
+      throw err;
+    }
+    fs.closeSync(fd);
+    return { id, path: target };
+  }
+  throw new Error(`could not allocate a feedback id for alias ${alias} after 1000 attempts`);
+}
+
+// ---------------------------------------------------------------------------
+// Session-end feedback capture (T-833) — note lines, drafts.
+// A note is an EXECUTION_LOG.md list-item line whose text, after the bullet and
+// an optional YYYY-MM-DD date, begins with the literal token `mavp-feedback:`
+// followed by a short description and optional parenthesised hints
+// `(area: <text>; kind: bug|proposal|question)`. The pattern is anchored to that
+// line-initial position, so a mid-line mention never matches. Drafts live in
+// `<inbox>/drafts/<alias>-draft-<n>.md` and are not items: no id is allocated
+// until `--feedback --file <draft>` submits one.
+// ---------------------------------------------------------------------------
+
+// Not global, one line at a time. Group 1 = optional date, group 2 = description + hints.
+const FEEDBACK_NOTE_PATTERN = /^[ \t]*[-*+][ \t]+(?:(\d{4}-\d{2}-\d{2})[ \t]*[:–—-]?[ \t]*)?mavp-feedback:[ \t]*(\S.*?)[ \t]*$/;
+const FEEDBACK_DRAFT_FILE_PATTERN = /^([a-z][a-z0-9]{1,23})-draft-(\d{1,9})\.md$/;
+
+/**
+ * Parse the feedback note lines out of a text (an EXECUTION_LOG.md body or the
+ * added lines of its diff). `line` is the 1-based line number within `text`.
+ * A trailing parenthetical is read as hints only when every `;`-separated part
+ * is `area: <text>` or `kind: <text>`; `kind` must be one of FEEDBACK_KINDS
+ * (anything else yields null). Notes with an empty title are dropped.
+ *
+ * @param {string} text
+ * @returns {Array<{line: number, title: string, area: string|null, kind: string|null}>}
+ */
+function parseFeedbackNotes(text) {
+  const notes = [];
+  String(text || '').split(/\r?\n/).forEach((raw, idx) => {
+    const m = raw.match(FEEDBACK_NOTE_PATTERN);
+    if (!m) return;
+    let title = m[2];
+    let area = null;
+    let kind = null;
+    const hint = title.match(/\(([^()]*)\)\s*$/);
+    if (hint) {
+      const parts = hint[1].split(';').map((p) => p.trim()).filter(Boolean);
+      const parsed = parts.map((p) => p.match(/^(area|kind)\s*:\s*(\S.*)$/i));
+      if (parts.length > 0 && parsed.every(Boolean)) {
+        for (const pm of parsed) {
+          const key = pm[1].toLowerCase();
+          const value = pm[2].trim();
+          if (key === 'area') area = value;
+          else kind = FEEDBACK_KINDS.includes(value.toLowerCase()) ? value.toLowerCase() : null;
+        }
+        title = title.slice(0, hint.index).trim();
+      }
+    }
+    title = title.replace(/\s+/g, ' ').trim();
+    if (!title) return;
+    notes.push({ line: idx + 1, title, area, kind });
+  });
+  return notes;
+}
+
+/** `<inbox>/drafts` — where `--feedback --draft` writes. */
+function resolveFeedbackDraftsDir(inbox) {
+  return path.join(inbox || resolveIntakeDir(), 'drafts');
+}
+
+function feedbackValueOrEmpty(value) {
+  const v = String(value || '').trim();
+  return v.startsWith('<') && v.endsWith('>') ? '' : v;
+}
+
+/**
+ * List one alias's drafts, sorted by draft number. Each entry:
+ * {id, alias, number, file, path, title, summary, observed, error} — `summary` is
+ * the optional Summary field ('' when absent or an unfilled placeholder),
+ * `observed` the first non-empty line of the Observed section outside HTML
+ * comments. An unparseable draft is still listed (title '', `error` set).
+ */
+function listFeedbackDrafts(inbox, alias) {
+  const dir = resolveFeedbackDraftsDir(inbox);
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const entries = [];
+  for (const file of names) {
+    const m = file.match(FEEDBACK_DRAFT_FILE_PATTERN);
+    if (!m || m[1] !== alias) continue;
+    const full = path.join(dir, file);
+    const entry = { id: `${m[1]}-draft-${m[2]}`, alias: m[1], number: Number(m[2]), file, path: full, title: '', summary: '', observed: '', error: null };
+    try {
+      const parsed = parseFeedbackItem(fs.readFileSync(full, 'utf8'));
+      entry.title = feedbackValueOrEmpty(parsed.title);
+      entry.summary = feedbackValueOrEmpty(parsed.fields.Summary);
+      const body = String(parsed.sections.Observed || '').replace(/<!--[\s\S]*?-->/g, '');
+      entry.observed = (body.split('\n').map((l) => l.trim()).find(Boolean)) || '';
+    } catch (err) {
+      entry.error = err.message;
+    }
+    entries.push(entry);
+  }
+  entries.sort((a, b) => a.number - b.number);
+  return entries;
+}
+
+/** `<path> — <title> — <summary, or the first non-empty line of Observed, or —>` */
+function formatFeedbackDraftLine(entry) {
+  return `${entry.path} — ${entry.title || '—'} — ${entry.summary || entry.observed || '—'}`;
+}
+
+/**
+ * Compare two semver strings (e.g. "0.4.0" vs "0.3.6").
+ * Returns 1 if a > b, -1 if a < b, 0 if equal. (Lifted from the --agent script, T-829.)
+ */
+function semverCompare(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+    if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+  }
+  return 0;
+}
+
+/**
+ * Where does the fix for a task ship, according to CHANGELOG.md text? (T-829)
+ * An entry "cites" a task when a parenthetical group on one of its lines lists
+ * the id as a whole comma-separated token, e.g. `(T-900)` or `(T-900, T-901)`.
+ * Returns:
+ *   `released in x.y.z`  - a numbered `## [x.y.z]` section cites it (the lowest such version
+ *                          when several do)
+ *   `unreleased (next after <currentVersion>)` - only `## [Unreleased]` cites it
+ *   `not yet in CHANGELOG` - no section cites it
+ */
+function computeShipsIn(changelogText, taskId, currentVersion) {
+  let section = null; // {kind: 'unreleased'} | {kind: 'released', version} | null
+  let unreleased = false;
+  let released = null;
+  for (const line of String(changelogText || '').split('\n')) {
+    const heading = line.match(/^##\s+\[([^\]]+)\]/);
+    if (heading) {
+      const label = heading[1].trim();
+      if (/^unreleased$/i.test(label)) section = { kind: 'unreleased' };
+      else if (/^\d+\.\d+\.\d+$/.test(label)) section = { kind: 'released', version: label };
+      else section = null;
+      continue;
+    }
+    if (!section) continue;
+    let cites = false;
+    for (const group of line.matchAll(/\(([^()]*)\)/g)) {
+      if (group[1].split(',').some((token) => token.trim() === taskId)) {
+        cites = true;
+        break;
+      }
+    }
+    if (!cites) continue;
+    if (section.kind === 'unreleased') unreleased = true;
+    else if (released === null || semverCompare(section.version, released) < 0) released = section.version;
+  }
+  if (released !== null) return `released in ${released}`;
+  if (unreleased) return `unreleased (next after ${currentVersion})`;
+  return 'not yet in CHANGELOG';
+}
+
+/** Count parsed intake items with no Disposition (the framework-side triage queue). */
+function countIntakeUntriaged(dir) {
+  return listIntakeItems(dir).filter((e) => e.item && !(e.item.fields.Disposition || '').trim()).length;
+}
+
+/** Count an alias's items that have a Disposition but no Acknowledged stamp (adopter side). */
+function countUnackedFeedbackAnswers(dir, alias) {
+  return listIntakeItems(dir).filter(
+    (e) =>
+      e.item &&
+      e.alias === alias &&
+      (e.item.fields.Disposition || '').trim() &&
+      !(e.item.fields.Acknowledged || '').trim()
+  ).length;
+}
+
+// ---------------------------------------------------------------------------
+// GitHub channel for feedback items (T-830) — outbound scan, operator
+// confirmation, and the single gh transport. Every gh call in the framework's
+// feedback/intake commands goes through runGh().
+// ---------------------------------------------------------------------------
+
+// The public mirror's slug, the same one the README CI badge links to.
+const MAVERICKS_FEEDBACK_REPO_DEFAULT = 'yahor-punko/mavericks-os';
+const FEEDBACK_GITHUB_LABEL = 'mavp-feedback';
+const FEEDBACK_ISSUE_TITLE_PREFIX = `[${FEEDBACK_GITHUB_LABEL}]`;
+const FEEDBACK_REPO_SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+// Digits are bounded (1-9) so a hostile id can never build a filename past the OS limit.
+const FEEDBACK_ITEM_ID_PATTERN = /^([a-z][a-z0-9]{1,23})-\d{1,9}$/;
+// Fields an adopter owns; everything else (Disposition, Ships in, ...) is framework-owned.
+const FEEDBACK_ADOPTER_FIELDS = [
+  'Schema', 'Item', 'Adopter', 'Framework version', 'Kind', 'Severity', 'Area',
+  'Submitted', 'Channel', 'Issue', 'Workaround',
+];
+
+// ---------------------------------------------------------------------------
+// Return path for GitHub-channel answers (T-835) — the disposition grammar shared
+// by the framework's triage and the adopter's `--feedback --pull`, the strict
+// answer-comment grammar, the trust rule, and the answer-section writer.
+// ---------------------------------------------------------------------------
+
+// Disposition grammar (moved here from mavp-operator-intake.js; intake imports it).
+const FEEDBACK_DISPOSITION_FIXED_PATTERN = /^fixed-in (T-\d+)$/;
+const FEEDBACK_DISPOSITION_DUPLICATE_PATTERN = /^duplicate-of ([a-z][a-z0-9]{1,23}-\d+)$/;
+const FEEDBACK_DISPOSITION_PLAIN_VALUES = ['by-design', 'deferred', 'not-reproduced'];
+const FEEDBACK_DISPOSITION_GRAMMAR = [
+  'fixed-in T-NNN',
+  'by-design',
+  'deferred',
+  'duplicate-of <item>',
+  'not-reproduced',
+];
+// GitHub author associations whose comments `--feedback --pull` believes. Everything else
+// (CONTRIBUTOR, COLLABORATOR, FIRST_TIME_CONTRIBUTOR, NONE, ...) is ignored.
+const FEEDBACK_ANSWER_TRUSTED_ASSOCIATIONS = ['OWNER', 'MEMBER'];
+const FEEDBACK_ANSWER_MAX_CHARS = 10000;
+// Upper bound on a raw answer-comment body, applied before any regex runs (GitHub caps a comment
+// at 65536 characters; a longer body is cut, never rejected).
+const FEEDBACK_ANSWER_COMMENT_MAX_CHARS = 65536;
+const FEEDBACK_ANSWER_TRUNCATION_MARKER = '[truncated]';
+// Characters removed from answer text: C0 controls except tab and newline, DEL and C1 controls,
+// zero-width and directional marks, line/paragraph separators, bidi isolates, the byte-order mark,
+// the soft hyphen, the combining grapheme joiner, the Arabic letter mark, the Mongolian vowel
+// separator, the word joiner and the Unicode tag block (U+E0000-U+E007F, invisible tag characters).
+// Built from code points so no invisible character sits in this file's text; the `u` flag makes
+// the astral tag range a code-point range and leaves every other astral character untouched.
+const FEEDBACK_ANSWER_STRIP_PATTERN = new RegExp(
+  '[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f' +
+    [
+      [0xad, 0xad],
+      [0x34f, 0x34f],
+      [0x61c, 0x61c],
+      [0x180e, 0x180e],
+      [0x200b, 0x200f],
+      [0x2028, 0x202e],
+      [0x2060, 0x2060],
+      [0x2066, 0x2069],
+      [0xfeff, 0xfeff],
+      [0xe0000, 0xe007f],
+    ]
+      .map(([a, b]) => String.fromCodePoint(a) + (a === b ? '' : '-' + String.fromCodePoint(b)))
+      .join('') +
+    ']',
+  'gu'
+);
+
+/**
+ * Remove trailing spaces and tabs only, in one linear pass. Deliberately not trimEnd(): that would
+ * also accept a trailing no-break space or byte-order mark on a header line, widening the reviewed
+ * header grammar.
+ */
+function stripTrailingSpacesAndTabs(line) {
+  let end = line.length;
+  while (end > 0 && (line.charCodeAt(end - 1) === 0x20 || line.charCodeAt(end - 1) === 0x09)) end--;
+  return end === line.length ? line : line.slice(0, end);
+}
+
+/** True when `value` is exactly one of the triage disposition values. */
+function isValidFeedbackDisposition(value) {
+  const v = String(value);
+  return (
+    FEEDBACK_DISPOSITION_FIXED_PATTERN.test(v) ||
+    FEEDBACK_DISPOSITION_DUPLICATE_PATTERN.test(v) ||
+    FEEDBACK_DISPOSITION_PLAIN_VALUES.includes(v)
+  );
+}
+
+const FEEDBACK_ANSWER_SHIPS_IN_PATTERN =
+  /^(?:released in \d+\.\d+\.\d+|unreleased \(next after [0-9A-Za-z][0-9A-Za-z.+-]{0,31}\)|not yet in CHANGELOG)$/;
+const FEEDBACK_ANSWER_RETIRE_PATTERN = /^(?:after \d+\.\d+\.\d+|after next release)$/;
+
+/**
+ * Strict parser for the maintainer's answer comment (the format composeAnswerComment writes).
+ * Header lines, in this order: `Disposition: <v>` (required, v exactly a triage value),
+ * `Framework task: T-NNN` (optional; only with a fixed-in disposition and equal to its id),
+ * `Ships in: <one of computeShipsIn's three shapes>` (optional),
+ * `Retire workaround: after x.y.z|after next release` (optional); then an optional blank line
+ * and free text. Any other header line rejects the whole comment (returns null). The returned
+ * `text` is the raw free text — run it through sanitizeFeedbackAnswerText() before storing.
+ *
+ * @returns {{disposition: string, frameworkTask: string|null, shipsIn: string|null, retire: string|null, text: string}|null}
+ */
+function parseFeedbackAnswerComment(body) {
+  if (typeof body !== 'string') return null;
+  const lines = body.slice(0, FEEDBACK_ANSWER_COMMENT_MAX_CHARS).replace(/\r\n?/g, '\n').split('\n');
+  const first = stripTrailingSpacesAndTabs(lines[0]).match(/^Disposition: (.+)$/);
+  if (!first || !isValidFeedbackDisposition(first[1])) return null;
+  const disposition = first[1];
+  const fixed = disposition.match(FEEDBACK_DISPOSITION_FIXED_PATTERN);
+  const result = { disposition, frameworkTask: null, shipsIn: null, retire: null, text: '' };
+  const headerKeys = ['Framework task', 'Ships in', 'Retire workaround'];
+  let rank = -1;
+  let i = 1;
+  for (; i < lines.length; i++) {
+    const line = stripTrailingSpacesAndTabs(lines[i]);
+    if (line === '') break;
+    const m = line.match(/^(Framework task|Ships in|Retire workaround): (.+)$/);
+    if (!m) return null;
+    const r = headerKeys.indexOf(m[1]);
+    if (r <= rank) return null; // out of order or repeated
+    rank = r;
+    if (m[1] === 'Framework task') {
+      if (!fixed || m[2] !== fixed[1]) return null;
+      result.frameworkTask = m[2];
+    } else if (m[1] === 'Ships in') {
+      if (!FEEDBACK_ANSWER_SHIPS_IN_PATTERN.test(m[2])) return null;
+      result.shipsIn = m[2];
+    } else {
+      if (!FEEDBACK_ANSWER_RETIRE_PATTERN.test(m[2])) return null;
+      result.retire = m[2];
+    }
+  }
+  result.text = lines.slice(i + 1).join('\n').replace(/^\n+/, '').trimEnd();
+  return result;
+}
+
+/**
+ * Make untrusted answer text safe to store in an item's `## Answer` section: control and
+ * bidi characters are removed (newline and tab kept), every line that starts — after optional
+ * whitespace — with `#`, three backticks or three tildes is prefixed `> ` (so it can neither
+ * open a section nor toggle a code fence in parseFeedbackItem), and the result is capped at
+ * FEEDBACK_ANSWER_MAX_CHARS with a `[truncated]` marker line.
+ */
+function sanitizeFeedbackAnswerText(text) {
+  let flat = String(text === undefined || text === null ? '' : text)
+    .replace(/\r\n?/g, '\n')
+    .replace(FEEDBACK_ANSWER_STRIP_PATTERN, '');
+  flat = flat
+    .split('\n')
+    .map((line) => (/^\s*(#|```|~~~)/.test(line) ? `> ${line}` : line))
+    .join('\n')
+    .replace(/^\n+/, '')
+    .trimEnd();
+  if (flat.length > FEEDBACK_ANSWER_MAX_CHARS) {
+    flat = `${flat.slice(0, FEEDBACK_ANSWER_MAX_CHARS).trimEnd()}\n${FEEDBACK_ANSWER_TRUNCATION_MARKER}`;
+  }
+  return flat;
+}
+
+/**
+ * The trust decision for GitHub issue comments (the `comments` array of
+ * `gh issue view --json comments`). A comment is accepted only when its authorAssociation is in
+ * FEEDBACK_ANSWER_TRUSTED_ASSOCIATIONS, it is not minimized, it has a usable createdAt, and its
+ * body parses under parseFeedbackAnswerComment(). The newest accepted comment by createdAt wins
+ * (a tie goes to the later array position).
+ *
+ * @returns {{total: number, ignored: number, accepted: null|{login: string, createdAt: string, date: string, parsed: object}}}
+ */
+function pickFeedbackAnswerComment(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  let best = null;
+  let bestTime = -Infinity;
+  let accepted = 0;
+  for (const c of list) {
+    if (!c || typeof c !== 'object') continue;
+    if (!FEEDBACK_ANSWER_TRUSTED_ASSOCIATIONS.includes(c.authorAssociation)) continue;
+    if (c.isMinimized !== false) continue; // fail closed: an absent or null state is not 'visible'
+    if (typeof c.createdAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(c.createdAt)) continue;
+    const time = Date.parse(c.createdAt);
+    if (Number.isNaN(time)) continue;
+    const parsed = parseFeedbackAnswerComment(c.body);
+    if (!parsed) continue;
+    accepted++;
+    if (time >= bestTime) {
+      bestTime = time;
+      const login = c.author && typeof c.author.login === 'string' ? c.author.login : '';
+      best = { login, createdAt: c.createdAt, date: c.createdAt.slice(0, 10), parsed };
+    }
+  }
+  return { total: list.length, ignored: list.length - accepted, accepted: best };
+}
+
+/** Replace (or append) the `## Answer` section of raw item text; every other byte is kept. */
+function writeAnswerSection(text, note) {
+  const lines = text.split('\n');
+  let inFence = false;
+  let start = -1;
+  let end = lines.length;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(```|~~~)/.test(lines[i])) inFence = !inFence;
+    if (inFence) continue;
+    if (start === -1) {
+      if (/^##\s+Answer\s*$/.test(lines[i])) start = i;
+    } else if (/^##\s/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  const body = String(note).replace(/^\n+/, '').trimEnd();
+  if (start === -1) return `${text.trimEnd()}\n\n## Answer\n\n${body}\n`;
+  lines.splice(start, end - start, '## Answer', '', body, '');
+  return lines.join('\n');
+}
+
+/** Blank a header bullet that carries a value, leaving the bare bullet the template uses. */
+function clearFeedbackField(text, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^(\\s*-\\s+\\*\\*${escaped}:\\*\\*)[ \\t]*\\S.*$`, 'm');
+  const firstH2 = text.search(/^##\s/m);
+  const head = firstH2 === -1 ? text : text.slice(0, firstH2);
+  const rest = firstH2 === -1 ? '' : text.slice(firstH2);
+  return head.replace(re, '$1') + rest;
+}
+
+/**
+ * Resolve the GitHub slug feedback goes to: explicit `--repo` value, else the
+ * MAVERICKS_FEEDBACK_REPO env var, else MAVERICKS_FEEDBACK_REPO_DEFAULT. Throws
+ * when the chosen value is not a plain owner/repo slug.
+ */
+function resolveFeedbackRepo(explicit) {
+  const raw = [explicit, process.env.MAVERICKS_FEEDBACK_REPO, MAVERICKS_FEEDBACK_REPO_DEFAULT].find(
+    (v) => typeof v === 'string' && v.trim() !== ''
+  );
+  const slug = raw.trim();
+  if (!FEEDBACK_REPO_SLUG_PATTERN.test(slug)) {
+    throw new Error(`invalid GitHub repository "${slug}" (expected owner/repo)`);
+  }
+  return slug;
+}
+
+// Outbound-only categories, additional to the publish scanner's set (that scanner's own
+// categories are deliberately unchanged): absolute home paths of other operating systems.
+// Built from parts so no contiguous home-path literal sits in this file.
+const OUTBOUND_EXTRA_CATEGORIES = [
+  {
+    name: 'Absolute /home/ path',
+    regexes: [() => new RegExp('(?<![A-Za-z0-9_.-])/' + 'home/[A-Za-z0-9._-]+(?![A-Za-z0-9._-])', 'g')],
+  },
+  {
+    name: 'Absolute Windows user path',
+    regexes: [() => new RegExp('(?<![A-Za-z0-9])[A-Za-z]:[\\\\/]+' + 'Users[\\\\/]+[^\\\\/\\s"\'`<>|]+', 'gi')],
+  },
+];
+
+/** The project root the feedback/intake commands operate on (the adopter's project, or the framework repo itself). */
+function outboundProjectRoot(projectRoot) {
+  return projectRoot || process.env.MAVERICKS_PROJECT_ROOT || ROOT;
+}
+
+/**
+ * The private-name list the outbound scan checks: the union of the project's
+ * `<root>/.mavp/private-names`, the framework install's `.mavp/private-names` and the
+ * MAVP_PRIVATE_NAMES environment variable. Throws when any source holds an unusable
+ * entry (callers fail closed). Returns `{names, projectFile}`; `projectFile` is the
+ * path the project list was looked up at.
+ */
+function resolveOutboundPrivateNames(projectRoot) {
+  const { parsePrivateNamesList } = require('./mavp-publish-scan.js');
+  const { readNamesFileRaw } = require('./mavp-private-names-guard.js');
+  const projectFile = path.join(outboundProjectRoot(projectRoot), '.mavp', 'private-names');
+  let projectRaw = null;
+  try {
+    projectRaw = fs.readFileSync(projectFile, 'utf8').trim();
+  } catch { /* absent: not an error */ }
+  const names = [];
+  const seen = new Set();
+  for (const raw of [projectRaw, readNamesFileRaw(), process.env.MAVP_PRIVATE_NAMES]) {
+    for (const name of parsePrivateNamesList(raw)) {
+      if (!seen.has(name.toLowerCase())) {
+        seen.add(name.toLowerCase());
+        names.push(name);
+      }
+    }
+  }
+  return { names, projectFile };
+}
+
+/** The one-line notice printed when no private-name source holds a name, else null. */
+function outboundPrivateNamesNote(projectRoot) {
+  const { names, projectFile } = resolveOutboundPrivateNames(projectRoot);
+  if (names.length > 0) return null;
+  return `NOTE: private-name detection inactive — no names in ${projectFile}, the framework's .mavp/private-names, or MAVP_PRIVATE_NAMES`;
+}
+
+/**
+ * Scan text that is about to leave the machine, through the publish scanner's
+ * exact category set (base categories plus the runtime private-name list, here the
+ * union from resolveOutboundPrivateNames) and the outbound-only home-path categories.
+ * Returns findings `{category, line, part}` with part 'title' or 'body' and
+ * 1-based line numbers within that part; the matched text is never returned.
+ * Throws when the category set cannot be built, so callers fail closed.
+ */
+function scanOutboundText(title, body, projectRoot) {
+  const { buildCategories, scanTextAgainstCategories } = require('./mavp-publish-scan.js');
+  const categories = buildCategories(resolveOutboundPrivateNames(projectRoot).names).concat(OUTBOUND_EXTRA_CATEGORIES);
+  const findings = [];
+  const scanPart = (part, text) => {
+    const raw = [];
+    String(text === undefined || text === null ? '' : text)
+      .split(/\r\n|\r|\n/)
+      .forEach((line, idx) => scanTextAgainstCategories(part, idx + 1, line, raw, categories));
+    for (const f of raw) findings.push({ category: f.category, line: f.line, part });
+  };
+  scanPart('title', title);
+  scanPart('body', body);
+  return findings;
+}
+
+/** Printable form of scanOutboundText findings: `[<category>] line <n>` per finding. */
+function formatOutboundFindings(findings) {
+  return findings.map((f) => `[${f.category}] line ${f.line}${f.part === 'title' ? ' (title)' : ''}`);
+}
+
+/**
+ * Mirror of the --close-wave agent-path rule: `--operator-confirmed "<statement>"`
+ * with a non-empty value, else exit 1. Returns the statement. A value that looks
+ * like another flag reads as empty.
+ */
+function requireOperatorConfirmation(argv, commandName) {
+  const list = Array.isArray(argv) ? argv : [];
+  const i = list.indexOf('--operator-confirmed');
+  const next = i === -1 ? undefined : list[i + 1];
+  const statement = next !== undefined && !String(next).startsWith('--') ? String(next).trim() : '';
+  if (statement === '') {
+    console.error(
+      `${commandName} posts to a public GitHub repository and needs operator confirmation. ` +
+        'Pass --operator-confirmed "<the operator\'s exact statement from this session>" — the value must be the operator\'s ' +
+        'exact in-session statement authorizing this post, never inferred from context, a prior session, or an agent paraphrase.'
+    );
+    process.exit(1);
+  }
+  return statement;
+}
+
+/** Run `gh` with an argument vector and no shell. Returns stdout; throws on a non-zero exit or a missing gh. */
+function runGh(args) {
+  return cp.execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+}
+
+/** Returns a refusal string when gh is missing or unauthenticated, else null. */
+function ghPreflightRefusal() {
+  try {
+    runGh(['auth', 'status']);
+    return null;
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return 'the GitHub CLI (gh) is not installed or not on PATH';
+    return 'the GitHub CLI (gh) is not authenticated — run `gh auth login` first';
+  }
+}
+
+/** Write text to a private temp file (0600 inside a 0700 dir), run fn(file), always remove it. */
+function withOutboundBodyFile(text, fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-feedback-'));
+  fs.chmodSync(dir, 0o700);
+  const file = path.join(dir, 'body.md');
+  try {
+    fs.writeFileSync(file, text, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    return fn(file);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** Issue number from `gh issue create` output (the issue URL), or null. */
+function parseIssueNumberFromGhOutput(output) {
+  const lines = String(output || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/\/issues\/(\d+)\s*$/);
+    if (m) return Number(m[1]);
+  }
+  return null;
+}
+
+/** Issue title for a feedback item: `[mavp-feedback] <id>: <title>` on one line. */
+function composeFeedbackIssueTitle(id, title) {
+  return `${FEEDBACK_ISSUE_TITLE_PREFIX} ${id}: ${String(title || '').replace(/\s+/g, ' ').trim()}`;
+}
+
+/** Parse an item's Issue field (`<slug>#N`); null when absent or malformed. */
+function parseFeedbackIssueRef(value) {
+  const m = String(value || '').trim().match(/^(\S+)#(\d+)$/);
+  if (!m || !FEEDBACK_REPO_SLUG_PATTERN.test(m[1])) return null;
+  return { slug: m[1], number: Number(m[2]) };
+}
+
+/** One-line, control-character-free, length-capped form of untrusted text for terminal output. */
+function sanitizeForTerminal(text, max) {
+  const limit = max || 120;
+  const flat = String(text === undefined || text === null ? '' : text)
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]+/g, ' ')
+    .trim();
+  return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
+}
+
 module.exports = {
   ROOT,
+  computeShipsIn,
+  countIntakeUntriaged,
+  countUnackedFeedbackAnswers,
+  FEEDBACK_ADOPTER_FIELDS,
+  FEEDBACK_ANSWER_COMMENT_MAX_CHARS,
+  FEEDBACK_ANSWER_MAX_CHARS,
+  FEEDBACK_ANSWER_TRUSTED_ASSOCIATIONS,
+  FEEDBACK_DISPOSITION_DUPLICATE_PATTERN,
+  FEEDBACK_DISPOSITION_FIXED_PATTERN,
+  FEEDBACK_DISPOSITION_GRAMMAR,
+  FEEDBACK_DISPOSITION_PLAIN_VALUES,
+  clearFeedbackField,
+  isValidFeedbackDisposition,
+  parseFeedbackAnswerComment,
+  pickFeedbackAnswerComment,
+  sanitizeFeedbackAnswerText,
+  writeAnswerSection,
+  FEEDBACK_GITHUB_LABEL,
+  FEEDBACK_ISSUE_TITLE_PREFIX,
+  FEEDBACK_ITEM_ID_PATTERN,
+  FEEDBACK_REPO_SLUG_PATTERN,
+  MAVERICKS_FEEDBACK_REPO_DEFAULT,
+  composeFeedbackIssueTitle,
+  formatOutboundFindings,
+  ghPreflightRefusal,
+  parseFeedbackIssueRef,
+  parseIssueNumberFromGhOutput,
+  requireOperatorConfirmation,
+  resolveFeedbackRepo,
+  runGh,
+  sanitizeForTerminal,
+  scanOutboundText,
+  outboundPrivateNamesNote,
+  resolveOutboundPrivateNames,
+  withOutboundBodyFile,
+  semverCompare,
+  FEEDBACK_ALIAS_PATTERN,
+  FEEDBACK_NOTE_PATTERN,
+  FEEDBACK_DRAFT_FILE_PATTERN,
+  parseFeedbackNotes,
+  resolveFeedbackDraftsDir,
+  listFeedbackDrafts,
+  formatFeedbackDraftLine,
+  FEEDBACK_CHANNELS,
+  FEEDBACK_FIELD_ORDER,
+  FEEDBACK_KINDS,
+  FEEDBACK_SCHEMA_VERSION,
+  FEEDBACK_SECTION_ORDER,
+  FEEDBACK_SEVERITIES,
+  allocateFeedbackItemId,
+  listIntakeItems,
+  matchMarkdownHeading,
+  parseFeedbackItem,
+  renderFeedbackItem,
+  resolveIntakeDir,
+  setFeedbackField,
+  WORKAROUND_TAG_PATTERN,
+  classifyFeedbackItem,
+  computeRetirableWorkarounds,
+  parseChangelogSupersedes,
+  resolveHarnessMemoryDir,
   ackRecheck,
   appendRecheckEntry,
   addDays,
@@ -5807,6 +6926,7 @@ module.exports = {
   computeDueRechecks,
   computeMustRead,
   MUST_READ_EXCLUDED_PATHS,
+  MUST_READ_EXCLUDED_PREFIXES,
   MUST_READ_DEFAULT_MAX_CHARS,
   HOOK_NAMES,
   CLAUDE_DIRS,
@@ -5881,6 +7001,8 @@ module.exports = {
   parseRepoMap,
   parseTaskHolds,
   parseTasksWithRepo,
+  normalizeDeployField,
+  isDeployOptOut,
   parseTouchesConflicts,
   parseWaveTasks,
   printRepoIdentityHeader,

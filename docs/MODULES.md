@@ -35,22 +35,28 @@ Each module entry must be a `## <id>` section with these fields:
 | `default_owner` | string | Default sub-agent role for tasks in this module |
 | `qa_checklist` | list | QA steps specific to this module |
 
+The `qa_checklist` list ends at the next top-level `- **<field>:**` line or `##` heading, so a field written after it (such as `doc_limits`) is never read as a checklist item. Items are normally indented under the field; an unindented `- item` directly after the field line is also accepted.
+
 ### Optional fields per entry
 
 | Field | Type | Description |
 |---|---|---|
-| `doc_limits` | comma-separated | Per-document character-limit exceptions for named `context_docs`, each written as `<path> max_chars: <N> (T-NNN)` |
+| `doc_limits` | comma-separated | Per-document character-limit exceptions for named `context_docs`, each written as `<path> max_chars: <N> (<owner>)` |
 
 `doc_limits` lets one oversized context document carry its own character limit
 instead of the project-wide per-document budget (`imported_doc_max_chars`, 40000 by
 default) that the validator's `context_size_budget` advisory applies. Every exception
-names the task that owns it (`T-NNN`), so a limit raised "just for now" always has an
-owner who is accountable for shrinking it again.
+names its owner in the trailing parentheses, so a limit raised "just for now" always
+has someone accountable for removing it again. The owner is any single
+whitespace-free token: a task id (`T-NNN`), a decision record (`DR-NNN`), or a short
+owner handle such as `docs-owner`. The owner names who removes the exception; it does
+not have to be a task, so an exception that belongs to a standing decision or a
+person or role can say so. The parsed entry exposes the token as `owner`.
 
 The field sits on its own line, so the comma-split of `context_docs` is unaffected:
 `context_docs` still lists plain paths, and `doc_limits` repeats only the paths that
-need an exception. Entries that do not match the `<path> max_chars: <N> (T-NNN)`
-shape are ignored.
+need an exception. Entries that do not match the `<path> max_chars: <N> (<owner>)`
+shape (for example an owner written as two words) are ignored.
 
 The limits are a ratchet, not a free setting. The `doc_limit_ratchet` advisory
 (info severity, never blocks) fires when an exception is raised above the value

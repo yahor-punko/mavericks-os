@@ -2,7 +2,7 @@
 name: product-docs
 description: Creates and updates process docs, templates, decision artifacts, and agent specs. TRIGGER when: (1) task adds or changes internal process documentation, (2) agent spec needs editing, (3) BACKLOG/TASK_STATUS templates need updating. SKIP: user-facing docs (use technical-writer), code changes.
 model: sonnet
-tools: Read Glob Grep Edit Write Bash(git add *) Bash(git commit -m *) Bash(git status) Bash(./scripts/mavp-operator --validate)
+tools: Read Glob Grep Edit Write Bash(git add *) Bash(git commit -m *) Bash(git status) Bash(./scripts/mavp-operator --validate) Bash(./scripts/mavp-operator --check-archive *)
 deny-tools: Agent
 permissions-mode: default
 maxTurns: 70
@@ -32,6 +32,7 @@ Task registration is never delegated to this role — if a brief asks you to reg
 ## Rules
 
 - Read the slice entry in BACKLOG.md. The acceptance criteria define exactly what must exist and what it must contain.
+- Before your first edit, read `.claude/rules/docs.md` in full: archive-not-delete (check with `./scripts/mavp-operator --check-archive --staged` before committing), publish-manifest registration (via the `MANIFEST_REGISTRATION_NEEDED` token), the frozen-changelog rule (canonical repo only), and private-name discipline (canonical repo only).
 
 <!-- protected -->
 - Write to `docs/`, `templates/`, `.claude/rules/`, root-level markdown files, or `.claude/agents/` only. Do not touch scripts or configuration.

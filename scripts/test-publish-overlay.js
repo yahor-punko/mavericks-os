@@ -163,7 +163,7 @@ function writeFile(filePath, content) {
   try {
     const trackedOutput = execFileSync('git', ['ls-files'], { cwd: REPO_ROOT, encoding: 'utf8' });
     const trackedSet = new Set(trackedOutput.split('\n').filter(Boolean));
-    isCanonical = Object.keys(manifest.exclude).every((k) => trackedSet.has(k));
+    isCanonical = require('./check-publish-manifest.js').isCanonicalRepo(manifest, [...trackedSet]);
   } catch {
     // Not a git repo (e.g. a tarball checkout) — treat as non-canonical.
     isCanonical = false;
@@ -2047,7 +2047,7 @@ const T533_EXPECTED_ERROR_LINE_ONE =
     const manifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'scripts', 'publish-manifest.json'), 'utf8'));
     const trackedOutput = execFileSync('git', ['ls-files'], { cwd: REPO_ROOT, encoding: 'utf8' });
     const trackedSet = new Set(trackedOutput.split('\n').filter(Boolean));
-    isCanonical = Object.keys(manifest.exclude).every((k) => trackedSet.has(k));
+    isCanonical = require('./check-publish-manifest.js').isCanonicalRepo(manifest, [...trackedSet]);
   } catch {
     isCanonical = false;
   }
@@ -2587,7 +2587,7 @@ const T533_EXPECTED_ERROR_LINE_ONE =
     const trackedSet = new Set(
       execFileSync('git', ['ls-files'], { cwd: REPO_ROOT, encoding: 'utf8' }).split('\n').filter(Boolean)
     );
-    isCanonical = Object.keys(manifest.exclude).every((k) => trackedSet.has(k));
+    isCanonical = require('./check-publish-manifest.js').isCanonicalRepo(manifest, [...trackedSet]);
   } catch {
     isCanonical = false;
   }

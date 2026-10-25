@@ -148,6 +148,18 @@ function runCloseSessionCli(repoDir, fakeScriptsDir, argv, input) {
   });
 }
 
+const CLOSE_WAVE_SCRIPT = path.join(__dirname, 'mavp-operator-close-wave.js');
+
+// T-820: the agent path of --close-wave (piped stdin, so resolveMode() picks it).
+function runCloseWaveCli(repoDir, fakeScriptsDir, argv) {
+  return spawnSync(process.execPath, [CLOSE_WAVE_SCRIPT, ...argv], {
+    cwd: repoDir,
+    env: { ...process.env, MAVERICKS_PROJECT_ROOT: repoDir, MAVERICKS_SCRIPTS: fakeScriptsDir },
+    input: '',
+    encoding: 'utf8',
+  });
+}
+
 function cleanup(...dirs) {
   for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 }
@@ -271,10 +283,9 @@ async function main() {
 
 // Case 10: interactive path, validator exits 1 — same commit behavior as
 // non-interactive. wave_goal is already set in the fixture and there are no
-// active tasks, so the wave is trivially complete: T-648 means the
-// wave-goal prompt now ALSO fires unconditionally on wave-complete (not just
-// when unset), so this needs two sequential answers ("Next action", then
-// "Enter wave goal") plus the trailing "Run git push?" prompt so the process
+// active tasks: since T-820 the wave-goal prompt only fires when the goal is
+// unset (the replacement prompt moved to --close-wave), so this needs the
+// "Next action" answer plus the trailing "Run git push?" prompt so the process
 // runs to completion.
 {
   const repoDir = makeFixtureRepo();
@@ -282,7 +293,6 @@ async function main() {
   const before = headCommitCount(repoDir);
   const result = await runCloseSessionCliSequential(repoDir, fakeScriptsDir, ['--interactive'], [
     { match: 'Next action [', answer: '' },
-    { match: 'Enter wave goal', answer: '' },
     { match: 'Run git push?', answer: 'n' },
   ]);
   const after = headCommitCount(repoDir);
@@ -313,16 +323,13 @@ async function main() {
 }
 
 // Case 11: interactive path, validator exits 2 — NO commit, explicit SKIPPED
-// line naming exit 2. Same wave-complete fixture as Case 10, so the
-// wave-goal prompt fires here too (before the validator result is even
-// known) — same three sequential answers.
+// line naming exit 2. Same fixture as Case 10 — same two sequential answers.
 {
   const repoDir = makeFixtureRepo();
   const fakeScriptsDir = makeFakeValidatorDir(2);
   const before = headCommitCount(repoDir);
   const result = await runCloseSessionCliSequential(repoDir, fakeScriptsDir, ['--interactive'], [
     { match: 'Next action [', answer: '' },
-    { match: 'Enter wave goal', answer: '' },
     { match: 'Run git push?', answer: 'n' },
   ]);
   const after = headCommitCount(repoDir);
@@ -494,8 +501,11 @@ function makeMidWaveFixtureRepo() {
 }
 
 // Case 13: validator exits 2 — PROCESS_STATE.json wave/wave_session are left
-// byte-for-byte unchanged; a subsequent repaired (exit 0) re-run bumps the
-// wave exactly once (no double-bump from the aborted attempt).
+// byte-for-byte unchanged; a subsequent repaired (exit 0) re-run neither
+// double-bumps nor (T-820) bumps the wave from --close-session at all.
+// The wave increment itself lives in --close-wave, whose double-bump
+// protection is re-asserted below: a validator-exit-2 refusal leaves
+// wave/wave_session unchanged and the repaired re-run bumps exactly once.
 {
   const repoDir = makeFixtureRepo();
   const fakeScriptsDirExit2 = makeFakeValidatorDir(2);
@@ -516,18 +526,36 @@ function makeMidWaveFixtureRepo() {
     'Case 13 FAIL: wave_session must be unchanged after a validator exit-2 abort'
   );
 
-  // "Repair": point at a validator that now exits 0, then re-run.
+  // "Repair": point at a validator that now exits 0, then re-run --close-session.
   const fakeScriptsDirExit0 = makeFakeValidatorDir(0);
   runCloseSessionCli(repoDir, fakeScriptsDirExit0, ['--non-interactive']);
 
   const afterRepair = JSON.parse(fs.readFileSync(path.join(repoDir, 'PROCESS_STATE.json'), 'utf8'));
   assert.strictEqual(
     afterRepair.wave,
-    (before.wave || 1) + 1,
-    `Case 13 FAIL: expected wave to bump exactly once after the repaired re-run, got before=${before.wave} after=${afterRepair.wave}`
+    before.wave,
+    `Case 13 FAIL: --close-session must never bump the wave (T-820), got before=${before.wave} after=${afterRepair.wave}`
   );
 
-  console.log('Case 13 passed: validator exit 2 leaves PROCESS_STATE.json wave/wave_session unchanged; repaired re-run bumps exactly once');
+  // --close-wave: the validator-exit-2 refusal leaves wave/wave_session alone...
+  const wavePsBefore = JSON.parse(fs.readFileSync(path.join(repoDir, 'PROCESS_STATE.json'), 'utf8'));
+  const refusedWave = runCloseWaveCli(repoDir, fakeScriptsDirExit2, ['--operator-confirmed', 'fixture statement']);
+  assert.strictEqual(refusedWave.status, 1, `Case 13 FAIL: --close-wave must refuse on validator exit 2, got ${refusedWave.status}:\n${refusedWave.stdout}${refusedWave.stderr}`);
+  const afterWaveRefusal = JSON.parse(fs.readFileSync(path.join(repoDir, 'PROCESS_STATE.json'), 'utf8'));
+  assert.strictEqual(afterWaveRefusal.wave, wavePsBefore.wave, 'Case 13 FAIL: wave must be unchanged after a --close-wave validator exit-2 refusal');
+  assert.strictEqual(afterWaveRefusal.wave_session, wavePsBefore.wave_session, 'Case 13 FAIL: wave_session must be unchanged after a --close-wave validator exit-2 refusal');
+
+  // ...and the repaired re-run bumps exactly once.
+  const repairedWave = runCloseWaveCli(repoDir, fakeScriptsDirExit0, ['--operator-confirmed', 'fixture statement']);
+  assert.strictEqual(repairedWave.status, 0, `Case 13 FAIL: repaired --close-wave should succeed, got ${repairedWave.status}:\n${repairedWave.stdout}${repairedWave.stderr}`);
+  const afterWaveRepair = JSON.parse(fs.readFileSync(path.join(repoDir, 'PROCESS_STATE.json'), 'utf8'));
+  assert.strictEqual(
+    afterWaveRepair.wave,
+    (before.wave || 1) + 1,
+    `Case 13 FAIL: expected wave to bump exactly once after the repaired --close-wave re-run, got before=${before.wave} after=${afterWaveRepair.wave}`
+  );
+
+  console.log('Case 13 passed: validator exit 2 leaves PROCESS_STATE.json wave/wave_session unchanged; --close-session never bumps; repaired --close-wave re-run bumps exactly once');
 
   cleanup(repoDir, fakeScriptsDirExit2, fakeScriptsDirExit0);
 }
@@ -537,8 +565,9 @@ console.log('All T-438 assertions passed.');
 // ---------------------------------------------------------------------------
 // T-445 — interactive/non-interactive wave-complete parity + announcement:
 // (1) an empty Active tasks section completes the wave identically in both
-//     modes, printing an explicit "Wave N complete — archiving + incrementing"
-//     line;
+//     modes, printing an explicit "Wave N — all tasks merged; wave stays open
+//     ..." line (T-820: --close-session never advances the wave; only
+//     --close-wave does);
 // (2) a fixture with one task still open keeps the wave open identically in
 //     both modes, printing a line naming that task as the reason;
 // (3) an already-merged task sitting in the Active tasks section no longer
@@ -840,8 +869,9 @@ function makeDeployedDevActiveFixtureRepo(deployContours) {
   return dir;
 }
 
-// Case 14: empty Active tasks section, wave=3 — non-interactive completes the
-// wave and prints the explicit announcement.
+// Case 14: empty Active tasks section, wave=3 — non-interactive prints the
+// explicit announcement and leaves the wave at 3 (T-820); only --close-wave
+// then advances it.
 {
   const repoDir = makeFixtureRepo();
   // makeFixtureRepo() seeds wave: 1 — bump it to 3 to prove the announcement
@@ -854,23 +884,29 @@ function makeDeployedDevActiveFixtureRepo(deployContours) {
   const result = runCloseSessionCli(repoDir, __dirname, ['--non-interactive']);
 
   assert.ok(
-    /Wave 3 complete — archiving \+ incrementing/.test(result.stdout),
-    `Case 14 FAIL: expected explicit wave-complete announcement, got:\n${result.stdout}`
+    result.stdout.includes('Wave 3 — all tasks merged; wave stays open until the operator confirms the goal is met and --close-wave runs (goal: fixture wave goal)'),
+    `Case 14 FAIL: expected the T-820 announcement, got:\n${result.stdout}`
+  );
+  assert.ok(
+    !/archiving \+ incrementing/.test(result.stdout),
+    `Case 14 FAIL: the retired wave-complete wording must not print, got:\n${result.stdout}`
   );
   const after = readProcessState(repoDir);
-  assert.strictEqual(after.wave, 4, `Case 14 FAIL: expected wave to bump to 4, got ${after.wave}`);
+  assert.strictEqual(after.wave, 3, `Case 14 FAIL: --close-session must not advance the wave, got ${after.wave}`);
 
-  console.log('Case 14 passed: non-interactive completes an empty-Active-tasks wave and announces it');
+  const waveRun = runCloseWaveCli(repoDir, __dirname, ['--operator-confirmed', 'fixture statement']);
+  assert.strictEqual(waveRun.status, 0, `Case 14 FAIL: --close-wave expected exit 0, got ${waveRun.status}:\n${waveRun.stdout}${waveRun.stderr}`);
+  assert.strictEqual(readProcessState(repoDir).wave, 4, 'Case 14 FAIL: expected --close-wave to bump the wave to 4');
+
+  console.log('Case 14 passed: non-interactive announces an empty-Active-tasks wave but leaves it open; --close-wave advances it');
 
   cleanup(repoDir);
 }
 
 // Case 15: identical empty-Active-tasks fixture, interactive mode — same
-// wave-complete decision and same announcement as Case 14. The wave is
-// trivially complete (no active tasks), so T-648's fix means the wave-goal
-// prompt now ALSO fires despite the preset "fixture wave goal" — sequential
-// answers for "Next action", "Enter wave goal", and the trailing push
-// prompt.
+// decision and same announcement as Case 14. The wave goal is preset, so
+// since T-820 there is no wave-goal prompt — sequential answers for "Next
+// action" and the trailing push prompt.
 {
   const repoDir = makeFixtureRepo();
   const ps = readProcessState(repoDir);
@@ -880,18 +916,17 @@ function makeDeployedDevActiveFixtureRepo(deployContours) {
 
   const result = await runCloseSessionCliSequential(repoDir, __dirname, ['--interactive'], [
     { match: 'Next action [', answer: '' },
-    { match: 'Enter wave goal', answer: '' },
     { match: 'Run git push?', answer: 'n' },
   ]);
 
   assert.ok(
-    /Wave 3 complete — archiving \+ incrementing/.test(result.stdout),
-    `Case 15 FAIL: expected explicit wave-complete announcement (interactive), got:\n${result.stdout}`
+    result.stdout.includes('Wave 3 — all tasks merged; wave stays open until the operator confirms the goal is met and --close-wave runs (goal: fixture wave goal)'),
+    `Case 15 FAIL: expected the T-820 announcement (interactive), got:\n${result.stdout}`
   );
   const after = readProcessState(repoDir);
-  assert.strictEqual(after.wave, 4, `Case 15 FAIL: expected wave to bump to 4 (interactive), got ${after.wave}`);
+  assert.strictEqual(after.wave, 3, `Case 15 FAIL: interactive --close-session must not advance the wave, got ${after.wave}`);
 
-  console.log('Case 15 passed: interactive completes an empty-Active-tasks wave and announces it — parity with Case 14');
+  console.log('Case 15 passed: interactive announces an empty-Active-tasks wave and leaves it open — parity with Case 14');
 
   cleanup(repoDir);
 }
@@ -938,14 +973,13 @@ function makeDeployedDevActiveFixtureRepo(deployContours) {
 // section (not yet archived) — interactive mode must NOT prompt
 // [m]/[n]/[k]/[enter] for it, must auto-archive it, and must complete the
 // wave without requiring the operator to answer for it. Auto-archiving it
-// leaves zero remaining tasks, so the wave is complete and (T-648) the
-// wave-goal prompt also fires — sequential answers for "Next action",
-// "Enter wave goal", and the trailing push prompt.
+// leaves zero remaining tasks; the wave stays open (T-820) and only
+// --close-wave advances it — sequential answers for "Next action" and the
+// trailing push prompt.
 {
   const repoDir = makeAlreadyMergedFixtureRepo(7);
   const result = await runCloseSessionCliSequential(repoDir, __dirname, ['--interactive'], [
     { match: 'Next action [', answer: '' },
-    { match: 'Enter wave goal', answer: '' },
     { match: 'Run git push?', answer: 'n' },
   ]);
 
@@ -958,13 +992,17 @@ function makeDeployedDevActiveFixtureRepo(deployContours) {
     `Case 18 FAIL: T-300 must not be re-prompted with the merged/needs_fix/keep question, got:\n${result.stdout}`
   );
   assert.ok(
-    /Wave 7 complete — archiving \+ incrementing/.test(result.stdout),
-    `Case 18 FAIL: expected the wave to complete without requiring re-answering T-300, got:\n${result.stdout}`
+    result.stdout.includes('Wave 7 — all tasks merged; wave stays open until the operator confirms the goal is met and --close-wave runs'),
+    `Case 18 FAIL: expected the all-tasks-merged announcement without re-answering T-300, got:\n${result.stdout}`
   );
   const after = readProcessState(repoDir);
-  assert.strictEqual(after.wave, 8, `Case 18 FAIL: expected wave to bump to 8, got ${after.wave}`);
+  assert.strictEqual(after.wave, 7, `Case 18 FAIL: --close-session must not advance the wave, got ${after.wave}`);
 
-  console.log('Case 18 passed: already-merged task auto-archives without prompting and does not block wave completion');
+  const waveRun = runCloseWaveCli(repoDir, __dirname, ['--operator-confirmed', 'fixture statement']);
+  assert.strictEqual(waveRun.status, 0, `Case 18 FAIL: --close-wave expected exit 0, got ${waveRun.status}:\n${waveRun.stdout}${waveRun.stderr}`);
+  assert.strictEqual(readProcessState(repoDir).wave, 8, 'Case 18 FAIL: expected --close-wave to bump the wave to 8');
+
+  console.log('Case 18 passed: already-merged task auto-archives without prompting and does not block --close-wave');
 
   cleanup(repoDir);
 }
@@ -1752,7 +1790,7 @@ console.log('All T-542 assertions passed.');
   // suffix (RESET closes the colored span before the suffix prints), so
   // assert on the two pieces separately rather than one contiguous string.
   assert.ok(
-    result.stdout.includes('Wave complete — run `git push` to close the wave'),
+    result.stdout.includes('All tasks merged — run `git push` to publish this session'),
     `Case 29 FAIL: expected the base git-push reminder line, got:\n${result.stdout}`
   );
   assert.ok(
@@ -1779,7 +1817,7 @@ console.log('All T-542 assertions passed.');
     /Suite receipt: not checked — non-canonical repo/.test(receiptLines29[0]),
     `Case 29 FAIL (T-763): expected the non-canonical stand-down line, got: ${receiptLines29[0]}`
   );
-  const reminderIdx29 = result.stdout.indexOf('Wave complete — run `git push` to close the wave');
+  const reminderIdx29 = result.stdout.indexOf('All tasks merged — run `git push` to publish this session');
   assert.ok(
     result.stdout.indexOf('Suite receipt:') > reminderIdx29,
     `Case 29 FAIL (T-763): the receipt line must sit beside (directly after) the push reminder, got:\n${result.stdout}`
@@ -1927,7 +1965,6 @@ function writeFixtureReceiptAtHead(dir) {
   const repoDir = makeCanonicalFixtureRepo();
   const result = await runCloseSessionCliSequential(repoDir, __dirname, ['--interactive'], [
     { match: 'Next action [', answer: '' },
-    { match: 'Enter wave goal', answer: '' },
     { match: 'Run git push?', answer: 'n' },
   ]);
 

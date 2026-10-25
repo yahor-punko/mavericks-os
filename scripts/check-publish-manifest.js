@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// mavp-declared-in: .claude/rules/scripts.md :: Publish-manifest registration
 // check-publish-manifest.js — completeness check for scripts/publish-manifest.json (T-331).
 //
 // Verifies that scripts/publish-manifest.json classifies EVERY git-tracked path
@@ -22,6 +23,17 @@
 // copies) MUST still be git-tracked, since that is what ships. A reset key
 // whose starter is also untracked is reported as a distinct failure.
 //
+// `exclude` keys have TWO forms (T-825). An exact key (no trailing "/") classifies
+// that one tracked path. A key ending in "/" is a PREFIX entry: it classifies
+// every tracked path beneath it (same trailing-slash grammar as `preserve`
+// below), so a whole internal directory such as `docs/archive/` is classified
+// once instead of one line per file. Prefix semantics, fail-closed:
+//   - a tracked path under a prefix key needs no per-file entry; if it ALSO has
+//     an exact entry (or a `ship`/`reset` entry) it is DOUBLE-CLASSIFIED.
+//   - a prefix key with zero tracked paths beneath it is STALE.
+//   - a prefix key never counts toward the canonical-repo heuristic: see
+//     isCanonicalRepo() (exact keys only, false when there are none).
+//
 // `preserve` (T-356) is a SEPARATE namespace, not one of the three tracked-path
 // buckets above: it names paths that exist ONLY in the public mirror (e.g.
 // `.github/ISSUE_TEMPLATE/*`), never in the private git index. Its entries are
@@ -37,8 +49,9 @@
 // Exit code 1 = one or more problems found (see stdout for details).
 //
 // `--if-canonical` flag (T-401): gates the whole check on being run inside
-// the canonical (private) repo, using the same "every `exclude` key is
-// git-tracked" heuristic as scripts/test-publish-overlay.js's Test 4. In the
+// the canonical (private) repo, using isCanonicalRepo() below
+// (T-825: the one shared predicate every consumer imports; it judges exact
+// `exclude` keys only). In the
 // canonical repo, behaves exactly as the default (unflagged) invocation. In
 // a non-canonical repo (public mirror / adopter fork — an exclude key is not
 // tracked) OR a repo with no manifest at all, prints a short skip message
@@ -153,7 +166,22 @@ function validateManifest(manifest, trackedList) {
   };
   record('ship', ship);
   record('reset', Object.keys(reset));
-  record('exclude', Object.keys(exclude));
+  // T-825 — exact exclude keys classify one path each; a trailing-slash key
+  // is a PREFIX entry that classifies every tracked path beneath it (below).
+  const excludeKeys = Object.keys(exclude);
+  const excludeExactKeys = excludeKeys.filter((k) => !isExcludePrefixKey(k));
+  const excludePrefixKeys = excludeKeys.filter(isExcludePrefixKey);
+  record('exclude', excludeExactKeys);
+  const prefixHitCount = new Map(excludePrefixKeys.map((k) => [k, 0]));
+  for (const trackedPath of trackedList) {
+    for (const prefixKey of excludePrefixKeys) {
+      if (trackedPath.startsWith(prefixKey)) {
+        prefixHitCount.set(prefixKey, prefixHitCount.get(prefixKey) + 1);
+        if (!classification.has(trackedPath)) classification.set(trackedPath, []);
+        classification.get(trackedPath).push(`exclude["${prefixKey}"]`);
+      }
+    }
+  }
 
   const trackedSet = new Set(trackedList);
   const manifestPaths = new Set(classification.keys());
@@ -173,6 +201,10 @@ function validateManifest(manifest, trackedList) {
   const staleInManifest = [...manifestPaths].filter(
     (p) => !trackedSet.has(p) && !untrackedResetKeySet.has(p)
   );
+  // T-825 — a prefix key with zero tracked paths beneath it is stale.
+  for (const [prefixKey, hits] of prefixHitCount) {
+    if (hits === 0) staleInManifest.push(prefixKey);
+  }
   const doubleClassified = [...classification.entries()].filter(([, buckets]) => buckets.length > 1);
   const preserveShadowsTracked = findPreserveShadowsTracked(preserve, trackedList);
 
@@ -237,13 +269,33 @@ function validateManifest(manifest, trackedList) {
   };
 }
 
-// Canonical iff every `exclude` key is git-tracked (same heuristic used by
-// scripts/test-publish-overlay.js Test 4 and scripts/mavp-manifest-guard.js
-// — do not invent a new one).
+// T-825 — an `exclude` key ending in "/" is a prefix entry (see header).
+function isExcludePrefixKey(key) {
+  return key.endsWith('/');
+}
+
+// True when `relPath` is classified by an `exclude` prefix key in `manifest`.
+// Exported so the creation-time guard classifies exactly as the checker does.
+function isCoveredByExcludePrefix(manifest, relPath) {
+  const exclude = manifest.exclude && typeof manifest.exclude === 'object' ? manifest.exclude : {};
+  return Object.keys(exclude).some((k) => isExcludePrefixKey(k) && relPath.startsWith(k));
+}
+
+// THE canonical-repo predicate — the single definition every consumer
+// (checker, creation-time guard, suite receipt, changelog-frozen check, the
+// overlay tests) imports; never inline a copy. Canonical iff every EXACT
+// (non-trailing-slash) `exclude` key is git-tracked, and false when there
+// are no exact keys at all. Prefix keys are deliberately ignored: a prefix
+// names a directory (never itself a tracked path), and counting one as
+// "present because something is beneath it" would let an emptied prefix flip
+// the repo from canonical to non-canonical and fail OPEN — instead an
+// emptied prefix leaves the repo canonical and the checker reports it STALE.
 function isCanonicalRepo(manifest, trackedList) {
   const exclude = manifest.exclude && typeof manifest.exclude === 'object' ? manifest.exclude : {};
+  const exactKeys = Object.keys(exclude).filter((k) => !isExcludePrefixKey(k));
+  if (exactKeys.length === 0) return false;
   const trackedSet = new Set(trackedList);
-  return Object.keys(exclude).every((k) => trackedSet.has(k));
+  return exactKeys.every((k) => trackedSet.has(k));
 }
 
 function main() {
@@ -305,6 +357,8 @@ module.exports = {
   validateManifest,
   findPreserveShadowsTracked,
   isCanonicalRepo,
+  isExcludePrefixKey,
+  isCoveredByExcludePrefix,
   // T-550 — the shape contract for this consumer's own two extra buckets
   // (`exclude`/`preserve`, layered on top of the reused ship/reset
   // contract), exported for its own regression test to exercise directly.

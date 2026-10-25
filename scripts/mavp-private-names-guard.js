@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// mavp-declared-in: .claude/rules/scripts.md :: Shipped secret-string discipline
 // mavp-private-names-guard.js — commit-time private-name backstop (T-600).
 //
 // A colliding private identifier merged in wave 72 surfaced two waves later

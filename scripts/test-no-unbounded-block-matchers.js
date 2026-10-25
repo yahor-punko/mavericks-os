@@ -1,4 +1,7 @@
 'use strict';
+// mavp-corpus-guard: always-run
+// Corpus-wide guard: run-tests.js appends this to every --filter run (.claude/rules/scripts.md).
+// mavp-declared-in: .claude/rules/scripts.md :: Task-block field access — use the canonical bounded helpers
 // T-610 — Guard against a TENTH instance of the unbounded heading-anchored
 // block matcher (see T-606/T-607/T-608/T-609). A task-heading-anchored
 // regex whose non-greedy "any character" gap has no block-boundary concept

@@ -58,6 +58,7 @@ const {
   getFilesChangedSincePreviousCloseSession,
   MUST_READ_DEFAULT_MAX_CHARS,
   MUST_READ_EXCLUDED_PATHS,
+  MUST_READ_EXCLUDED_PREFIXES,
   splitMustReadOversized,
 } = require('./mavp-operator-lib.js');
 
@@ -575,6 +576,40 @@ function makeManagedChangeFixture(name, { withLib }) {
   assert.ok(output.must_read.includes('.claude/hooks/pre-commit'), `Test 18 FAIL: in a framework source tree the hook stays in must_read, got ${JSON.stringify(output.must_read)}`);
   assert.ok(!('must_read_framework' in output), `Test 18 FAIL: must_read_framework must be absent in a framework source tree, got ${JSON.stringify(output.must_read_framework)}`);
   console.log('Test 18 passed: framework source tree is unchanged (no must_read_framework, hook stays in must_read)');
+}
+
+// ---------------------------------------------------------------------------
+// T-805 Test 19: docs/archive/ is excluded by PREFIX. A changed
+// docs/archive/CLAUDE/2026-10-24-x.md appears in none of must_read,
+// must_read_oversized, must_read_framework (even when oversized); sibling paths
+// `docs/archived-notes.md` and `sub/docs/archive/y.md` are unaffected; the
+// exported prefix list is frozen and contains `docs/archive/`.
+// ---------------------------------------------------------------------------
+{
+  const archived = 'docs/archive/CLAUDE/2026-10-24-x.md';
+  const { root } = makeGitFixture('archive-prefix-fixture', { changedFile: archived });
+  fs.writeFileSync(path.join(root, archived), '\u00e9'.repeat(50000), 'utf8'); // would be oversized if it survived
+  fs.writeFileSync(path.join(root, 'docs', 'archived-notes.md'), 'keep\n', 'utf8');
+  fs.mkdirSync(path.join(root, 'sub', 'docs', 'archive'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'sub', 'docs', 'archive', 'y.md'), 'keep\n', 'utf8');
+  git(root, 'add -A');
+  git(root, 'commit -q -m "T-805: archive + lookalike paths"');
+
+  const direct = computeMustRead(root, [{ id: 'T-900', context_docs: ['docs/archive/other.md', 'docs/x.md'] }]);
+  assert.ok(!direct.includes(archived), `Test 19 FAIL: archived file must be dropped, got ${JSON.stringify(direct)}`);
+  assert.ok(!direct.includes('docs/archive/other.md'), `Test 19 FAIL: archived context_doc must be dropped, got ${JSON.stringify(direct)}`);
+  assert.ok(direct.includes('docs/x.md'), 'Test 19 FAIL: non-archive context_doc must remain');
+  assert.ok(direct.includes('docs/archived-notes.md'), `Test 19 FAIL: docs/archived-notes.md must be unaffected, got ${JSON.stringify(direct)}`);
+  assert.ok(direct.includes('sub/docs/archive/y.md'), `Test 19 FAIL: nested sub/docs/archive/y.md must be unaffected, got ${JSON.stringify(direct)}`);
+  assert.ok(Object.isFrozen(MUST_READ_EXCLUDED_PREFIXES), 'Test 19 FAIL: prefix list must be frozen');
+  assert.ok(MUST_READ_EXCLUDED_PREFIXES.includes('docs/archive/'), 'Test 19 FAIL: prefix list must contain docs/archive/');
+
+  addMinimalState(root);
+  const output = runAgent(root);
+  const all = [...(output.must_read || []), ...(output.must_read_oversized || []).map((o) => o.path), ...(output.must_read_framework || [])];
+  assert.ok(!all.includes(archived), `Test 19 FAIL: archived file must be in no must_read field, got ${JSON.stringify(output)}`);
+  assert.ok(output.must_read.includes('docs/archived-notes.md'), 'Test 19 FAIL: lookalike must stay in --agent must_read');
+  console.log('Test 19 passed: docs/archive/ excluded by prefix from must_read, must_read_oversized and must_read_framework; lookalike paths unaffected');
 }
 
 // ---------------------------------------------------------------------------

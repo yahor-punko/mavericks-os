@@ -13,14 +13,26 @@ if [[ "${1-}" == "--help" ]]; then
   echo "  --emit-bundle    Print a task's context prefetch bundle to stdout (read-only)"
   echo "                   Usage: --emit-bundle T-NNN"
   echo "  --handoff        Write HANDOFF.md context file for cross-session continuity"
-  echo "  --close-session  Run end-of-session ritual (summarise, bump wave, commit)"
+  echo "  --close-session  Run end-of-session ritual (sweep merged tasks, commit; never advances the wave)"
+  echo "  --close-wave     Advance the wave (the ONLY wave-advance path): terminal = type the wave number; agent = --operator-confirmed \"<operator's statement>\""
+  echo "                       Usage: --close-wave [--interactive] [--operator-confirmed \"statement\"] [--next-goal \"text\"]"
   echo "  --set-strategy-note  Set wave strategy context note (persists in PROCESS_STATE.json until --close-session)"
   echo "                       Usage: --set-strategy-note \"text\" (empty string clears)"
+  echo "  --set-wave-goal  Set the wave goal (PROCESS_STATE.json wave_goal) non-interactively; regenerates PROCESS_STATE.md"
+  echo "                       Usage: --set-wave-goal \"text\" (empty string clears; missing argument exits 1)"
   echo "  --set-next-action    Sanctioned write path for PROCESS_STATE.json's next_action field, gated by"
   echo "                       classifyNextAction(): refuses (exit 1, no write) when the value contains a"
   echo "                       volatile fact; a value not beginning with T-NNN is written with a non-blocking"
   echo "                       advisory; regenerates PROCESS_STATE.md after a successful write"
   echo "                       Usage: --set-next-action \"text\" (empty string clears)"
+  echo "  --feedback       Submit structured feedback to the framework intake inbox (local channel)"
+  echo "                       Usage: --feedback --file <path> [--adopter <alias>] | --set-alias <alias> | --status | --ack <id> | --pull"
+  echo "                              | --github (--file <path> | --item <id>) [--repo <owner/repo>] --operator-confirmed \"statement\""
+  echo "                              | --draft \"title\" [--summary \"one line\"] [--area <text>] [--kind bug|proposal|question] | --drafts | --discard <draft path>"
+  echo "  --migrate        Read-only: find mavp-workaround tags in this repo and harness memory and report which are retirable"
+  echo "                       Usage: --migrate [--legacy]"
+  echo "  --intake         Framework repo only: list, brief, triage and publish answers for the adopter feedback inbox"
+  echo "                       Usage: --intake [--brief [ids] | --triage <id> --disposition \"<value>\" [--note \"text\"] | --publish-answers [--operator-confirmed \"statement\"] | --pull [--repo <owner/repo>]]"
   echo "  --new-task       Interactively create and register a new task"
   echo "                   Usage: --new-task --title \"...\" [--owner <role>] [--repo <name>]"
   echo "                   [--depends-on <T-NNN>] [--requires-ux <y/n>] [--criteria \"...\"] [--verification-type <type>]"
@@ -92,7 +104,8 @@ if [[ "${1-}" == "--help" ]]; then
   echo "  --check-archive  Nothing-lost check: every non-empty line removed from a layer-0/1 doc must"
   echo "                   reappear verbatim in a perimeter doc or a docs/archive/ file touched by the"
   echo "                   same commit, or an added perimeter line keeping >=80% of a removed line's"
-  echo "                   words counts as amended, not removed; read-only; exit 0 pass, 1 missing"
+  echo "                   words, or a uniquely keyed rewrite in the same file (bold item lead or first table cell), counts"
+  echo "                   as amended, not removed; read-only; exit 0 pass, 1 missing"
   echo "                   lines, 2 usage/git error"
   echo "                   Usage: --check-archive (--range A..B | --staged)"
   echo "  --validate       Run the MavP validator (artifact sync check)"
@@ -121,12 +134,27 @@ elif [[ "${1-}" == "--agent" ]]; then
 elif [[ "${1-}" == "--close-session" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-close-session.js" "$@"
+elif [[ "${1-}" == "--close-wave" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-close-wave.js" "$@"
 elif [[ "${1-}" == "--set-strategy-note" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-set-strategy-note.js" "$@"
+elif [[ "${1-}" == "--set-wave-goal" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-set-wave-goal.js" "$@"
 elif [[ "${1-}" == "--set-next-action" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-set-next-action.js" "$@"
+elif [[ "${1-}" == "--feedback" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-feedback.js" "$@"
+elif [[ "${1-}" == "--migrate" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-migrate.js" "$@"
+elif [[ "${1-}" == "--intake" ]]; then
+  shift
+  node "$SCRIPT_DIR/mavp-operator-intake.js" "$@"
 elif [[ "${1-}" == "--new-task" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-new-task.js" "$@"

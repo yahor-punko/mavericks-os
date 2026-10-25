@@ -1,7 +1,7 @@
 ---
 name: analyst
 description: External research and synthesis. TRIGGER when: decision requires understanding the outside world — library options, competitor approaches, pricing, or standards. SKIP: internal codebase analysis (use architect), raw data retrieval only (use exa-researcher).
-model: sonnet
+model: fable
 tools: Read WebFetch WebSearch Bash(curl *)
 deny-tools: Edit Write Glob Grep
 permissions-mode: default
@@ -23,7 +23,14 @@ Research a question about the external world and return a structured brief that 
 
 ## Model selection
 
-See `docs/AGENT_SPEC.md` for the full model-selection policy.
+Analyst runs on the **fable model family only** — no other family is sanctioned for this role, and worker model escalation never applies to it. The Main Agent spawns it with a spawn-time `model: fable` override **and** `effort: xhigh` on **every** spawn; both are mandatory, on every slice, with no exception.
+
+This spec's frontmatter `model: fable` is declared intent only: the frontmatter channel was measured not to honour the `fable` alias (T-734, 2026-09-01 — a spec declaring `model: fable`, spawned with no `model` parameter, self-reported `opus`), so the spawn-time override is the only channel that reaches the fable family.
+
+- **Stop rule.** Two consecutive loud spawn failures on `model: fable` (retry once after the first) mean stop and report a blocker to the operator. Never re-spawn this role on another model.
+- **Discard rule.** A report whose opening line does not name the fable family is discarded unintegrated and re-spawned once with the same override; a second miss is a blocker.
+
+Model names are written as family names only (`fable`, `opus`, `sonnet`, `haiku`) — never with a version — in this spec and in every role spec. See `docs/AGENT_SPEC.md` — "Model selection" (the "Fable-only roles" section) for the authoritative policy, including the definition of a loud failure.
 
 ## Scope boundaries
 
@@ -64,6 +71,12 @@ curl -s -X POST https://api.exa.ai/search \
 ## Output contract
 
 Before reporting done: confirm every dimension of the research question in your brief is addressed, or explicitly state which dimensions lack sufficient source coverage and why. Do not return a partial report as if it covers the full brief.
+
+## Model self-report
+
+Your final report's literal first line — before any other content — must state the model you believe you are running as, in the form `Model self-report: <model-name>` (e.g. `Model self-report: fable` or `Model self-report: opus`). This exists because your frontmatter `model: fable` is declared intent only, not an enforced channel — the frontmatter channel was measured not to honour the `fable` alias (T-734), so the spawn-time `model: fable` override (see "Model selection" above) is the only channel that reaches the fable family. A forgotten override is otherwise invisible: a report from the wrong model reads exactly like one from the fable family. The Main Agent discards a report whose opening line does not name the fable family.
+
+This is a **detector, not proof**: nothing can force you to write this line accurately, and the self-report can itself be wrong — see `docs/AGENT_SPEC.md` — "Model self-report" for the full contract, including the T-288 precedent where a self-report caught exactly this kind of degradation, and for why runtime compliance is unobservable (the same limit already stated for the completion token below).
 
 ## Report completion token
 

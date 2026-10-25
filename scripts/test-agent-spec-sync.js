@@ -1,4 +1,7 @@
 'use strict';
+// mavp-corpus-guard: always-run
+// Corpus-wide guard: run-tests.js appends this to every --filter run (.claude/rules/scripts.md).
+// mavp-declared-in: .claude/rules/docs.md :: Agent spec invariants
 // Regression test: T-470 — mechanical guard for agent-frontmatter vs
 // docs/AGENT_SPEC.md drift.
 //
@@ -12,6 +15,17 @@
 //   3. Asserts each spec's values match the corresponding AGENT_SPEC.md
 //      entry, failing loudly (naming role, field, spec value vs table
 //      value) on any mismatch or missing counterpart in either direction.
+//
+// T-822 / T-841: the architect, analyst and exa-researcher are Fable-only
+// roles. This test also:
+//   7. Parses AGENT_SPEC.md's "Fable-only roles (...) declare `model: ...`"
+//      roster sentence (same shape as the worker sentence) and pins the
+//      derived Fable-only roster with deepStrictEqual.
+//   8. Runs the "Model self-report" section + literal-parity check for every
+//      Fable-only roster role (not just one role).
+//   9. Asserts every spec's frontmatter `model:` is a bare family alias, and
+//      that no versioned family token appears in any agent spec or in
+//      AGENT_SPEC.md (family names only, never a version).
 //
 // T-728: a report-only role (its deny-tools list denies BOTH Edit and
 // Write — the report is its sole deliverable) needs a spec-embedded
@@ -277,6 +291,19 @@ const MODEL_SELF_REPORT_HEADING_ARCHITECT = '## Model self-report';
 const MODEL_SELF_REPORT_HEADING_SPEC = '### Model self-report';
 const MODEL_SELF_REPORT_PHRASE_RE = /`(Model self-report:[^`]+)`/;
 
+// T-822: frontmatter `model:` must be a bare family alias, and no versioned
+// family token may appear in any agent spec or in AGENT_SPEC.md. Both
+// matchers are assembled at runtime from the family list so this file never
+// carries a contiguous versioned-name literal of its own (reserved-shape
+// rule, .claude/rules/scripts.md).
+const MODEL_FAMILY_ALIASES = ['sonnet', 'opus', 'haiku', 'fable'];
+const MODEL_FAMILY_ALT = MODEL_FAMILY_ALIASES.join('|');
+const VERSIONED_FAMILY_TOKEN_RE = new RegExp(
+  '(?:\\b(?:' + MODEL_FAMILY_ALT + ')[ -][0-9])|(?:claude-(?:' + MODEL_FAMILY_ALT + ')?-?[0-9])',
+  'i'
+);
+const EXPECTED_FABLE_ONLY_ROSTER = ['analyst', 'architect', 'exa-researcher'];
+
 // Extract the body of a named heading's section (everything up to the next
 // heading matching boundaryRe, or end of file), or null when the heading is
 // absent. Generalizes extractBudgetAwarenessSection() to an arbitrary
@@ -312,17 +339,25 @@ function parseSpecModelByRole(specText) {
     modelByRole[role] = workerModel;
   }
 
-  // "The architect's frontmatter default is `model: opus` ..."
-  const architectMatch = specText.match(
-    /architect'?s frontmatter default is `model:\s*([^`]+)`/i
+  // "Fable-only roles (architect, analyst, exa-researcher) declare `model: fable` ..."
+  const fableMatch = specText.match(
+    /Fable-only roles \(([^)]+)\) declare `model:\s*([^`]+)`/
   );
   assert.ok(
-    architectMatch,
-    'AGENT_SPEC.md: could not find the architect frontmatter default model sentence'
+    fableMatch,
+    'AGENT_SPEC.md: could not find the "Fable-only roles (...) declare `model: ...`" sentence'
   );
-  modelByRole.architect = architectMatch[1].trim();
+  const fableOnlyRoles = fableMatch[1].split(',').map((r) => r.trim());
+  const fableModel = fableMatch[2].trim();
+  for (const role of fableOnlyRoles) {
+    assert.ok(
+      !(role in modelByRole),
+      `AGENT_SPEC.md: role "${role}" is declared by both the worker sentence and the Fable-only roster sentence`
+    );
+    modelByRole[role] = fableModel;
+  }
 
-  return modelByRole;
+  return { modelByRole, fableOnlyRoles };
 }
 
 function parseSpecMaxTurnsByRole(specText) {
@@ -357,7 +392,7 @@ function parseSpecMaxTurnsByRole(specText) {
 
 function main() {
   const specText = fs.readFileSync(AGENT_SPEC_PATH, 'utf8');
-  const specModelByRole = parseSpecModelByRole(specText);
+  const { modelByRole: specModelByRole, fableOnlyRoles } = parseSpecModelByRole(specText);
   const specMaxTurnsByRole = parseSpecMaxTurnsByRole(specText);
 
   const agentSpecs = loadAgentSpecs();
@@ -387,6 +422,23 @@ function main() {
       failures.push(
         `[${role}] model: frontmatter (${spec.file}) declares "${spec.model}" ` +
           `but AGENT_SPEC.md's model policy declares "${specModelByRole[role]}"`
+      );
+    }
+
+    // T-822: frontmatter model must be a bare family alias
+    if (!MODEL_FAMILY_ALIASES.includes(spec.model)) {
+      failures.push(
+        `[${role}] model: frontmatter (${spec.file}) declares "${spec.model}" which is not a ` +
+          `bare family alias (one of ${MODEL_FAMILY_ALIASES.join('/')})`
+      );
+    }
+
+    // T-822: no versioned family token anywhere in the spec file
+    const versionedInSpec = spec.text.match(VERSIONED_FAMILY_TOKEN_RE);
+    if (versionedInSpec) {
+      failures.push(
+        `[${role}] versioned-model-name: ${spec.file} contains the versioned family token ` +
+          `"${versionedInSpec[0]}" (family names only, never a version)`
       );
     }
 
@@ -470,61 +522,79 @@ function main() {
   }
 
   // ---------------------------------------------------------------------
-  // T-733: architect "Model self-report" section + phrase-parity check
+  // T-733 / T-822: "Model self-report" section + phrase-parity check for
+  // every Fable-only roster role
   // ---------------------------------------------------------------------
 
-  const architectSpec = agentSpecs.find((s) => s.name === 'architect');
-  assert.ok(
-    architectSpec,
-    'No .claude/agents/architect.md frontmatter found (name: architect)'
+  const fableOnlySorted = [...fableOnlyRoles].sort();
+  assert.deepStrictEqual(
+    fableOnlySorted,
+    EXPECTED_FABLE_ONLY_ROSTER,
+    `[roster] Fable-only roster parsed from AGENT_SPEC.md (${fableOnlySorted.join(', ')}) ` +
+      `does not match the expected Fable-only roster (${EXPECTED_FABLE_ONLY_ROSTER.join(', ')})`
   );
 
-  const architectModelSelfReportSection = extractSectionByHeading(
-    architectSpec.text,
-    MODEL_SELF_REPORT_HEADING_ARCHITECT,
-    /\n## /
-  );
-
-  if (architectModelSelfReportSection === null) {
+  // AGENT_SPEC.md-side versioned-token check
+  const versionedInSpecDoc = specText.match(VERSIONED_FAMILY_TOKEN_RE);
+  if (versionedInSpecDoc) {
     failures.push(
-      `[architect] model-self-report: ${architectSpec.file} has no ` +
-        `"${MODEL_SELF_REPORT_HEADING_ARCHITECT}" section (required — see ` +
-        'docs/AGENT_SPEC.md "Model self-report")'
+      `[AGENT_SPEC.md] versioned-model-name: docs/AGENT_SPEC.md contains the versioned family ` +
+        `token "${versionedInSpecDoc[0]}" (family names only, never a version)`
     );
-  } else {
-    const specModelSelfReportSection = extractSectionByHeading(
-      specText,
-      MODEL_SELF_REPORT_HEADING_SPEC,
-      /\n### |\n## /
+  }
+
+  const specModelSelfReportSection = extractSectionByHeading(
+    specText,
+    MODEL_SELF_REPORT_HEADING_SPEC,
+    /\n### |\n## /
+  );
+  assert.ok(
+    specModelSelfReportSection !== null,
+    `AGENT_SPEC.md: no "${MODEL_SELF_REPORT_HEADING_SPEC}" section found`
+  );
+  const specPhraseMatch = specModelSelfReportSection.match(MODEL_SELF_REPORT_PHRASE_RE);
+  if (!specPhraseMatch) {
+    failures.push(
+      'AGENT_SPEC.md: model-self-report: ' +
+        `"${MODEL_SELF_REPORT_HEADING_SPEC}" section has no backticked ` +
+        '`Model self-report: <model-name>` literal'
     );
+  }
+
+  for (const role of fableOnlyRoles) {
+    const roleSpec = agentSpecs.find((s) => s.name === role);
     assert.ok(
-      specModelSelfReportSection !== null,
-      `AGENT_SPEC.md: no "${MODEL_SELF_REPORT_HEADING_SPEC}" section found`
+      roleSpec,
+      `No .claude/agents/${role}.md frontmatter found (name: ${role}) but AGENT_SPEC.md's ` +
+        'Fable-only roster lists it'
     );
 
-    const architectPhraseMatch = architectModelSelfReportSection.match(
-      MODEL_SELF_REPORT_PHRASE_RE
-    );
-    const specPhraseMatch = specModelSelfReportSection.match(
-      MODEL_SELF_REPORT_PHRASE_RE
+    const roleSelfReportSection = extractSectionByHeading(
+      roleSpec.text,
+      MODEL_SELF_REPORT_HEADING_ARCHITECT,
+      /\n## /
     );
 
-    if (!architectPhraseMatch) {
+    if (roleSelfReportSection === null) {
       failures.push(
-        `[architect] model-self-report: ${architectSpec.file}'s ` +
+        `[${role}] model-self-report: ${roleSpec.file} has no ` +
+          `"${MODEL_SELF_REPORT_HEADING_ARCHITECT}" section (required — see ` +
+          'docs/AGENT_SPEC.md "Model self-report")'
+      );
+      continue;
+    }
+
+    const rolePhraseMatch = roleSelfReportSection.match(MODEL_SELF_REPORT_PHRASE_RE);
+    if (!rolePhraseMatch) {
+      failures.push(
+        `[${role}] model-self-report: ${roleSpec.file}'s ` +
           `"${MODEL_SELF_REPORT_HEADING_ARCHITECT}" section has no backticked ` +
           '`Model self-report: <model-name>` literal'
       );
-    } else if (!specPhraseMatch) {
+    } else if (specPhraseMatch && rolePhraseMatch[1].trim() !== specPhraseMatch[1].trim()) {
       failures.push(
-        'AGENT_SPEC.md: model-self-report: ' +
-          `"${MODEL_SELF_REPORT_HEADING_SPEC}" section has no backticked ` +
-          '`Model self-report: <model-name>` literal'
-      );
-    } else if (architectPhraseMatch[1].trim() !== specPhraseMatch[1].trim()) {
-      failures.push(
-        `[architect] model-self-report: ${architectSpec.file} states ` +
-          `"${architectPhraseMatch[1].trim()}" but AGENT_SPEC.md's ` +
+        `[${role}] model-self-report: ${roleSpec.file} states ` +
+          `"${rolePhraseMatch[1].trim()}" but AGENT_SPEC.md's ` +
           `"${MODEL_SELF_REPORT_HEADING_SPEC}" section states ` +
           `"${specPhraseMatch[1].trim()}"`
       );

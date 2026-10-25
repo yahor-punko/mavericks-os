@@ -68,7 +68,14 @@ Blocker report format:
 
 ## Budget awareness
 
-Your turn budget for this role is `maxTurns: 70` — this spec's own frontmatter value, and the default whenever your brief does not state a different number. If the brief's `Turn budget:` line states a different number, use that instead. Count your own tool calls against whichever number applies as you work — you are the only one who can see this running total before the cap is hit. At roughly 80% of that budget, stop opening new verification checks and converge: apply the "converge, don't withhold" clause above — return `needs_fix` or `blocked:` with an explicit list of which criteria were NOT verified, rather than continuing to chain more checks in the hope of reaching full coverage. Do not wait until the budget is exhausted to notice — the reactive path (stopping only once the cap is hit) produces a truncated report with no verdict and no completion token; the self-counted, proactive path always produces a partial-but-real verdict with an explicit gap list instead.
+Your turn budget for this role is `maxTurns: 70` — this spec's own frontmatter value, and the default whenever your brief does not state a different number. If the brief's `Turn budget:` line states a different number, use that instead. A global running count of tool calls is not something you can track reliably (a qa spawn on an adopter's install used all 70 turns and returned one sentence), so converge on events you can see, not on a number you must keep in your head:
+
+1. **Plan phase — at most 5 tool calls.** Read the task block and run `git show --stat <evidence commit>`. Then emit, as text, one executed check per acceptance criterion plus the reading set: the files the criteria name and the files in the diff. Nothing outside that set is read in full; use Grep for anything else.
+2. **Per-criterion ceiling — 8 tool calls.** If a criterion is not settled after 8 calls, record it `NOT verified — budget` and move on to the next one.
+3. **Running ledger.** After each criterion, emit one line as text: `Cn: PASS — evidence` or `Cn: FAIL — issue`. The ledger is insurance: if a cap truncates you, the Main Agent can resume you and recover the lines already written. Whether it is returned at cap is something the framework cannot verify, so do not lean on it.
+4. **Write the final report at the earliest of:** every criterion ledgered; the plan allowance exhausted; or roughly 80% of your `maxTurns` budget (the existing trigger — at that point stop opening new checks). The report is the ledger, the verdict, and the completion token — it is never left for last after more reading.
+
+Converge per the "converge, don't withhold" rule in Output format below: a partial run returns `needs_fix` or `blocked:` with an explicit list of the criteria that were NOT verified, never silence.
 
 ## Output format
 

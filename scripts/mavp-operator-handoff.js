@@ -149,6 +149,45 @@ function buildHandoff(data, notes) {
 }
 
 // ---------------------------------------------------------------------------
+// Advisory (T-809) — HANDOFF.md is single-use and must never be committed
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns an advisory string when HANDOFF.md under `root` is tracked or is
+ * untracked-but-not-ignored; null when it is ignored, or when `root` is not a
+ * repository / the tool is unavailable. Tracked-ness is checked FIRST because
+ * `check-ignore` never reports a tracked file as ignored.
+ */
+function handoffGitAdvisory(root) {
+  const run = (gitArgs) => {
+    try {
+      return spawnSync('git', gitArgs, { cwd: root, encoding: 'utf8', timeout: 5000 });
+    } catch {
+      return null;
+    }
+  };
+
+  const inside = run(['rev-parse', '--is-inside-work-tree']);
+  if (!inside || inside.error || inside.status !== 0) return null;
+
+  const tracked = run(['ls-files', '--error-unmatch', 'HANDOFF.md']);
+  if (!tracked || tracked.error) return null;
+  if (tracked.status === 0) {
+    return 'Advisory: HANDOFF.md is tracked, but it is single-use and is read from disk at the next '
+      + 'session start - it should never be committed. Run `git rm --cached HANDOFF.md` and add HANDOFF.md '
+      + 'to .gitignore.';
+  }
+
+  const ignored = run(['check-ignore', '-q', 'HANDOFF.md']);
+  if (!ignored || ignored.error) return null;
+  if (ignored.status !== 0) {
+    return 'Advisory: HANDOFF.md is not ignored. Add HANDOFF.md to .gitignore (mavp-install.js --update '
+      + 'adds it) and do not commit it - it is single-use.';
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -172,6 +211,13 @@ function main() {
 
   fs.writeFileSync(HANDOFF_PATH, content, 'utf8');
   console.log(`HANDOFF.md written to ${HANDOFF_PATH}`);
+
+  const advisory = handoffGitAdvisory(ROOT);
+  if (advisory) console.log(advisory);
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = { handoffGitAdvisory };

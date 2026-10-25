@@ -40,13 +40,29 @@
 //   Part 4 (end-to-end) — degrade silently when scripts/publish-manifest.json
 //     is absent.
 //
+//   Part 5 (T-845, end-to-end) — RECAP: the `Advisories this close (N):` block
+//     prints immediately before `Session closed.`, after the results table,
+//     names T-711, and survives a `tail -6`; `RENAME_SESSION:` stays last.
+//   Part 6 (T-845) — both the T-629 and T-718 advisories fire → `(2)`.
+//   Part 7 (T-845) — neither fires → `Advisories this close: none` exactly once.
+//   Part 8 (T-845) — the same recap on the interactive path.
+//   Part 9 (T-845 round 2) — an advisory other than T-629/T-718 (the
+//     shipped-but-unbooked one, T-637) reaches the recap, with count (1); Part 7
+//     additionally asserts no advisory-shaped line printed in the `none` fixture.
+//   Part 10 (T-845 round 3) — the BACKLOG.md archive warning (a merged task and
+//     two Active Wave headings) reaches the recap on both paths with the right
+//     count, and the recap never reads `none` right after that warning.
+//   Part 11 (T-845 round 4) — the shipped-but-unbooked shallow-clone stand-down
+//     (a qa_passed task in a `--depth 1` clone) reaches the recap, count (1),
+//     tagged (T-637), and the recap never reads `none` after it.
+//
 // Node built-ins only — no npm dependencies (see .claude/rules/scripts.md).
 
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const assert = require('node:assert');
-const { execSync, spawnSync } = require('node:child_process');
+const { execSync, spawnSync, spawn } = require('node:child_process');
 
 const { findShipTouchingChangelogOmissions } = require('./mavp-operator-close-session.js');
 
@@ -61,7 +77,7 @@ function runCloseSession(dir) {
     env: { ...process.env, MAVERICKS_PROJECT_ROOT: dir, MAVERICKS_SCRIPTS: SCRIPTS_DIR },
     encoding: 'utf8',
   });
-  return { status: r.status, out: (r.stdout || '') + (r.stderr || '') };
+  return { status: r.status, out: (r.stdout || '') + (r.stderr || ''), stdout: r.stdout || '' };
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +456,343 @@ function buildGitFixture(dir, { changelogMentionsT711 } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-fs.rmSync(TMP_ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+// T-845 helpers. The recap sits between the results table and `Session closed.`
+// ---------------------------------------------------------------------------
+const RECAP_HEADER_RE = /Advisories this close/;
+const LOG_WITH_T711 = '# EXECUTION_LOG\n\n- 2026-08-23 — T-711 spawned developer. tool_uses: 10/140 outcome: completed\n';
 
-console.log('\nAll T-718 CHANGELOG ship-omission advisory assertions passed.');
+function stripAnsi(text) {
+  return text.replace(/\u001b\[[0-9;]*m/g, '');
+}
+
+// Verify the structural contract shared by both paths and return the lines.
+function checkRecapPlacement(label, rawOut) {
+  const lines = stripAnsi(rawOut).split('\n');
+  const closedIdx = lines.findIndex((l) => l.trim() === 'Session closed.');
+  assert.ok(closedIdx !== -1, `${label} FAIL: no "Session closed." line:\n${rawOut}`);
+  const recapIdx = lines.findIndex((l) => RECAP_HEADER_RE.test(l));
+  assert.ok(recapIdx !== -1 && recapIdx < closedIdx, `${label} FAIL: recap must precede "Session closed.". recap=${recapIdx} closed=${closedIdx}\n${rawOut}`);
+  const renameIdx = lines.map((l, i) => (l.startsWith('RENAME_SESSION:') ? i : -1)).filter((i) => i !== -1);
+  assert.strictEqual(renameIdx.length, 1, `${label} FAIL: expected exactly one RENAME_SESSION line`);
+  const nonEmpty = lines.filter((l) => l.trim() !== '');
+  assert.ok(nonEmpty[nonEmpty.length - 1].startsWith('RENAME_SESSION:'), `${label} FAIL: RENAME_SESSION must stay the last output line`);
+  return { lines, recapIdx, closedIdx };
+}
+
+// ---------------------------------------------------------------------------
+// Part 5 — T-845 recap, non-interactive: T-711 absent from CHANGELOG.md.
+// ---------------------------------------------------------------------------
+{
+  const dir = path.join(TMP_ROOT, 'e2e-recap');
+  buildGitFixture(dir, { changelogMentionsT711: false });
+
+  // stdout only: the recap contract is about the stdout stream's tail.
+  const { status, stdout: out } = runCloseSession(dir);
+  assert.strictEqual(status, 0, `Part 5 FAIL: unexpected exit ${status}:\n${out}`);
+  const { lines, recapIdx, closedIdx } = checkRecapPlacement('Part 5', out);
+
+  // Last row of the session-completed table: the T-711 row.
+  const tableRowIdx = lines.map((l, i) => (/^\s*T-711\s/.test(l) ? i : -1)).filter((i) => i !== -1).pop();
+  assert.ok(tableRowIdx !== undefined, `Part 5 FAIL: no T-711 table row:\n${out}`);
+
+  const recapLineIdx = lines.findIndex((l, i) => i > recapIdx && l.includes('CHANGELOG.md has no entry for: T-711'));
+  assert.ok(recapLineIdx !== -1, `Part 5 FAIL: no recap line naming T-711:\n${out}`);
+  assert.ok(recapLineIdx > tableRowIdx, `Part 5 FAIL: recap line (${recapLineIdx}) must come after the table's last row (${tableRowIdx})`);
+  assert.ok(recapLineIdx < closedIdx, `Part 5 FAIL: recap line (${recapLineIdx}) must come before "Session closed." (${closedIdx})`);
+
+  // The original pre-table advisory is still printed at its position.
+  const earlyIdx = lines.findIndex((l) => l.includes('⚠ CHANGELOG.md has no entry for: T-711'));
+  assert.ok(earlyIdx !== -1 && earlyIdx < tableRowIdx, 'Part 5 FAIL: the original pre-table advisory must remain in place');
+
+  // `tail -6` of the real stdout still contains T-711.
+  const tail = spawnSync('tail', ['-6'], { input: out, encoding: 'utf8' }).stdout;
+  assert.ok(tail.includes('T-711'), `Part 5 FAIL: tail -6 lost T-711:\n${tail}`);
+
+  console.log('Part 5 (T-845 end-to-end: recap after table, before Session closed., survives tail -6) passed.');
+  console.log('--- tail -6 ---\n' + tail + '---------------');
+}
+
+// ---------------------------------------------------------------------------
+// Part 6 — T-845: both T-629 (no EXECUTION_LOG.md entry) and T-718 fire.
+// ---------------------------------------------------------------------------
+{
+  const dir = path.join(TMP_ROOT, 'e2e-recap-both');
+  buildGitFixture(dir, { changelogMentionsT711: false });
+
+  const { status, stdout: out } = runCloseSession(dir);
+  assert.strictEqual(status, 0, `Part 6 FAIL: unexpected exit ${status}:\n${out}`);
+  const plain = stripAnsi(out);
+  assert.strictEqual(plain.split('Advisories this close (2):').length - 1, 1, `Part 6 FAIL: expected exactly one "Advisories this close (2):" header:\n${out}`);
+  const { lines, recapIdx, closedIdx } = checkRecapPlacement('Part 6', out);
+  const block = lines.slice(recapIdx + 1, closedIdx).filter((l) => l.trim() !== '');
+  assert.strictEqual(block.length, 2, `Part 6 FAIL: expected two recap lines, got ${JSON.stringify(block)}`);
+  assert.ok(block.some((l) => l.includes('EXECUTION_LOG.md has no entry for: T-711')), `Part 6 FAIL: missing T-629 line: ${JSON.stringify(block)}`);
+  assert.ok(block.some((l) => l.includes('CHANGELOG.md has no entry for: T-711')), `Part 6 FAIL: missing T-718 line: ${JSON.stringify(block)}`);
+
+  console.log('Part 6 (T-845 end-to-end: both advisories fire — recap reads (2) with both lines) passed.');
+}
+
+// ---------------------------------------------------------------------------
+// Part 7 — T-845: neither advisory fires → the `none` line, exactly once.
+// ---------------------------------------------------------------------------
+{
+  const dir = path.join(TMP_ROOT, 'e2e-recap-none');
+  buildGitFixture(dir, { changelogMentionsT711: true });
+  fs.writeFileSync(path.join(dir, 'EXECUTION_LOG.md'), LOG_WITH_T711, 'utf8');
+
+  const { status, stdout: out } = runCloseSession(dir);
+  assert.strictEqual(status, 0, `Part 7 FAIL: unexpected exit ${status}:\n${out}`);
+  const plain = stripAnsi(out);
+  assert.strictEqual(plain.split('Advisories this close: none').length - 1, 1, `Part 7 FAIL: expected "Advisories this close: none" exactly once:\n${out}`);
+  assert.ok(!/Advisories this close \(/.test(plain), `Part 7 FAIL: no counted header expected:\n${out}`);
+  const { recapIdx, closedIdx } = checkRecapPlacement('Part 7', out);
+  assert.strictEqual(closedIdx - recapIdx, 1, 'Part 7 FAIL: the none line must sit immediately before "Session closed."');
+  // `none` must be trustworthy: no other advisory-shaped line (warning glyph,
+  // WARN:, SKIPPED, validator issues, a hygiene or feedback block) printed in this run.
+  assert.ok(!/⚠|WARN:|SKIPPED|Validator issues|Worktree hygiene|mavp-feedback/.test(plain), `Part 7 FAIL: an advisory printed in the "none" fixture:\n${out}`);
+  assert.ok(plain.includes('Validator passed'), 'Part 7 FAIL: fixture validator must pass so no validator advisory is expected');
+
+  console.log('Part 7 (T-845 end-to-end: nothing fired — "Advisories this close: none" once) passed.');
+}
+
+// ---------------------------------------------------------------------------
+// Part 9 — T-845 round 2: an advisory OTHER than T-629/T-718 reaches the recap
+// with the right count. T-712 sits at qa_passed with an evidence commit that
+// is reachable on HEAD, so the shipped-but-unbooked advisory (T-637) fires;
+// the execution log and CHANGELOG.md both mention T-711, so T-629/T-718 stay
+// silent and the recap must read exactly `(1)`.
+// ---------------------------------------------------------------------------
+{
+  const dir = path.join(TMP_ROOT, 'e2e-recap-other');
+  const t711Hash = buildGitFixture(dir, { changelogMentionsT711: true });
+  fs.writeFileSync(path.join(dir, 'EXECUTION_LOG.md'), LOG_WITH_T711, 'utf8');
+  const tsPath = path.join(dir, 'TASK_STATUS.md');
+  fs.writeFileSync(tsPath, fs.readFileSync(tsPath, 'utf8').replace('## Recently completed tasks', `### T-712 — Booked late
+- **Status:** qa_passed
+- **Owner role:** product-docs
+- **Verification type:** artifact
+- **Last verified by:** qa
+- **Evidence:** commit: ${t711Hash} branch: main
+- **Notes:** —
+
+## Recently completed tasks`), 'utf8');
+  const blPath = path.join(dir, 'BACKLOG.md');
+  fs.writeFileSync(blPath, fs.readFileSync(blPath, 'utf8').replace('## Active Wave\n', `## Active Wave
+
+### T-712 — Booked late
+- **Status:** qa_passed
+- **Owner role:** product-docs
+- **Repo:** fixture-repo
+- **Verification type:** artifact
+`), 'utf8');
+
+  const { status, stdout: out } = runCloseSession(dir);
+  assert.strictEqual(status, 0, `Part 9 FAIL: unexpected exit ${status}:\n${out}`);
+  const plain = stripAnsi(out);
+  assert.ok(plain.includes('--set-status T-712 merged'), `Part 9 FAIL: fixture must make the shipped-but-unbooked proposal fire:\n${out}`);
+  assert.strictEqual(plain.split('Advisories this close (1):').length - 1, 1, `Part 9 FAIL: expected exactly one "Advisories this close (1):" header:\n${out}`);
+  const { lines, recapIdx, closedIdx } = checkRecapPlacement('Part 9', out);
+  const block = lines.slice(recapIdx + 1, closedIdx).filter((l) => l.trim() !== '');
+  assert.strictEqual(block.length, 1, `Part 9 FAIL: expected one recap line, got ${JSON.stringify(block)}`);
+  assert.ok(block[0].includes('shipped but not booked: T-712') && block[0].includes('(T-637)'), `Part 9 FAIL: recap line wrong: ${JSON.stringify(block)}`);
+
+  console.log('Part 9 (T-845 round 2: a non-T-629/T-718 advisory (T-637) reaches the recap, count (1)) passed.');
+}
+
+// ---------------------------------------------------------------------------
+// Part 10 — T-845 round 3: the BACKLOG.md archive warning is fed to the recap.
+// Fixture: merged T-711 plus a SECOND `## Active Wave` heading (lines 3 and 5),
+// which makes archiveMergedTasksFromActiveWave() refuse and the close print the
+// warning. T-629/T-718 stay silent (log + CHANGELOG mention T-711), so the
+// recap must read exactly (1) and never `none`.
+// ---------------------------------------------------------------------------
+function buildDoubleActiveWaveFixture(dir) {
+  buildGitFixture(dir, { changelogMentionsT711: true });
+  fs.writeFileSync(path.join(dir, 'EXECUTION_LOG.md'), LOG_WITH_T711, 'utf8');
+  const blPath = path.join(dir, 'BACKLOG.md');
+  const bl = fs.readFileSync(blPath, 'utf8');
+  assert.ok(bl.includes('## Wave 92 — Archived'), 'Part 10 setup: fixture shape changed');
+  fs.writeFileSync(blPath, bl.replace('## Wave 92 — Archived', '## Active Wave'), 'utf8');
+}
+
+function checkArchiveWarningRecap(label, out) {
+  const plain = stripAnsi(out);
+  const warn = 'BACKLOG.md archive warning: Multiple ## Active Wave headings detected in BACKLOG.md at line(s): 3, 5.';
+  assert.ok(plain.includes('⚠ ' + warn), `${label} FAIL: fixture must make the archive warning print:\n${out}`);
+  assert.ok(!plain.includes('Advisories this close: none'), `${label} FAIL: recap must not read "none" after a warning:\n${out}`);
+  assert.strictEqual(plain.split('Advisories this close (1):').length - 1, 1, `${label} FAIL: expected exactly one "Advisories this close (1):" header:\n${out}`);
+  const { lines, recapIdx, closedIdx } = checkRecapPlacement(label, out);
+  const block = lines.slice(recapIdx + 1, closedIdx).filter((l) => l.trim() !== '');
+  assert.strictEqual(block.length, 1, `${label} FAIL: expected one recap line, got ${JSON.stringify(block)}`);
+  assert.ok(block[0].includes(warn), `${label} FAIL: recap line must carry the archive warning with lines 3, 5: ${JSON.stringify(block)}`);
+}
+
+{
+  const dir = path.join(TMP_ROOT, 'e2e-recap-archive-warning');
+  buildDoubleActiveWaveFixture(dir);
+  const { status, stdout: out } = runCloseSession(dir);
+  assert.strictEqual(status, 0, `Part 10 FAIL: unexpected exit ${status}:\n${out}`);
+  checkArchiveWarningRecap('Part 10 (non-interactive)', out);
+  console.log('Part 10 (T-845 round 3, non-interactive: archive warning reaches the recap, count (1), never "none") passed.');
+}
+
+// Part 10 (unit): the deferred/deprecated relocate-failure warnings of
+// sweepTerminalSkipTasks() reach the recap. Neither id has a block in the
+// content, so both relocations fail.
+{
+  const cs = require('./mavp-operator-close-session.js');
+  cs.resetAdvisoryCollector();
+  const logged = [];
+  const realLog = console.log;
+  console.log = (...a) => { logged.push(a.join(' ')); };
+  try {
+    cs.sweepTerminalSkipTasks('# TS\n\n## Active tasks\n\n## Recently completed tasks\n', [
+      { id: 'T-901', status: 'deferred' },
+      { id: 'T-902', status: 'deprecated' },
+    ]);
+    cs.printAdvisoryRecap();
+  } finally {
+    console.log = realLog;
+    cs.resetAdvisoryCollector();
+  }
+  const plainLog = stripAnsi(logged.join('\n'));
+  assert.ok(plainLog.includes('⚠ T-901 (deferred) — could not relocate'), `Part 10 (unit) FAIL: deferred warning did not print:\n${plainLog}`);
+  assert.ok(plainLog.includes('⚠ T-902 (deprecated) — could not relocate'), `Part 10 (unit) FAIL: deprecated warning did not print:\n${plainLog}`);
+  assert.ok(plainLog.includes('Advisories this close (2):'), `Part 10 (unit) FAIL: expected a (2) recap:\n${plainLog}`);
+  assert.ok(plainLog.includes('T-901 (deferred) could not be relocated') && plainLog.includes('T-902 (deprecated) could not be relocated'), `Part 10 (unit) FAIL: recap lines missing:\n${plainLog}`);
+  console.log('Part 10 (T-845 round 3, unit: deferred/deprecated relocate failures reach the recap, count (2)) passed.');
+}
+
+// ---------------------------------------------------------------------------
+// Part 11 — T-845 round 4: the shipped-but-unbooked check's shallow-clone
+// stand-down feeds the recap. Fixture: a qa_passed T-712 (a shipped-but-unbooked
+// candidate) in a `git clone --depth 1` checkout of a multi-commit source repo
+// (the source is created by buildGitFixture, whose init pins the branch). The
+// stand-down line prints, and the recap must read `(1)` with a stand-down line
+// tagged (T-637) — never `none`. Log + CHANGELOG mention T-711 so T-629/T-718
+// stay silent.
+// ---------------------------------------------------------------------------
+{
+  const srcDir = path.join(TMP_ROOT, 'e2e-recap-shallow-src');
+  const dir = path.join(TMP_ROOT, 'e2e-recap-shallow');
+  const t711Hash = buildGitFixture(srcDir, { changelogMentionsT711: true });
+  fs.writeFileSync(path.join(srcDir, 'EXECUTION_LOG.md'), LOG_WITH_T711, 'utf8');
+  const tsPath = path.join(srcDir, 'TASK_STATUS.md');
+  fs.writeFileSync(tsPath, fs.readFileSync(tsPath, 'utf8').replace('## Recently completed tasks', `### T-712 — Booked late
+- **Status:** qa_passed
+- **Owner role:** product-docs
+- **Verification type:** artifact
+- **Last verified by:** qa
+- **Evidence:** commit: ${t711Hash} branch: main
+- **Notes:** —
+
+## Recently completed tasks`), 'utf8');
+  const blPath = path.join(srcDir, 'BACKLOG.md');
+  fs.writeFileSync(blPath, fs.readFileSync(blPath, 'utf8').replace('## Active Wave\n', `## Active Wave
+
+### T-712 — Booked late
+- **Status:** qa_passed
+- **Owner role:** product-docs
+- **Repo:** fixture-repo
+- **Verification type:** artifact
+`), 'utf8');
+  const srcGit = (cmd) => execSync(`git ${cmd}`, { cwd: srcDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  srcGit('add -A');
+  srcGit('commit -q -m state');
+
+  // file:// forces a real (shallow-capable) transport; a bare local path ignores --depth.
+  execSync(`git clone -q --depth 1 "file://${srcDir}" "${dir}"`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  execSync('git config user.email dev@example.com', { cwd: dir });
+  execSync('git config user.name Dev', { cwd: dir });
+  const shallow = execSync('git rev-parse --is-shallow-repository', { cwd: dir, encoding: 'utf8' }).trim();
+  assert.strictEqual(shallow, 'true', 'Part 11 setup: the clone must be shallow');
+
+  const { status, stdout: out } = runCloseSession(dir);
+  assert.strictEqual(status, 0, `Part 11 FAIL: unexpected exit ${status}:\n${out}`);
+  const plain = stripAnsi(out);
+  assert.ok(plain.includes('Shipped-but-unbooked check stood down — shallow git clone'), `Part 11 FAIL: the stand-down line must print:\n${out}`);
+  assert.ok(!plain.includes('--set-status T-712 merged'), `Part 11 FAIL: a stand-down must carry no booking proposal:\n${out}`);
+  assert.ok(!plain.includes('Advisories this close: none'), `Part 11 FAIL: the recap must never read "none" after a stand-down:\n${out}`);
+  assert.strictEqual(plain.split('Advisories this close (1):').length - 1, 1, `Part 11 FAIL: expected exactly one "Advisories this close (1):" header:\n${out}`);
+  const { lines, recapIdx, closedIdx } = checkRecapPlacement('Part 11', out);
+  const block = lines.slice(recapIdx + 1, closedIdx).filter((l) => l.trim() !== '');
+  assert.strictEqual(block.length, 1, `Part 11 FAIL: expected one recap line, got ${JSON.stringify(block)}`);
+  assert.ok(block[0].includes('stood down') && block[0].includes('shallow') && block[0].includes('(T-637)'), `Part 11 FAIL: recap line wrong: ${JSON.stringify(block)}`);
+
+  console.log('Part 11 (T-845 round 4: shallow-clone stand-down reaches the recap, count (1), never "none") passed.');
+  console.log('--- Part 11 recap ---\n' + lines.slice(recapIdx, closedIdx + 1).join('\n') + '\n---------------------');
+}
+
+// ---------------------------------------------------------------------------
+// Part 8 — T-845: the interactive path prints the same recap. Answers are
+// written only once their prompt has appeared (same technique as
+// test-close-session-mode.js's sequential helper).
+// ---------------------------------------------------------------------------
+function runInteractiveSequential(dir, steps) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CLOSE_SESSION_PATH, '--interactive'], {
+      cwd: dir,
+      env: { ...process.env, MAVERICKS_PROJECT_ROOT: dir, MAVERICKS_SCRIPTS: SCRIPTS_DIR },
+    });
+    let stdout = '';
+    let stepIndex = 0;
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`interactive run timed out at step ${stepIndex} (${steps[stepIndex] && steps[stepIndex].match}); stdout so far:\n${stdout}`));
+    }, 20000);
+    function advance() {
+      while (stepIndex < steps.length && stdout.includes(steps[stepIndex].match)) {
+        child.stdin.write(steps[stepIndex].answer + '\n');
+        stepIndex++;
+      }
+    }
+    child.stdout.on('data', (d) => { stdout += d.toString(); advance(); });
+    child.stderr.on('data', () => { /* stdout stream only */ });
+    child.on('exit', (status) => { clearTimeout(timer); resolve({ status, out: stdout }); });
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+  });
+}
+
+(async () => {
+  const dir = path.join(TMP_ROOT, 'e2e-recap-interactive');
+  buildGitFixture(dir, { changelogMentionsT711: false });
+  // Set a wave goal so the interactive run has no wave-goal prompt to answer.
+  const psPath = path.join(dir, 'PROCESS_STATE.json');
+  const ps = JSON.parse(fs.readFileSync(psPath, 'utf8'));
+  ps.wave_goal = 'fixture goal';
+  fs.writeFileSync(psPath, JSON.stringify(ps, null, 2) + '\n', 'utf8');
+
+  const { status, out } = await runInteractiveSequential(dir, [
+    { match: 'Next action [', answer: '' },
+    { match: 'Run git push?', answer: 'n' },
+  ]);
+  assert.strictEqual(status, 0, `Part 8 FAIL: unexpected exit ${status}:\n${out}`);
+  const { lines, recapIdx, closedIdx } = checkRecapPlacement('Part 8', out);
+  const tableRowIdx = lines.map((l, i) => (/^\s*T-711\s/.test(l) ? i : -1)).filter((i) => i !== -1).pop();
+  assert.ok(tableRowIdx !== undefined && tableRowIdx < recapIdx, `Part 8 FAIL: recap must follow the table:\n${out}`);
+  const block = lines.slice(recapIdx, closedIdx).join('\n');
+  assert.ok(/Advisories this close \(2\):/.test(block), `Part 8 FAIL: expected (2) recap:\n${out}`);
+  assert.ok(block.includes('CHANGELOG.md has no entry for: T-711'), `Part 8 FAIL: recap must name T-711:\n${out}`);
+  console.log('Part 8 (T-845 interactive: recap before Session closed.) passed.');
+
+  // Part 10, interactive path: syncBacklogMergedTasks() runs here as well.
+  const dir10 = path.join(TMP_ROOT, 'e2e-recap-archive-warning-interactive');
+  buildDoubleActiveWaveFixture(dir10);
+  const ps10Path = path.join(dir10, 'PROCESS_STATE.json');
+  const ps10 = JSON.parse(fs.readFileSync(ps10Path, 'utf8'));
+  ps10.wave_goal = 'fixture goal';
+  fs.writeFileSync(ps10Path, JSON.stringify(ps10, null, 2) + '\n', 'utf8');
+  const r10 = await runInteractiveSequential(dir10, [
+    { match: 'Next action [', answer: '' },
+    { match: 'Run git push?', answer: 'n' },
+  ]);
+  assert.strictEqual(r10.status, 0, `Part 10 (interactive) FAIL: unexpected exit ${r10.status}:\n${r10.out}`);
+  checkArchiveWarningRecap('Part 10 (interactive)', r10.out);
+  console.log('Part 10 (T-845 round 3, interactive: archive warning reaches the recap, count (1), never "none") passed.');
+
+  fs.rmSync(TMP_ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  console.log('\nAll T-718 CHANGELOG ship-omission advisory assertions passed.');
+})().catch((err) => {
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+});

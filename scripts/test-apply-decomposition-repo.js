@@ -17,8 +17,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert');
+const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 
 const {
+  APPLY_VERIFICATION_TYPES,
   parseTaskBlock,
   buildBacklogEntry,
   buildTaskStatusEntry,
@@ -148,6 +151,65 @@ function makeFixtureRoot(name) {
   assert.ok(entry.includes('- **Last verified by:** —'), 'Test 5 FAIL: stub should contain Last verified by line (from shared lib, was missing in the drifted local copy)');
   assert.ok(entry.includes('- **Evidence:** —'), 'Test 5 FAIL: stub should contain Evidence line (from shared lib, was missing in the drifted local copy)');
   console.log('Test 5 passed: TASK_STATUS stub contains Status, Owner role, Verification type, Last verified by, and Evidence lines');
+}
+
+// ---------------------------------------------------------------------------
+// Test 7 (T-837): an unknown verification_type refuses the whole batch with
+// exit 1 before any write; a known value (unit) registers normally.
+// Runs the real CLI against a fixture root; the artifacts are hashed before
+// and after the refused run.
+// ---------------------------------------------------------------------------
+{
+  assert.deepStrictEqual(
+    APPLY_VERIFICATION_TYPES,
+    ['artifact', 'runtime', 'unit', 'visual', 'manual'],
+    'Test 7 FAIL: APPLY_VERIFICATION_TYPES must list exactly the five known values'
+  );
+
+  const sha = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const runCli = (root, inputFile) => spawnSync(process.execPath, [
+    path.join(__dirname, 'mavp-operator-apply-decomposition.js'), inputFile,
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, MAVERICKS_PROJECT_ROOT: root, MAVERICKS_SCRIPTS: __dirname },
+  });
+  const wrap = body => `<!-- mavp-decomposition-start -->\n${body}\n<!-- mavp-decomposition-end -->`;
+  const taskText = (title, vt) =>
+    `title: ${title}\nowner_role: developer\ndepends_on: —\nverification_type: ${vt}\nproblem: P.\nacceptance_criteria: C.`;
+
+  const REFUSAL = 'apply-decomposition: task "Bad task" — unknown verification_type "integration" (allowed: artifact, runtime, unit, visual, manual)';
+
+  // 7a: single bad task.
+  // 7b: multi-task block, good task first then one bad task — whole batch refused.
+  const cases = [
+    ['7a-single-bad', taskText('Bad task', 'integration')],
+    ['7b-mixed-batch', taskText('Good task', 'unit') + '\n---\n' + taskText('Bad task', 'integration')],
+  ];
+  for (const [name, body] of cases) {
+    const root = makeFixtureRoot('t837-' + name);
+    const inputFile = path.join(root, 'decomposition.md');
+    fs.writeFileSync(inputFile, wrap(body), 'utf8');
+    const files = ['BACKLOG.md', 'TASK_STATUS.md', 'PROCESS_STATE.json'].map(f => path.join(root, f));
+    const before = files.map(sha);
+    const res = runCli(root, inputFile);
+    assert.strictEqual(res.status, 1, `Test ${name} FAIL: expected exit 1, got ${res.status}\nstdout:${res.stdout}\nstderr:${res.stderr}`);
+    assert.ok(res.stderr.split('\n').includes(REFUSAL), `Test ${name} FAIL: refusal line missing, stderr:\n${res.stderr}`);
+    assert.deepStrictEqual(files.map(sha), before, `Test ${name} FAIL: BACKLOG.md/TASK_STATUS.md/PROCESS_STATE.json must be byte-identical after a refused run`);
+    console.log(`Test ${name} passed: unknown verification_type refused with exit 1, artifacts byte-identical (sha256)`);
+  }
+
+  // 7c: a known value (unit) registers a task with the Verification type line.
+  {
+    const root = makeFixtureRoot('t837-7c-unit');
+    const inputFile = path.join(root, 'decomposition.md');
+    fs.writeFileSync(inputFile, wrap(taskText('Unit task', 'unit')), 'utf8');
+    runCli(root, inputFile);
+    const backlogOut = fs.readFileSync(path.join(root, 'BACKLOG.md'), 'utf8');
+    assert.ok(backlogOut.includes('### T-901 — Unit task'), `Test 7c FAIL: task not registered, BACKLOG.md:\n${backlogOut}`);
+    assert.ok(backlogOut.includes('- **Verification type:** unit'), `Test 7c FAIL: BACKLOG entry should contain "- **Verification type:** unit", got:\n${backlogOut}`);
+    console.log('Test 7c passed: verification_type: unit registers with "- **Verification type:** unit"');
+  }
 }
 
 // ---------------------------------------------------------------------------

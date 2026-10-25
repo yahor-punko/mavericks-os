@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// mavp-declared-in: CLAUDE.md :: Wave closure
 // mavp-suite-receipt.js — gives the once-per-wave "run the full suite on main"
 // duty an OBSERVABLE form (a receipt) and a hard stop at `git push` (T-763).
 //

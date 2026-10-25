@@ -474,10 +474,10 @@ function ratchetRoot({ headModules, workingModules, docChars }) {
   assert.deepStrictEqual(reg.alpha.context_docs, ['docs/a.md', 'docs/b.md']);
   assert.deepStrictEqual(reg.alpha.repos, ['r1', 'r2']);
   assert.strictEqual(reg.alpha.default_owner, 'qa');
-  assert.ok(Array.isArray(reg.alpha.qa_checklist), 'Test 17 FAIL: qa_checklist stays an array');
+  assert.deepStrictEqual(reg.alpha.qa_checklist, ['step one'], `Test 17 FAIL: qa_checklist must be exactly the one item, got ${JSON.stringify(reg.alpha.qa_checklist)}`);
   assert.deepStrictEqual(reg.alpha.doc_limits, {
-    'docs/a.md': { max_chars: 60000, task: 'T-999' },
-    'docs/b.md': { max_chars: 45000, task: 'T-998' },
+    'docs/a.md': { max_chars: 60000, task: 'T-999', owner: 'T-999' },
+    'docs/b.md': { max_chars: 45000, task: 'T-998', owner: 'T-998' },
   }, `Test 17 FAIL: ${JSON.stringify(reg.alpha.doc_limits)}`);
   assert.deepStrictEqual(reg.beta.doc_limits, {});
   assert.deepStrictEqual(reg.beta.context_docs, ['docs/z.md']);
@@ -491,5 +491,59 @@ function ratchetRoot({ headModules, workingModules, docChars }) {
   console.log('Test 17 passed: text helper parses doc_limits; parseModuleRegistry delegates; malformed entries skipped');
 }
 
+// ---------------------------------------------------------------------------
+// Test 18 (T-805): qa_checklist parsing. Indented items are collected, a
+// following top-level field line terminates the list and still parses, an
+// unindented `- item` directly after the header is accepted, and the shipped
+// template's module-a yields exactly its two items.
+// ---------------------------------------------------------------------------
+{
+  const twoIndented = [
+    '## A', '- **label:** A', '- **context_docs:** docs/A.md',
+    '- **qa_checklist:**', '  - first', '  - second',
+    '- **doc_limits:** docs/A.md max_chars: 50000 (T-1)', '',
+  ].join('\n');
+  const a = parseModuleRegistryFromText(twoIndented).A;
+  assert.deepStrictEqual(a.qa_checklist, ['first', 'second'], `Test 18 FAIL: ${JSON.stringify(a.qa_checklist)}`);
+  assert.deepStrictEqual(a.doc_limits, { 'docs/A.md': { max_chars: 50000, task: 'T-1', owner: 'T-1' } });
+  assert.deepStrictEqual(a.context_docs, ['docs/A.md']);
+
+  const unindented = ['## B', '- **qa_checklist:**', '- bare item', '- **default_owner:** qa', '## C', '- **label:** C', ''].join('\n');
+  const reg = parseModuleRegistryFromText(unindented);
+  assert.deepStrictEqual(reg.B.qa_checklist, ['bare item'], 'Test 18 FAIL: unindented item after the header is still accepted');
+  assert.strictEqual(reg.B.default_owner, 'qa');
+  assert.deepStrictEqual(reg.C.qa_checklist, [], 'Test 18 FAIL: a ## heading ends the list; next module has none');
+
+  const tpl = parseModuleRegistryFromText(fs.readFileSync(path.join(__dirname, '..', 'templates', 'MODULES.md'), 'utf8'));
+  assert.deepStrictEqual(tpl['module-a'].qa_checklist, ['Add QA steps specific to this module', 'Verify expected behavior in staging before promoting'], `Test 18 FAIL: ${JSON.stringify(tpl['module-a'].qa_checklist)}`);
+  console.log('Test 18 passed: qa_checklist collects indented/unindented items and stops at a top-level field or heading');
+}
+
+// ---------------------------------------------------------------------------
+// Test 19 (T-805): doc_limits owner is any single whitespace-free token in the
+// parentheses; a DR owner parses, is exposed as `owner`, and flows through the
+// validator (exception honoured, per-document message names the owner).
+// ---------------------------------------------------------------------------
+{
+  const reg = parseModuleRegistryFromText(modulesDoc('docs/x.md max_chars: 50000 (DR-016), docs/y.md max_chars: 40000 (docs-owner), docs/z.md max_chars: 3 (two words)'));
+  assert.deepStrictEqual(reg.widget.doc_limits, {
+    'docs/x.md': { max_chars: 50000, task: 'DR-016', owner: 'DR-016' },
+    'docs/y.md': { max_chars: 40000, task: 'docs-owner', owner: 'docs-owner' },
+  }, `Test 19 FAIL: ${JSON.stringify(reg.widget.doc_limits)}`);
+
+  const within = modulesDoc('docs/ctx.md max_chars: 60000 (DR-016)');
+  const ok = ratchetRoot({ headModules: within, workingModules: within, docChars: 50000 });
+  assert.strictEqual(ok.budget.length, 0, `Test 19 FAIL: DR-owned exception must be honoured, got ${JSON.stringify(ok.budget)}`);
+  assert.strictEqual(ok.ratchet.length, 0);
+  const raised = ratchetRoot({ headModules: within, workingModules: modulesDoc('docs/ctx.md max_chars: 70000 (DR-016)'), docChars: 50000 });
+  assert.strictEqual(raised.ratchet.length, 1, `Test 19 FAIL: ratchet must still fire for a DR owner, got ${JSON.stringify(raised.ratchet)}`);
+  assert.match(raised.ratchet[0].message, /DR-016/);
+  const tight = modulesDoc('docs/ctx.md max_chars: 40000 (DR-016)');
+  const over = ratchetRoot({ headModules: tight, workingModules: tight, docChars: 50000 });
+  assert.strictEqual(over.budget.length, 1);
+  assert.match(over.budget[0].message, /DR-016/, `Test 19 FAIL: per-document message must name the DR owner, got ${over.budget[0].message}`);
+  console.log('Test 19 passed: non-task doc_limits owner parses, is exposed as owner, and works with the ratchet and validator messages');
+}
+
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
-console.log('\nAll T-782 and T-791 assertions passed.');
+console.log('\nAll T-782, T-791 and T-805 assertions passed.');

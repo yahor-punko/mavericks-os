@@ -30,7 +30,7 @@
  *                  does NOT touch artifacts (BACKLOG.md, TASK_STATUS.md, PROCESS_STATE.*)
  *   --hooks-only — sync ONLY the managed hooks (PostToolUse validator hook, SessionStart,
  *                  PostCompact) into .claude/settings.local.json, plus the .mavp-hook-ts
- *                  gitignore entry. Touches no other file — no wrapper, no agents/skills/rules,
+ *                  and HANDOFF.md gitignore entries. Touches no other file — no wrapper, no agents/skills/rules,
  *                  no project-specific script sync. This is the safe, narrow command to run
  *                  when only hooks need to be activated/refreshed in a directory — including
  *                  the canonical self-activation case described below.
@@ -128,7 +128,10 @@ const { execSync, execFileSync } = require('node:child_process');
 const { MAVERICKS_VERSION } = require('./mavp-version.js');
 // T-799: the installer's write set (hooks, .claude dirs, synced scripts, wrapper
 // name) lives once in the lib, which also derives isInstallerManagedPath() from it.
-const { HOOK_NAMES, CLAUDE_DIRS, SYNC_SCRIPTS, PROJECT_FILES, BASH_FILE } = require('./mavp-operator-lib.js');
+const {
+  HOOK_NAMES, CLAUDE_DIRS, SYNC_SCRIPTS, PROJECT_FILES, BASH_FILE,
+  computeRetirableWorkarounds, listIntakeItems, resolveIntakeDir,
+} = require('./mavp-operator-lib.js');
 
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -237,6 +240,23 @@ function writeExecutableAtomicSync(dst, content) {
 }
 
 /**
+ * Number of the target's feedback items (alias from its PROCESS_STATE.json
+ * feedback_alias) whose workaround is retirable at the version being installed.
+ * Read-only; 0 when the alias, the inbox or any item is absent or unreadable (T-831).
+ */
+function countRetirableWorkarounds(targetDir) {
+  try {
+    const state = JSON.parse(fs.readFileSync(path.join(targetDir, 'PROCESS_STATE.json'), 'utf8'));
+    const alias = state && typeof state.feedback_alias === 'string' ? state.feedback_alias.trim() : '';
+    if (!alias) return 0;
+    const items = listIntakeItems(resolveIntakeDir()).filter((e) => e.alias === alias);
+    return computeRetirableWorkarounds(items, MAVERICKS_VERSION).filter((c) => c.status === 'retire').length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Content-sniff identity check for the "refusal guard" (T-406): is `content` a
  * canonical, self-referential mavericks wrapper — one that dispatches core
  * commands via `$SCRIPT_DIR/mavp-operator-dashboard.js` directly and does NOT
@@ -311,13 +331,25 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "  --emit-bundle    Print a task's context prefetch bundle to stdout (read-only)"
   echo "                   Usage: --emit-bundle T-NNN"
   echo "  --handoff        Write HANDOFF.md context file for cross-session continuity"
-  echo "  --close-session  Run end-of-session ritual (summarise, bump wave, commit)"
+  echo "  --close-session  Run end-of-session ritual (sweep merged tasks, commit; never advances the wave)"
+  echo "  --close-wave     Advance the wave (the ONLY wave-advance path): terminal = type the wave number; agent = --operator-confirmed \\"<operator's statement>\\""
+  echo "                       Usage: --close-wave [--interactive] [--operator-confirmed \\"statement\\"] [--next-goal \\"text\\"]"
   echo "  --set-strategy-note  Set wave strategy context note (persists until --close-session)"
+  echo "  --set-wave-goal  Set the wave goal (PROCESS_STATE.json wave_goal) non-interactively"
+  echo "                       Usage: --set-wave-goal \\"text\\" (empty string clears; missing argument exits 1)"
   echo "  --set-next-action    Sanctioned write path for PROCESS_STATE.json's next_action field, gated by"
   echo "                       classifyNextAction(): refuses (exit 1, no write) when the value contains a"
   echo "                       volatile fact; a value not beginning with T-NNN is written with a non-blocking"
   echo "                       advisory; regenerates PROCESS_STATE.md after a successful write"
   echo "                       Usage: --set-next-action \"text\" (empty string clears)"
+  echo "  --feedback       Submit structured feedback to the framework intake inbox (local channel)"
+  echo "                       Usage: --feedback --file <path> [--adopter <alias>] | --set-alias <alias> | --status | --ack <id> | --pull"
+  echo "                              | --github (--file <path> | --item <id>) [--repo <owner/repo>] --operator-confirmed \\"statement\\""
+  echo "                              | --draft \\"title\\" [--summary \\"one line\\"] [--area <text>] [--kind bug|proposal|question] | --drafts | --discard <draft path>"
+  echo "  --migrate        Read-only: find mavp-workaround tags in this repo and harness memory and report which are retirable"
+  echo "                       Usage: --migrate [--legacy]"
+  echo "  --intake         Framework repo only: list, brief, triage and publish answers for the adopter feedback inbox"
+  echo "                       Usage: --intake [--brief [ids] | --triage <id> --disposition \\"<value>\\" [--note \\"text\\"] | --publish-answers [--operator-confirmed \\"statement\\"] | --pull [--repo <owner/repo>]]"
   echo "  --new-task       Interactively create and register a new task"
   echo "  --quick-task     Quickly register a task skeleton (title + problem only)"
   echo "  --apply-decomposition [FILE]  Parse architect decomposition block and register tasks"
@@ -350,7 +382,8 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "  --reflect-skill <role>   Run skill reflection loop for a role (SkillOpt)"
   echo "  --check-archive  Nothing-lost check for layer-0/1 docs (removed lines must reappear in a"
   echo "                   perimeter doc or a same-commit docs/archive/ file; an added perimeter line"
-  echo "                   keeping >=80% of a removed line's words counts as amended, not removed);"
+  echo "                   keeping >=80% of a removed line's words, or a uniquely keyed same-file rewrite, counts as"
+  echo "                   amended, not removed);"
   echo "                   read-only"
   echo "                   Usage: --check-archive (--range A..B | --staged)"
   echo "  --validate       Run the MavP validator (artifact sync check)"
@@ -379,12 +412,27 @@ elif [[ "\${1-}" == "--agent" ]]; then
 elif [[ "\${1-}" == "--close-session" ]]; then
   shift
   node "$SCRIPT_DIR/mavp-operator-close-session.js" "$@"
+elif [[ "\${1-}" == "--close-wave" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-close-wave.js" "$@"
 elif [[ "\${1-}" == "--set-strategy-note" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-set-strategy-note.js" "$@"
+elif [[ "\${1-}" == "--set-wave-goal" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-set-wave-goal.js" "$@"
 elif [[ "\${1-}" == "--set-next-action" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-set-next-action.js" "$@"
+elif [[ "\${1-}" == "--feedback" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-feedback.js" "$@"
+elif [[ "\${1-}" == "--migrate" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-migrate.js" "$@"
+elif [[ "\${1-}" == "--intake" ]]; then
+  shift
+  node "$MAVERICKS/mavp-operator-intake.js" "$@"
 elif [[ "\${1-}" == "--new-task" ]]; then
   shift
   node "$MAVERICKS/mavp-operator-new-task.js" "$@"
@@ -871,6 +919,13 @@ function mergeManagedHooks(targetDir, opts = {}) {
   const gitignoreResult = ensureHookDebounceGitignoreEntry(targetDir);
   if (gitignoreResult !== 'exists') {
     console.log(`  ${GREEN}✓${RESET} .gitignore ${DIM}(.mavp-hook-ts debounce file ${gitignoreResult})${RESET}`);
+  }
+
+  // T-809: HANDOFF.md is single-use and never committed — ensure it is gitignored on
+  // every path that runs mergeManagedHooks (--update, --hooks-only).
+  const handoffGitignoreResult = ensureGitignoreEntry(targetDir, 'HANDOFF.md');
+  if (handoffGitignoreResult !== 'exists') {
+    console.log(`  ${GREEN}✓${RESET} .gitignore ${DIM}(HANDOFF.md single-use handoff file ${handoffGitignoreResult})${RESET}`);
   }
 
   return changeCount;
@@ -1430,8 +1485,8 @@ async function main() {
     }
   }
 
-  // --hooks-only (T-406): sync ONLY the managed hooks (+ their .mavp-hook-ts gitignore
-  // step) into .claude/settings.local.json. Touches no other file — the safe, narrow
+  // --hooks-only (T-406): sync ONLY the managed hooks (+ their .mavp-hook-ts and
+  // HANDOFF.md gitignore steps) into .claude/settings.local.json. Touches no other file — the safe, narrow
   // command for activating/refreshing hooks, and the canonical command for the
   // self-install case above.
   if (hooksOnlyMode) {
@@ -1739,6 +1794,13 @@ async function main() {
       console.log(`${DIM}seeded ${seededCount} missing project artifact(s) from templates${RESET}\n`);
     } else {
       console.log(`${DIM}Artifacts (BACKLOG.md, TASK_STATUS.md, PROCESS_STATE.*) were not touched.${RESET}\n`);
+    }
+    // Workaround-retirement advisory (T-831): read-only, silent unless the target's
+    // feedback alias has at least one item whose fix is released at or below the
+    // version this update just installed.
+    const retirableCount = countRetirableWorkarounds(targetDir);
+    if (retirableCount > 0) {
+      console.log(`workaround retirement: ${retirableCount} tagged workaround(s) now fixed in the installed version — run ./scripts/mavp-operator --migrate`);
     }
     return;
   }
@@ -2067,6 +2129,15 @@ async function main() {
       if (transcriptGitignoreResult !== 'exists') {
         console.log(`  ${GREEN}✓${RESET} .gitignore ${DIM}(.mavp/transcripts/ archive dir ${transcriptGitignoreResult})${RESET}`);
       }
+    }
+  }
+
+  // T-809: HANDOFF.md gitignore entry on fresh install — outside the settings-missing
+  // block above so it is ensured even when settings.local.json already existed.
+  {
+    const handoffGitignoreFresh = ensureGitignoreEntry(targetDir, 'HANDOFF.md');
+    if (handoffGitignoreFresh !== 'exists') {
+      console.log(`  ${GREEN}✓${RESET} .gitignore ${DIM}(HANDOFF.md single-use handoff file ${handoffGitignoreFresh})${RESET}`);
     }
   }
 

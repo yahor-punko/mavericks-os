@@ -41,7 +41,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { buildDeployQueue, classifyNextAction, computeDueRechecks, computeMustRead, detectPermissionModeConflict, partitionInstallerManaged, splitMustReadOversized, generateProcessStateMd, getDeployPendingForRepo, IN_FLIGHT_STATUSES, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { buildDeployQueue, classifyNextAction, countIntakeUntriaged, countUnackedFeedbackAnswers, resolveIntakeDir, semverCompare, computeDueRechecks, computeMustRead, detectPermissionModeConflict, partitionInstallerManaged, splitMustReadOversized, generateProcessStateMd, getDeployPendingForRepo, IN_FLIGHT_STATUSES, normalizeDeployField, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
@@ -179,7 +179,8 @@ function parsePlannedTasksFromActiveWave(backlogMarkdown) {
 /**
  * Parse module, repo, prod_prerequisites, and blocked_by metadata from
  * BACKLOG.md for active task IDs.
- * Returns a map of taskId → { module, repo, prodPrerequisites, blockedByRaw }
+ * Returns a map of taskId → { module, repo, prodPrerequisites, blockedByRaw, holdRaw, deploy }
+ * (deploy is 'none' for a BACKLOG-only `Deploy: none` opt-out, else null — T-815)
  * from the backlog blocks.
  */
 function parseBacklogTaskMeta(backlogMarkdown) {
@@ -194,6 +195,7 @@ function parseBacklogTaskMeta(backlogMarkdown) {
     const prodPrereqMatch = block.match(/^- \*\*Prod prerequisites:\*\*\s+(.+)$/m);
     const blockedByMatch = block.match(/^- \*\*Blocked by:\*\*\s+(.+)$/m);
     const holdMatch = block.match(/^- \*\*Hold:\*\*\s+(.+)$/m);
+    const deployMatch = block.match(/^- \*\*Deploy:\*\*\s+(.+)$/m);
     const prodPrerequisites = prodPrereqMatch
       ? prodPrereqMatch[1].split(',').map(s => s.trim()).filter(Boolean)
       : [];
@@ -203,6 +205,7 @@ function parseBacklogTaskMeta(backlogMarkdown) {
       prodPrerequisites,
       blockedByRaw: blockedByMatch ? normalizeWhitespace(blockedByMatch[1]) : null,
       holdRaw: holdMatch ? normalizeWhitespace(holdMatch[1]) : null,
+      deploy: deployMatch ? normalizeDeployField(deployMatch[1]) : null,
     };
   }
   return meta;
@@ -256,12 +259,45 @@ const IN_FLIGHT_FALLBACK_PRIORITY = 3;
  * In-flight tasks (priority 1–3) always take precedence over planned tasks,
  * regardless of which repo they belong to.
  *
+ * Stored-directive preference (T-807): when `staticFallback` (the stored
+ * PROCESS_STATE.json next_action) begins with a T-NNN that is itself an eligible
+ * candidate in the list built below (in-flight per IN_FLIGHT_STATUSES, or planned
+ * with every `Depends on:` merged), the stored directive is returned verbatim
+ * instead of the top-ranked computed candidate. Otherwise the top computed
+ * candidate wins, and the stored string is only returned when there are no
+ * candidates at all. The T-350 terminal-status staleness rule lives in the
+ * caller (it passes null for a stale stored directive) and is unchanged.
+ * resolveNextAction() additionally reports which of those three paths fired
+ * ("stored" | "computed" | "fallback") for the --agent `next_action_source` field.
+ *
  * @param {Array} activeTasks - In-flight tasks from TASK_STATUS.md active section
  * @param {Array} plannedTasks - Planned tasks from BACKLOG.md Active Wave section
- * @param {string|null} staticFallback - Fallback string from PROCESS_STATE.json
+ * @param {string|null} staticFallback - Stored directive from PROCESS_STATE.json
  * @returns {string|null}
  */
 function computeNextAction(activeTasks, plannedTasks, staticFallback) {
+  return resolveNextAction(activeTasks, plannedTasks, staticFallback).value;
+}
+
+/**
+ * Normalise a stored next_action string: empty / whitespace-only or the literal
+ * `none` (case-insensitive, trimmed) — the placeholder the generated
+ * PROCESS_STATE.md renders for an empty "## Next expected handoff" — becomes null.
+ * @param {*} value
+ * @returns {string|null}
+ */
+function normalizeStaticNextAction(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed === '' || trimmed.toLowerCase() === 'none') return null;
+  return value;
+}
+
+/**
+ * @returns {{value: string|null, source: 'stored'|'computed'|'fallback'|null}}
+ */
+function resolveNextAction(activeTasks, plannedTasks, staticFallback) {
+  staticFallback = normalizeStaticNextAction(staticFallback);
   const mergedIds = new Set(
     activeTasks.filter(t => t.status === 'merged').map(t => t.id)
   );
@@ -326,11 +362,15 @@ function computeNextAction(activeTasks, plannedTasks, staticFallback) {
     .sort((a, b) => a.priority - b.priority);
 
   if (allCandidates.length > 0) {
+    const storedIdMatch = staticFallback ? staticFallback.match(/^(T-\d+)/) : null;
+    if (storedIdMatch && allCandidates.some(c => c.task.id === storedIdMatch[1])) {
+      return { value: staticFallback, source: 'stored' };
+    }
     const { task } = allCandidates[0];
-    return `${task.id} → ${task.owner} → ${task.title}`;
+    return { value: `${task.id} → ${task.owner} → ${task.title}`, source: 'computed' };
   }
 
-  return staticFallback || null;
+  return staticFallback ? { value: staticFallback, source: 'fallback' } : { value: null, source: null };
 }
 
 const PARLIAMENTARY_STAGES = new Set([
@@ -347,20 +387,6 @@ function detectGovernance(stage) {
     const files = fs.readdirSync(govDir);
     return files.some(f => f.startsWith('PARLIAMENTARY_DECISION_PACKET') && !f.endsWith('TEMPLATE.md'));
   } catch { return false; }
-}
-
-/**
- * Compare two semver strings (e.g. "0.4.0" vs "0.3.6").
- * Returns 1 if a > b, -1 if a < b, 0 if equal.
- */
-function semverCompare(a, b) {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] || 0) > (pb[i] || 0)) return 1;
-    if ((pa[i] || 0) < (pb[i] || 0)) return -1;
-  }
-  return 0;
 }
 
 /**
@@ -603,7 +629,9 @@ function main() {
   // Normalise legacy "none" string to null so downstream checks treat it as absent.
   if (blocker === 'none' || blocker === '') blocker = null;
 
-  const staticNextAction = json?.next_action || (md.nextHandoff.length > 0 ? md.nextHandoff[0] : null);
+  // T-807: normalise the empty / "none" placeholder (JSON or generated PROCESS_STATE.md) to null.
+  const staticNextAction = normalizeStaticNextAction(json?.next_action)
+    || (md.nextHandoff.length > 0 ? normalizeStaticNextAction(md.nextHandoff[0]) : null);
   const lastUpdated = json?.last_updated || md.lastUpdate || 'unknown';
   const stageOwner = json?.stage_owner || 'main_agent';
 
@@ -622,7 +650,9 @@ function main() {
     }
   }
 
-  let next_action = computeNextAction(activeTasks, plannedTasks, next_action_stale ? null : staticNextAction);
+  const resolvedNextAction = resolveNextAction(activeTasks, plannedTasks, next_action_stale ? null : staticNextAction);
+  let next_action = resolvedNextAction.value;
+  let next_action_source = resolvedNextAction.source;
 
   // Additive-only: classify the static next_action's SHAPE (directive vs. freeform
   // prose) so a copied volatile fact (framework version, unpushed-commit count) with
@@ -657,7 +687,13 @@ function main() {
   if (deployQueue.length > 0) {
     const prereqCount = deployQueue.filter(t => t.prod_prerequisites && t.prod_prerequisites.length > 0).length;
     const prereqSuffix = prereqCount > 0 ? ` (${prereqCount} with prod prerequisites)` : '';
-    next_action = `⚠ ${deployQueue.length} task(s) awaiting prod deploy${prereqSuffix} — promote before new work, or: ${next_action}`;
+    const deployPrefix = `⚠ ${deployQueue.length} task(s) awaiting prod deploy${prereqSuffix} — promote before new work`;
+    if (next_action) {
+      next_action = `${deployPrefix}, or: ${next_action}`;
+    } else {
+      next_action = deployPrefix;
+      next_action_source = 'computed';
+    }
   }
 
   // Compute due/overdue rechecks from PROCESS_STATE.json rechecks[] registry.
@@ -778,6 +814,19 @@ function main() {
   // in mavp-operator-lib.js for why no winner is picked here.
   const permissionModeConflict = detectPermissionModeConflict(ROOT);
 
+  // T-829: additive intake counters, read-only. The framework root (it carries
+  // scripts/mavp-operator-lib.js) reports its untriaged queue; an adopter root reports
+  // answers to its own alias that it has not yet acknowledged. Never breaks --agent.
+  let intakeUntriaged = 0;
+  let feedbackAnswersUnacked = 0;
+  try {
+    if (fs.existsSync(path.join(ROOT, 'scripts', 'mavp-operator-lib.js'))) {
+      intakeUntriaged = countIntakeUntriaged(resolveIntakeDir());
+    } else if (typeof json?.feedback_alias === 'string' && json.feedback_alias) {
+      feedbackAnswersUnacked = countUnackedFeedbackAnswers(resolveIntakeDir(), json.feedback_alias);
+    }
+  } catch { /* intake counters are advisory */ }
+
   const output = {
     initiative,
     stage,
@@ -796,6 +845,7 @@ function main() {
     ...(deployWarning ? { deploy_warning: deployWarning } : {}),
     blocker,
     next_action,
+    ...(next_action != null ? { next_action_source } : {}),
     ...(next_action_stale ? { next_action_stale: true } : {}),
     ...(next_action_unverified ? { next_action_unverified: true } : {}),
     ...(next_action_volatile_facts.length > 0 ? { next_action_volatile_facts } : {}),
@@ -807,6 +857,8 @@ function main() {
     ...(mustRead.length > 0 ? { must_read: mustRead } : {}),
     ...(mustReadOversized.length > 0 ? { must_read_oversized: mustReadOversized } : {}),
     ...(mustReadFramework.length > 0 ? { must_read_framework: mustReadFramework } : {}),
+    ...(intakeUntriaged > 0 ? { intake_untriaged: intakeUntriaged } : {}),
+    ...(feedbackAnswersUnacked > 0 ? { feedback_answers_unacked: feedbackAnswersUnacked } : {}),
   };
 
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
@@ -831,4 +883,4 @@ if (require.main === module) {
 // Additive export (T-528) — the CLI JSON output schema (stdout of `node
 // mavp-operator-agent.js`) is unchanged; this only adds a module-require
 // surface for unit tests.
-module.exports = { STATUS_PRIORITY, computeNextAction };
+module.exports = { STATUS_PRIORITY, computeNextAction, resolveNextAction, normalizeStaticNextAction };

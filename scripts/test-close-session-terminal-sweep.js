@@ -10,7 +10,10 @@
 // Active tasks section, so `remainingTasks.length === 0` was never true and
 // the wave latched open across sessions.
 //
-// Part 1 reproduces that exact shape and asserts the wave now closes.
+// T-820: --close-session no longer advances the wave at all (only
+// --close-wave does), so Part 1 now reproduces that exact shape and asserts the
+// sweep still empties Active tasks while wave stays put and wave_session ticks;
+// the wave-advance itself is asserted via --close-wave in Part 4.
 // Part 2 is the over-application guard set: the sweep must be an EXPLICIT
 // skip-list ({deferred, deprecated}), never "everything that is not
 // in-flight" — so `qa_passed`, `planned`, `in_progress` AND an unrecognized
@@ -33,6 +36,28 @@ const { assertMergedRecordsUncontaminated } = require('./mavp-operator-close-ses
 const SCRIPTS_DIR = __dirname;
 const CLOSE_SESSION_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-close-session.js');
 const VALIDATOR_PATH = path.join(SCRIPTS_DIR, 'mavp-validator.js');
+const CLOSE_WAVE_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-close-wave.js');
+
+// --close-wave commits, so its fixture needs a real (pinned-branch) git repo.
+function initGit(dir) {
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) if (k.startsWith('GIT_')) delete env[k];
+  const git = (...a) => spawnSync('git', a, { cwd: dir, env, encoding: 'utf8' });
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 'fixture@example.com');
+  git('config', 'user.name', 'Fixture');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'fixture init');
+}
+
+function runCloseWave(dir, argv) {
+  const r = spawnSync('node', [CLOSE_WAVE_PATH, ...argv], {
+    cwd: dir,
+    env: { ...process.env, MAVERICKS_PROJECT_ROOT: dir, MAVERICKS_SCRIPTS: SCRIPTS_DIR },
+    encoding: 'utf8',
+  });
+  return { status: r.status, out: (r.stdout || '') + (r.stderr || '') };
+}
 
 const TMP_ROOT = path.join(os.tmpdir(), 't573-test-' + Date.now());
 fs.mkdirSync(TMP_ROOT, { recursive: true });
@@ -285,14 +310,18 @@ assert.ok(
   `Part 1 FAIL: the contamination guard fired on a clean sweep, got:\n${incidentOut}`
 );
 assert.ok(
-  incidentOut.includes('Wave 70 complete'),
-  `Part 1 FAIL: expected the close-session output to announce "Wave 70 complete", got:\n${incidentOut}`
+  incidentOut.includes('Wave 70 — all tasks merged; wave stays open until the operator confirms the goal is met and --close-wave runs (goal: not set)'),
+  `Part 1 FAIL: expected the close-session output to announce the T-820 wave-stays-open line, got:\n${incidentOut}`
 );
 
 const incidentState = readState(incidentDir);
-assert.strictEqual(incidentState.wave, 71, `Part 1 FAIL: expected wave 70 → 71, got ${incidentState.wave}`);
-assert.strictEqual(incidentState.wave_session, 1, `Part 1 FAIL: expected wave_session to reset to 1, got ${incidentState.wave_session}`);
-assert.strictEqual(incidentState.next_action, null, `Part 1 FAIL: expected next_action cleared on wave complete, got ${JSON.stringify(incidentState.next_action)}`);
+assert.strictEqual(incidentState.wave, 70, `Part 1 FAIL: --close-session must not advance the wave (70 → 70), got ${incidentState.wave}`);
+assert.strictEqual(incidentState.wave_session, 12, `Part 1 FAIL: expected wave_session to tick 11 → 12, got ${incidentState.wave_session}`);
+assert.strictEqual(incidentState.next_action, null, `Part 1 FAIL: expected next_action untouched (null), got ${JSON.stringify(incidentState.next_action)}`);
+assert.ok(
+  fs.readFileSync(path.join(incidentDir, 'BACKLOG.md'), 'utf8').includes('## Active Wave'),
+  'Part 1 FAIL: the Active Wave heading must survive --close-session'
+);
 
 const incidentActive = activeTasksSection(incidentDir);
 assert.ok(
@@ -548,16 +577,21 @@ fs.writeFileSync(path.join(rvDir, 'TASK_STATUS.md'), `# TASK_STATUS
 ## Recently completed tasks
 `, 'utf8');
 
-writeProcessState(rvDir, { wave: 80, wave_session: 4, last_task_id: 750 });
+writeProcessState(rvDir, { wave: 80, wave_session: 4, last_task_id: 750, wave_goal: 'runtime-verified fixture goal' });
+initGit(rvDir);
 
 const rvOut = runCloseSession(rvDir).out;
 assert.ok(
-  rvOut.includes('Wave 80 complete'),
-  `Part 4 FAIL: expected "Wave 80 complete" for a runtime_verified-only wave, got:\n${rvOut}`
+  rvOut.includes('Wave 80 — all tasks merged; wave stays open until the operator confirms the goal is met and --close-wave runs (goal: runtime-verified fixture goal)'),
+  `Part 4 FAIL: expected the T-820 announcement for a runtime_verified-only wave, got:\n${rvOut}`
 );
+assert.strictEqual(readState(rvDir).wave, 80, 'Part 4 FAIL: --close-session must not advance the wave');
 
+// The runtime_verified-only wave advances only through --close-wave.
+const rvClose = runCloseWave(rvDir, ['--operator-confirmed', 'fixture statement']);
+assert.strictEqual(rvClose.status, 0, `Part 4 FAIL: --close-wave expected exit 0, got ${rvClose.status}:\n${rvClose.out}`);
 const rvState = readState(rvDir);
-assert.strictEqual(rvState.wave, 81, `Part 4 FAIL: expected wave 80 → 81, got ${rvState.wave}`);
+assert.strictEqual(rvState.wave, 81, `Part 4 FAIL: expected wave 80 → 81 via --close-wave, got ${rvState.wave}`);
 assert.strictEqual(rvState.wave_session, 1, `Part 4 FAIL: expected wave_session to reset to 1, got ${rvState.wave_session}`);
 
 const rvCompleted = namedSection(rvDir, '## Recently completed tasks');
@@ -611,23 +645,22 @@ async function main() {
 // Part 5 — the INTERACTIVE path must sweep identically. Before T-573 this
 // path was strictly worse than the non-interactive one: each terminal entry
 // got the same [m]/[n]/[k]/[enter] prompt as real work, and an Enter-skip left
-// it counted as remaining. `wave_goal` is preset, but the wave is complete
-// (every task swept out of Active tasks), so T-648 means the goal prompt
-// fires anyway — three sequential answers: "Next action", "Enter wave
-// goal", and the trailing "Run git push?" prompt.
+// it counted as remaining. `wave_goal` is preset, and since T-820 an
+// interactive --close-session never replaces it (the replacement prompt moved
+// to --close-wave) — two sequential answers: "Next action" and the trailing
+// "Run git push?" prompt.
 // ---------------------------------------------------------------------------
 const interactiveDir = newFixtureDir('interactive');
-buildIncidentFixture(interactiveDir, { processState: { wave_goal: 'preset — must still be replaced by the prompt on wave-complete' } });
+buildIncidentFixture(interactiveDir, { processState: { wave_goal: 'preset — must survive --close-session (T-820)' } });
 
 const { out: interactiveOut } = await runCloseSessionInteractiveSequential(interactiveDir, ['--interactive'], [
   { match: 'Next action [', answer: '' },
-  { match: 'Enter wave goal', answer: '' },
   { match: 'Run git push?', answer: 'n' },
 ]);
 
 assert.ok(
-  interactiveOut.includes('Wave 70 complete'),
-  `Part 5 FAIL: interactive close must announce "Wave 70 complete", got:\n${interactiveOut}`
+  interactiveOut.includes('Wave 70 — all tasks merged; wave stays open until the operator confirms the goal is met and --close-wave runs (goal: preset'),
+  `Part 5 FAIL: interactive close must announce the T-820 wave-stays-open line, got:\n${interactiveOut}`
 );
 assert.ok(
   !/\[m\]erged \/ \[n\]eeds_fix/.test(interactiveOut),
@@ -635,8 +668,12 @@ assert.ok(
 );
 
 const interactiveState = readState(interactiveDir);
-assert.strictEqual(interactiveState.wave, 71, `Part 5 FAIL: expected wave 70 → 71 interactively, got ${interactiveState.wave}`);
-assert.strictEqual(interactiveState.wave_session, 1, `Part 5 FAIL: expected wave_session to reset to 1, got ${interactiveState.wave_session}`);
+assert.strictEqual(interactiveState.wave, 70, `Part 5 FAIL: interactive --close-session must not advance the wave, got ${interactiveState.wave}`);
+assert.strictEqual(interactiveState.wave_session, 12, `Part 5 FAIL: expected wave_session to tick 11 → 12, got ${interactiveState.wave_session}`);
+assert.ok(
+  interactiveState.wave_goal.startsWith('preset'),
+  `Part 5 FAIL: the preset wave_goal must survive an interactive --close-session, got ${JSON.stringify(interactiveState.wave_goal)}`
+);
 
 const interactiveActive = activeTasksSection(interactiveDir);
 assert.ok(

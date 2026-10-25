@@ -25,6 +25,17 @@
 // required defensively: a runner copied alone into a scratch dir (as
 // scripts/test-run-tests-standdown.js does) must still run its tests.
 //
+// Corpus-wide guards (T-813): a test file whose first 40 lines contain a line
+// that, once trimmed, is exactly the marker comment (see CORPUS_GUARD_MARKER
+// below) is a corpus-wide guard — a test that scans the whole scripts/ tree
+// (or the tracked-file index) for a shape no single task's own tests would
+// catch. A --filter run would otherwise skip these, so a violation introduced
+// during a filtered-only run reached integration unseen. With --filter, every
+// marked file not already matched is appended after the matched files, so the
+// guards always run alongside the filtered set. Unfiltered runs already
+// include them; a tree with no marked files (e.g. an adopter tree) behaves
+// exactly as before. Adopters can mark their own guards the same way.
+//
 // Node built-ins only — no npm dependencies (see .claude/rules/scripts.md).
 
 const fs = require('node:fs');
@@ -59,6 +70,26 @@ function loadReceiptHelper() {
 // full suite reported a false stand-down).
 const SKIP_TOKEN = '[SKIP]';
 
+// Header marker for a corpus-wide guard test (T-813). RESERVED: recognised
+// only as a whole trimmed line within the first CORPUS_GUARD_SCAN_LINES lines
+// of a test file — mid-line prose mentions and marker lines further down never
+// match. Prose describing it elsewhere must use words or a mid-line mention,
+// never a line of its own that equals the marker.
+const CORPUS_GUARD_MARKER = '// mavp-corpus-guard: always-run';
+const CORPUS_GUARD_SCAN_LINES = 40;
+
+function isCorpusGuardFile(filePath) {
+  let text;
+  try {
+    text = fs.readFileSync(filePath, 'utf8');
+  } catch (_) {
+    return false;
+  }
+  return text
+    .split('\n', CORPUS_GUARD_SCAN_LINES)
+    .some((line) => line.trim() === CORPUS_GUARD_MARKER);
+}
+
 // Returns the lines of `text` that start with the literal SKIP_TOKEN
 // (after stripping leading whitespace), in order. Anchored to
 // line-initial rather than a bare substring search so a line that merely
@@ -91,6 +122,12 @@ function discoverTestFiles(filter) {
     .filter((name) => (filter ? name.includes(filter) : true))
     .sort()
     .map((name) => path.join(SCRIPTS_DIR, name));
+}
+
+// Marked corpus-wide guard files not already in `matched` (full paths), sorted.
+function discoverCorpusGuards(matched) {
+  const have = new Set(matched);
+  return discoverTestFiles(null).filter((f) => !have.has(f) && isCorpusGuardFile(f));
 }
 
 // Hermetic identity env — makes every child test process refuse to derive a
@@ -168,7 +205,15 @@ function main() {
     return;
   }
 
-  console.log(`Running ${testFiles.length} test file(s)${filter ? ` (filter: "${filter}")` : ''}...\n`);
+  // With a non-empty filter match, append the marked corpus-wide guards (the
+  // empty-match path above has already returned, before any guard runs).
+  const guardFiles = filter ? discoverCorpusGuards(testFiles) : [];
+  const guardSuffix = guardFiles.length > 0 ? ` + ${guardFiles.length} corpus-wide guard file(s)` : '';
+  console.log(`Running ${testFiles.length} test file(s)${filter ? ` (filter: "${filter}")` : ''}${guardSuffix}...\n`);
+  if (guardFiles.length > 0) {
+    console.log(`Corpus-wide guards (always run with --filter): ${guardFiles.map((f) => path.basename(f)).join(', ')}\n`);
+  }
+  const runList = [...testFiles, ...guardFiles];
 
   // Receipt pre-run facts (HEAD + tracked-tree cleanliness) are captured
   // BEFORE any test runs, so a test that dirties the tree cannot launder
@@ -178,7 +223,7 @@ function main() {
 
   const results = [];
   const standDowns = [];
-  for (const filePath of testFiles) {
+  for (const filePath of runList) {
     const r = runOne(filePath);
     results.push(r);
     if (r.passed) {

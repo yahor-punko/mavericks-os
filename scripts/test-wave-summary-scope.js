@@ -1,18 +1,45 @@
 'use strict';
-// Regression test: T-361 — --close-session wave_summary must be scoped to the
+// Regression test: T-361 — the auto wave_summary must be scoped to the
 // wave being closed, not accumulate every prior wave's merged task titles.
+//
+// T-820: the auto wave_summary is now written ONLY by --close-wave (the sole
+// wave-advance path); --close-session never writes it (an explicit --summary
+// still does) and never advances the wave. The end-to-end parts below run
+// --close-session (asserting wave + wave_summary untouched) and then
+// --close-wave (asserting the scoped summary and the increment).
 
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert');
 const os = require('node:os');
-const { execFileSync, spawn } = require('node:child_process');
+const { execFileSync, spawn, spawnSync } = require('node:child_process');
 
 const { parseActiveWaveMergedTitles } = require('./mavp-operator-lib.js');
 const { buildAutoSummary } = require('./mavp-operator-close-session.js');
 
 const SCRIPTS_DIR = __dirname;
 const CLOSE_SESSION_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-close-session.js');
+const CLOSE_WAVE_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-close-wave.js');
+
+// --close-wave commits, so its fixtures need a real (pinned-branch) git repo.
+function initGit(dir) {
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) if (k.startsWith('GIT_')) delete env[k];
+  const git = (...a) => spawnSync('git', a, { cwd: dir, env, encoding: 'utf8' });
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 'fixture@example.com');
+  git('config', 'user.name', 'Fixture');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'fixture init');
+}
+
+function runCloseWave(dir, argv) {
+  return execFileSync('node', [CLOSE_WAVE_PATH, ...argv], {
+    cwd: dir,
+    env: { ...process.env, MAVERICKS_PROJECT_ROOT: dir, MAVERICKS_SCRIPTS: SCRIPTS_DIR },
+    encoding: 'utf8',
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Part 1 — unit test: parseActiveWaveMergedTitles(backlogMarkdown)
@@ -246,7 +273,7 @@ writeProcessState({
   wave: 2,
   wave_session: 1,
   wave_status: 'execution',
-  wave_goal: null,
+  wave_goal: 'wave 2 goal',
   parked_waves: [],
   active_slices: ['T-201'],
   next_action: 'T-201 → developer → wave 2 task',
@@ -258,8 +285,20 @@ writeProcessState({
   wave_summary: 'Wave 1: Wave 1 task Alpha; Wave 1 task Beta.',
   rechecks: [],
 });
+initGit(TMP_DIR);
 
+// T-820: --close-session on this all-merged state neither advances the wave
+// nor writes an auto wave_summary.
 runCloseSession();
+const afterWave2Session = readProcessState();
+assert.strictEqual(afterWave2Session.wave, 2, `E2E FAIL: --close-session must not advance the wave, got ${afterWave2Session.wave}`);
+assert.strictEqual(
+  afterWave2Session.wave_summary,
+  'Wave 1: Wave 1 task Alpha; Wave 1 task Beta.',
+  `E2E FAIL: --close-session must not auto-write wave_summary, got: ${afterWave2Session.wave_summary}`
+);
+
+runCloseWave(TMP_DIR, ['--operator-confirmed', 'fixture: wave 2 goal met', '--next-goal', 'wave 3 goal']);
 
 const afterWave2Close = readProcessState();
 assert.strictEqual(afterWave2Close.wave, 3, `E2E FAIL: expected wave to advance to 3, got ${afterWave2Close.wave}`);
@@ -322,6 +361,8 @@ const taskStatusWithWave3 = taskStatusAfterWave2.replace(
 writeTaskStatus(taskStatusWithWave3);
 
 runCloseSession();
+assert.strictEqual(readProcessState().wave, 3, 'E2E FAIL: --close-session must not advance the wave (wave 3)');
+runCloseWave(TMP_DIR, ['--operator-confirmed', 'fixture: wave 3 goal met']);
 
 const afterWave3Close = readProcessState();
 assert.strictEqual(afterWave3Close.wave, 4, `E2E FAIL: expected wave to advance to 4, got ${afterWave3Close.wave}`);
@@ -525,13 +566,16 @@ writeFlagless(FLAGLESS_DIR, {
 runCloseSessionFlaglessNonTTY(FLAGLESS_DIR);
 
 const flaglessState = JSON.parse(fs.readFileSync(path.join(FLAGLESS_DIR, 'PROCESS_STATE.json'), 'utf8'));
+// T-820: the auto summary belongs to --close-wave; a flagless non-TTY
+// --close-session of an all-merged state leaves it (and the wave) alone.
 assert.strictEqual(
   flaglessState.wave_summary,
-  'Wave 2: 1 task(s) completed — Wave 2 task.',
-  `Part 4a FAIL: flagless non-TTY all-merged close should auto-scope wave_summary, got: ${flaglessState.wave_summary}`
+  'OLD STALE ACCUMULATED SUMMARY',
+  `Part 4a FAIL: flagless non-TTY --close-session must not auto-write wave_summary, got: ${flaglessState.wave_summary}`
 );
+assert.strictEqual(flaglessState.wave, 2, `Part 4a FAIL: flagless non-TTY --close-session must not advance the wave, got ${flaglessState.wave}`);
 
-console.log(`Part 4a (flagless non-TTY all-merged close) passed — wave_summary: "${flaglessState.wave_summary}"`);
+console.log(`Part 4a (flagless non-TTY all-merged close: no auto wave_summary, no wave advance) passed — wave_summary: "${flaglessState.wave_summary}"`);
 
 // --- Part 4b: mid-wave (one in_progress task), flagless non-TTY close must
 //     leave the stale wave_summary untouched (T-361 allMerged gate retained).
@@ -718,7 +762,7 @@ function driveInteractive(dir, steps, timeoutMs = 10000) {
 const INTERACTIVE_DIR = path.join(os.tmpdir(), 't367-interactive-test-' + Date.now());
 fs.mkdirSync(INTERACTIVE_DIR, { recursive: true });
 
-const PRESET_WAVE_GOAL = 'Wave 2 goal — pre-existing, must be cleared by a wave-complete close (T-648).';
+const PRESET_WAVE_GOAL = 'Wave 2 goal — pre-existing, must survive --close-session (T-820).';
 
 fs.writeFileSync(
   path.join(INTERACTIVE_DIR, 'BACKLOG.md'),
@@ -788,29 +832,28 @@ fs.writeFileSync(
   'utf8'
 );
 
+// T-820: the preset goal is no longer replaced by an interactive
+// --close-session (no "Enter wave goal" prompt when a goal exists), so only
+// "Next action" and "Run git push?" fire.
 await driveInteractive(INTERACTIVE_DIR, [
   { waitFor: 'Next action', send: '\n' },
-  { waitFor: 'Enter wave goal', send: '\n' },
   { waitFor: 'Run git push?', send: 'n\n' },
 ]);
 
 const interactiveState = JSON.parse(fs.readFileSync(path.join(INTERACTIVE_DIR, 'PROCESS_STATE.json'), 'utf8'));
 assert.strictEqual(
   interactiveState.wave_summary,
-  'Wave 2: 1 task(s) completed — Wave 2 task.',
-  `Part 5a FAIL: interactive wave-complete close should write the scoped wave_summary, got: ${interactiveState.wave_summary}`
+  'OLD STALE SUMMARY FROM A PRIOR WAVE',
+  `Part 5a FAIL: interactive --close-session must not write wave_summary, got: ${interactiveState.wave_summary}`
 );
-// T-648: a wave-complete close must clear wave_goal — the preset value
-// describes the wave that just closed, and an empty prompt answer must
-// leave null rather than falling back to the stale preset.
 assert.strictEqual(
   interactiveState.wave_goal,
-  null,
-  `Part 5a FAIL: expected wave_goal cleared to null on a wave-complete close (T-648), got: ${JSON.stringify(interactiveState.wave_goal)}`
+  PRESET_WAVE_GOAL,
+  `Part 5a FAIL: expected the preset wave_goal untouched by --close-session, got: ${JSON.stringify(interactiveState.wave_goal)}`
 );
-assert.strictEqual(interactiveState.wave, 3, `Part 5a FAIL: expected wave to advance to 3, got ${interactiveState.wave}`);
+assert.strictEqual(interactiveState.wave, 2, `Part 5a FAIL: interactive --close-session must not advance the wave, got ${interactiveState.wave}`);
 
-console.log(`Part 5a (interactive wave-complete close) passed — wave_summary: "${interactiveState.wave_summary}"`);
+console.log(`Part 5a (interactive all-merged --close-session: no wave advance, no wave_summary write, goal untouched) passed`);
 
 // --- Part 5b: mid-wave interactive close (operator skips the only active
 //     task, leaving it in_progress) must leave wave_summary untouched.

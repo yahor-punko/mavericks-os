@@ -53,6 +53,10 @@ const MAVERICKS_SCRIPTS = process.env.MAVERICKS_SCRIPTS
   || path.join(require('node:os').homedir(), 'Documents', 'mavericks', 'scripts');
 const VALIDATOR = path.join(MAVERICKS_SCRIPTS, 'mavp-validator.js');
 
+// The five verification types a decomposition task may declare. Deliberately
+// local: the lib's and quick-merge's own (narrower) sets are untouched (T-837).
+const APPLY_VERIFICATION_TYPES = ['artifact', 'runtime', 'unit', 'visual', 'manual'];
+
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
@@ -137,6 +141,19 @@ function splitTasks(blockContent) {
 function validateTask(task) {
   const required = ['title', 'owner_role', 'verification_type'];
   return required.filter(f => !task[f]);
+}
+
+/**
+ * Check a parsed task's verification_type against APPLY_VERIFICATION_TYPES
+ * (exact comparison of the trimmed value). Returns the refusal message for an
+ * unknown value, or null when the value is allowed or absent (absence is
+ * validateTask()'s concern).
+ */
+function validateVerificationType(task) {
+  if (!task || !task.verification_type) return null;
+  const value = String(task.verification_type).trim();
+  if (APPLY_VERIFICATION_TYPES.includes(value)) return null;
+  return `apply-decomposition: task "${task.title}" — unknown verification_type "${value}" (allowed: ${APPLY_VERIFICATION_TYPES.join(', ')})`;
 }
 
 function formatTaskId(n) {
@@ -313,6 +330,7 @@ async function applyDecompositionFromString(input, repoName) {
 
   // Validate all tasks before touching files (atomicity)
   const parsedTasks = [];
+  const refusals = [];
   for (let i = 0; i < rawTasks.length; i++) {
     const task = parseTaskBlock(rawTasks[i]);
     const missing = validateTask(task);
@@ -320,7 +338,20 @@ async function applyDecompositionFromString(input, repoName) {
       console.warn(`${YELLOW}⚠ Task ${i + 1}: missing required field(s): ${missing.join(', ')} — skipping.${RESET}`);
       continue;
     }
+    const refusal = validateVerificationType(task);
+    if (refusal) {
+      refusals.push(refusal);
+      continue;
+    }
     parsedTasks.push(task);
+  }
+
+  // An unknown verification_type refuses the WHOLE batch, before any write (T-837).
+  if (refusals.length > 0) {
+    for (const line of refusals) console.error(line);
+    console.error('apply-decomposition: batch refused — nothing written.');
+    process.exitCode = 1;
+    return;
   }
 
   if (!parsedTasks.length) {
@@ -411,6 +442,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  APPLY_VERIFICATION_TYPES,
+  validateVerificationType,
   extractBlock,
   parseTaskBlock,
   splitTasks,

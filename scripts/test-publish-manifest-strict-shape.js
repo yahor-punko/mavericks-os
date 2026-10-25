@@ -257,7 +257,12 @@ console.log(`Passed: ${CHECKER_ONLY_CASES.length} checker-only exclude/preserve 
   const trackedList = trackedOutput.split('\n').filter(Boolean);
   const trackedSet = new Set(trackedList);
 
-  const excludeKeys = manifest.exclude && typeof manifest.exclude === 'object' ? Object.keys(manifest.exclude) : [];
+  // T-825 — only EXACT (non-trailing-slash) exclude keys are tracked paths;
+  // a prefix key names a directory and is judged by the checker (STALE if
+  // empty), so it must not be counted in the tracked/total ratio.
+  const excludeKeys = manifest.exclude && typeof manifest.exclude === 'object'
+    ? Object.keys(manifest.exclude).filter((k) => !k.endsWith('/'))
+    : [];
   const trackedExcludeCount = excludeKeys.filter((k) => trackedSet.has(k)).length;
   const totalExcludeCount = excludeKeys.length;
   const ratio = `${trackedExcludeCount}/${totalExcludeCount}`;

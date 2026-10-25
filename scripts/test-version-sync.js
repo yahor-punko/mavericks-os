@@ -1,4 +1,7 @@
 'use strict';
+// mavp-corpus-guard: always-run
+// Corpus-wide guard: run-tests.js appends this to every --filter run (.claude/rules/scripts.md).
+// mavp-declared-in: .claude/rules/scripts.md :: Version bump touches two files
 // Regression test: T-375 — package.json "version" must stay in sync with
 // MAVERICKS_VERSION in scripts/mavp-version.js. Drift here means release
 // tooling and package.json disagree about which version is shipping.

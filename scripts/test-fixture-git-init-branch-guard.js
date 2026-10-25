@@ -1,4 +1,7 @@
 'use strict';
+// mavp-corpus-guard: always-run
+// Corpus-wide guard: run-tests.js appends this to every --filter run (.claude/rules/scripts.md).
+// mavp-declared-in: .claude/rules/scripts.md :: Fixture git init pins the initial branch
 // T-634 — Guard against a NEW unpinned `git init` fixture invocation.
 //
 // Problem this guards against: T-632 fixed one fixture whose `git init`

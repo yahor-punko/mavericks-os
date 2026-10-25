@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// mavp-declared-in: .claude/rules/docs.md :: Frozen changelog sections
 // check-changelog-frozen.js — pre-commit guard for the frozen-changelog-section
 // rule (T-498, mechanized by T-499).
 //

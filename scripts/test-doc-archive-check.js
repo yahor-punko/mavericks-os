@@ -599,6 +599,228 @@ try {
     assertSumsToTotal(r.out);
   });
 
+  // ---- T-806: found-in-working is count-based (multiset). Expected values come
+  // from the rule: the first max(0, P - C) removed occurrences of a text fall
+  // through to archive / amended / missing; punctuation-only lines keep set
+  // semantics.
+  const DOMAIN_LINE = '- **domain:** backend';
+
+  /** baseRepo plus two entries that each carry an identical domain line, committed into the base. */
+  function repoWithTwinLines() {
+    const { dir } = baseRepo();
+    write(dir, 'docs/GUIDE.md', `${GUIDE_BASE}\n## entry-a\n\n${DOMAIN_LINE}\n\n## entry-b\n\n${DOMAIN_LINE}\n`);
+    const base = commit(dir, 'add twin lines');
+    return { dir, base };
+  }
+
+  function dropOneTwin(dir) {
+    const text = fs.readFileSync(path.join(dir, 'docs', 'GUIDE.md'), 'utf8');
+    assert.strictEqual(text.split(DOMAIN_LINE).length - 1, 2, 'fixture sanity: two twin lines');
+    write(dir, 'docs/GUIDE.md', text.replace(`${DOMAIN_LINE}\n\n## entry-b`, '## entry-b'));
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'docs', 'GUIDE.md'), 'utf8').split(DOMAIN_LINE).length - 1, 1, 'fixture sanity: one twin left');
+  }
+
+  test('one of two identical lines removed with no archive is MISSING, exit 1, line named', () => {
+    const { dir, base } = repoWithTwinLines();
+    dropOneTwin(dir);
+    const c = commit(dir, 'drop one twin');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(r.code, 1, `FAIL: expected exit 1:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'removed lines'), 1, r.out);
+    assert.strictEqual(count(r.out, 'missing'), 1, r.out);
+    assert.strictEqual(count(r.out, 'found-in-working'), 0, r.out);
+    assert.ok(r.out.includes(`MISSING ${shortOf(dir, c)} docs/GUIDE.md: ${DOMAIN_LINE}`), r.out);
+    assertSumsToTotal(r.out);
+  });
+
+  test('the same twin removal with a verbatim same-commit archive copy exits 0, found-in-archive 1', () => {
+    const { dir, base } = repoWithTwinLines();
+    dropOneTwin(dir);
+    write(dir, 'docs/archive/GUIDE/2026-10-23-entry-a.md', archiveText([DOMAIN_LINE]));
+    const c = commit(dir, 'drop one twin, archived');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(r.code, 0, `FAIL: expected exit 0:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'removed lines'), 1, r.out);
+    assert.strictEqual(count(r.out, 'found-in-archive'), 1, r.out);
+    assert.strictEqual(count(r.out, 'found-in-working'), 0, r.out);
+    assert.strictEqual(count(r.out, 'missing'), 0, r.out);
+    assertSumsToTotal(r.out);
+  });
+
+  test('a line moved within the same file (count unchanged) exits 0, found-in-working 1', () => {
+    const { dir, base } = repoWithTwinLines();
+    const text = fs.readFileSync(path.join(dir, 'docs', 'GUIDE.md'), 'utf8');
+    // Move the first twin to the end of the file: one removal, one addition, count unchanged.
+    write(dir, 'docs/GUIDE.md', `${text.replace(`${DOMAIN_LINE}\n\n## entry-b`, '## entry-b')}${DOMAIN_LINE}\n`);
+    const c = commit(dir, 'move a twin line');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(r.code, 0, `FAIL: expected exit 0:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'removed lines'), 1, r.out);
+    assert.strictEqual(count(r.out, 'found-in-working'), 1, r.out);
+    assert.strictEqual(count(r.out, 'missing'), 0, r.out);
+    assertSumsToTotal(r.out);
+  });
+
+  test('removing both of two identical lines with no archive is two MISSING (deficit is P - C = 2)', () => {
+    const { dir, base } = repoWithTwinLines();
+    const text = fs.readFileSync(path.join(dir, 'docs', 'GUIDE.md'), 'utf8');
+    write(dir, 'docs/GUIDE.md', text.split(`${DOMAIN_LINE}\n`).join(''));
+    const c = commit(dir, 'drop both twins');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(r.code, 1, `FAIL: expected exit 1:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'removed lines'), 2, r.out);
+    assert.strictEqual(count(r.out, 'missing'), 2, r.out);
+    assertSumsToTotal(r.out);
+  });
+
+  test('removing a --- separator with no archive exits 0 while another remains (punctuation-only keeps set semantics)', () => {
+    const { dir } = baseRepo();
+    write(dir, 'docs/GUIDE.md', `${GUIDE_BASE}---\nBetween rules.\n---\n`);
+    const base = commit(dir, 'add separators');
+    const text = fs.readFileSync(path.join(dir, 'docs', 'GUIDE.md'), 'utf8');
+    write(dir, 'docs/GUIDE.md', text.replace('---\nBetween rules.\n', 'Between rules.\n'));
+    const c = commit(dir, 'drop one separator');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(r.code, 0, `FAIL: expected exit 0:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'removed lines'), 1, r.out);
+    assert.strictEqual(count(r.out, 'found-in-working'), 1, r.out);
+    assert.strictEqual(count(r.out, 'missing'), 0, r.out);
+    assertSumsToTotal(r.out);
+  });
+
+  // ---- T-816: keyed same-document amendment. Expected values come from the
+  // rule (unique key at parent and child within ONE file, child line added),
+  // not from observed output. A keyed rewrite lands in amended-in-place and is
+  // also tallied on the keyed-amendments line.
+  const T995_OLD = '- **T-995 — Plugin publish** — planned; needs catalog token';
+  const T995_NEW = '- **T-995 — Plugin publish** — merged at abc1234; catalog listing live';
+
+  function keyedRepo(lines) {
+    const { dir } = baseRepo();
+    write(dir, 'docs/GUIDE.md', `${GUIDE_BASE}${lines.join('\n')}\n`);
+    const base = commit(dir, 'add keyed lines');
+    return { dir, base };
+  }
+
+  function assertKeyedPass(r, keyedCount) {
+    assert.strictEqual(r.code, 0, `FAIL: expected exit 0:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'removed lines'), 1, r.out);
+    assert.strictEqual(count(r.out, 'found-in-working'), 0, r.out);
+    assert.strictEqual(count(r.out, 'found-in-archive'), 0, r.out);
+    assert.strictEqual(count(r.out, 'amended-in-place'), 1, r.out);
+    assert.strictEqual(count(r.out, 'keyed-amendments'), keyedCount, r.out);
+    assert.strictEqual(count(r.out, 'missing'), 0, r.out);
+    assertSumsToTotal(r.out);
+  }
+
+  test('[a] keyed bullet whose body is replaced is amended-in-place and keyed-amendments 1', () => {
+    const { dir, base } = keyedRepo([T995_OLD]);
+    replaceInGuide(dir, T995_OLD, T995_NEW);
+    const c = commit(dir, 'rewrite the keyed status');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assertKeyedPass(r, 1);
+    assert.ok(r.out.includes(`AMENDED ${shortOf(dir, c)} docs/GUIDE.md (key match: T-995 — Plugin publish): ${T995_OLD}`), r.out);
+    assert.ok(/^Result: PASS.*1 amended in place/m.test(r.out), r.out);
+  });
+
+  test('[b] same rewrite landing in a different perimeter doc is MISSING (same document only), exit 1', () => {
+    const { dir, base } = keyedRepo([T995_OLD]);
+    replaceInGuide(dir, T995_OLD, null);
+    // always.md is a layer-0 perimeter doc (OTHER.md is not imported, so it would not even be a candidate).
+    const other = fs.readFileSync(path.join(dir, '.claude', 'rules', 'always.md'), 'utf8');
+    write(dir, '.claude/rules/always.md', `${other}${T995_NEW}\n`);
+    const c = commit(dir, 'keyed rewrite moved to another doc');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(r.code, 1, `FAIL: expected exit 1:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'removed lines'), 1, r.out);
+    assert.strictEqual(count(r.out, 'amended-in-place'), 0, r.out);
+    assert.strictEqual(count(r.out, 'keyed-amendments'), 0, r.out);
+    assert.strictEqual(count(r.out, 'missing'), 1, r.out);
+    assertSumsToTotal(r.out);
+  });
+
+  test('[c] a key shared by two lines at the parent never qualifies (uniqueness), rewrite below 80% is MISSING', () => {
+    const NOTE_A = '- **Note:** first note about retention of old facts here';
+    const NOTE_B = '- **Note:** second note about something else entirely';
+    const { dir, base } = keyedRepo([NOTE_A, NOTE_B]);
+    replaceInGuide(dir, NOTE_A, '- **Note:** replaced wholesale');
+    const c = commit(dir, 'rewrite one of two notes');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(r.code, 1, `FAIL: expected exit 1:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'removed lines'), 1, r.out);
+    assert.strictEqual(count(r.out, 'keyed-amendments'), 0, r.out);
+    assert.strictEqual(count(r.out, 'missing'), 1, r.out);
+    assertSumsToTotal(r.out);
+  });
+
+  test('[c2] a key that becomes duplicated at the child never qualifies either', () => {
+    const { dir, base } = keyedRepo([T995_OLD]);
+    replaceInGuide(dir, T995_OLD, `${T995_NEW}\n- **T-995 — Plugin publish** — a second line under the same key`);
+    const c = commit(dir, 'rewrite and duplicate the key');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(r.code, 1, `FAIL: expected exit 1:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'keyed-amendments'), 0, r.out);
+    assert.strictEqual(count(r.out, 'missing'), 1, r.out);
+    assertSumsToTotal(r.out);
+  });
+
+  test('[d] a table row keyed on its first cell is amended-in-place; a changed separator row never keys', () => {
+    const TABLE = ['| ID | Status | Note |', '|---|---|---|', '| T-993 | planned | later |'];
+    const { dir, base } = keyedRepo(TABLE);
+    replaceInGuide(dir, '| T-993 | planned | later |', '| T-993 | merged | shipped |');
+    const c = commit(dir, 'rewrite a table row');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assertKeyedPass(r, 1);
+    assert.ok(r.out.includes('(key match: T-993): | T-993 | planned | later |'), r.out);
+
+    // Separator row changed: removed `|---|---|---|` has no key and no tokens.
+    const second = keyedRepo(TABLE);
+    replaceInGuide(second.dir, '|---|---|---|', '|---|---|---|---|');
+    const c2 = commit(second.dir, 'change the separator row');
+    const r2 = check(second.dir, ['--range', `${second.base}..${c2}`]);
+    assert.strictEqual(r2.code, 1, `FAIL: expected exit 1:\n${r2.out}`);
+    assert.strictEqual(count(r2.out, 'removed lines'), 1, r2.out);
+    assert.strictEqual(count(r2.out, 'keyed-amendments'), 0, r2.out);
+    assert.strictEqual(count(r2.out, 'missing'), 1, r2.out);
+    assertSumsToTotal(r2.out);
+  });
+
+  test('[e] ACCEPTED BOUNDARY: a keyed body cut to its bare lead passes as a keyed amendment, exit 0', () => {
+    const OLD = '- **Mirror rule** — every status change must be mirrored in the other artifact before the turn ends';
+    const { dir, base } = keyedRepo([OLD]);
+    replaceInGuide(dir, OLD, '- **Mirror rule**');
+    const c = commit(dir, 'cut the keyed body to its lead');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assertKeyedPass(r, 1);
+  });
+
+  test('[f] --staged mirrors [a]', () => {
+    const { dir } = keyedRepo([T995_OLD]);
+    replaceInGuide(dir, T995_OLD, T995_NEW);
+    git(dir, ['add', '-A']);
+    const r = check(dir, ['--staged']);
+    assertKeyedPass(r, 1);
+    assert.ok(r.out.includes(`AMENDED staged docs/GUIDE.md (key match: T-995 — Plugin publish): ${T995_OLD}`), r.out);
+  });
+
+  test('[g] ordered-list and star markers key too; a heading never keys; unkeyed lines still print keyed-amendments 0', () => {
+    const { keyOf } = require('./mavp-doc-archive-check.js');
+    assert.strictEqual(keyOf('1. **Alpha** body'), 'Alpha');
+    assert.strictEqual(keyOf('2) **Beta** body'), 'Beta');
+    assert.strictEqual(keyOf('  * **Gamma** body'), 'Gamma');
+    assert.strictEqual(keyOf('+ **Delta**'), 'Delta');
+    assert.strictEqual(keyOf('## **Heading**'), null);
+    assert.strictEqual(keyOf('plain **bold** later'), null);
+    assert.strictEqual(keyOf('|---|:--:|'), null);
+    assert.strictEqual(keyOf('| Cell | other |'), 'Cell');
+    const { dir, base } = baseRepo();
+    replaceInGuide(dir, PARAGRAPH[1], 'Old paragraph line beta, now with several more words added.');
+    const c = commit(dir, 'extend a plain line');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(count(r.out, 'amended-in-place'), 1, r.out);
+    assert.strictEqual(count(r.out, 'keyed-amendments'), 0, r.out);
+  });
+
   console.log(`PASS: test-doc-archive-check (${results.length} cases)`);
 } finally {
   for (const d of scratchDirs) fs.rmSync(d, { recursive: true, force: true });

@@ -17,16 +17,18 @@
 //      mid-wave-archived task's title/id — the mechanism --close-session
 //      relies on to still report it.
 //   5. End-to-end: running --archive-merged, then finishing the wave and
-//      calling --close-session --non-interactive, still includes the
-//      mid-wave-archived task's title in wave_summary AND lists it (with its
-//      evidence) in the session-completed results table — the literal T-420
-//      acceptance criterion, verified explicitly rather than assumed.
+//      calling --close-session --non-interactive, still lists the
+//      mid-wave-archived task (with its evidence) in the session-completed
+//      results table, and the wave-close that follows (T-820: --close-wave is
+//      the only path that writes the auto wave_summary) includes its title in
+//      wave_summary — the literal T-420 acceptance criterion, verified
+//      explicitly rather than assumed.
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 
 const {
   archiveMergedTasksFromActiveWave,
@@ -37,6 +39,7 @@ const {
 const SCRIPTS_DIR = __dirname;
 const ARCHIVE_MERGED_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-archive-merged.js');
 const CLOSE_SESSION_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-close-session.js');
+const CLOSE_WAVE_PATH = path.join(SCRIPTS_DIR, 'mavp-operator-close-wave.js');
 const VALIDATOR_PATH = path.join(SCRIPTS_DIR, 'mavp-validator.js');
 
 function readUtf8(p) { return fs.readFileSync(p, 'utf8'); }
@@ -229,7 +232,7 @@ function writeUtf8(p, c) { fs.writeFileSync(p, c, 'utf8'); }
     stage: 'execution',
     wave: 9,
     wave_status: 'execution',
-    wave_goal: null,
+    wave_goal: 'T-420 fixture goal',
     parked_waves: [],
     active_slices: ['T-101'],
     next_action: 'T-101 → developer → do the thing',
@@ -281,7 +284,19 @@ function writeUtf8(p, c) { fs.writeFileSync(p, c, 'utf8'); }
   taskStatusForClose = taskStatusForClose.replace('- **Status:** in_progress', '- **Status:** merged');
   writeUtf8(TASK_STATUS_PATH, taskStatusForClose);
 
+  // T-820: --close-wave commits, so the fixture needs a real (pinned-branch) git repo.
+  const gitEnv = { ...process.env };
+  for (const k of Object.keys(gitEnv)) if (k.startsWith('GIT_')) delete gitEnv[k];
+  const gitIn = (...a) => spawnSync('git', a, { cwd: TMP, env: gitEnv, encoding: 'utf8' });
+  gitIn('init', '-q', '-b', 'main');
+  gitIn('config', 'user.email', 'fixture@example.com');
+  gitIn('config', 'user.name', 'Fixture');
+  gitIn('add', '-A');
+  gitIn('commit', '-q', '-m', 'fixture init');
+
   const closeOutput = execFileSync('node', [CLOSE_SESSION_PATH, '--non-interactive'], { cwd: TMP, env, encoding: 'utf8' });
+  assert.strictEqual(JSON.parse(readUtf8(PROCESS_STATE_JSON_PATH)).wave, 9, 'Test 5 FAIL: --close-session must not advance the wave (T-820)');
+  execFileSync('node', [CLOSE_WAVE_PATH, '--operator-confirmed', 'fixture statement'], { cwd: TMP, env, encoding: 'utf8' });
 
   // --- assertion (a): wave_summary includes the mid-wave-archived title ---
   const processStateAfterClose = JSON.parse(readUtf8(PROCESS_STATE_JSON_PATH));
