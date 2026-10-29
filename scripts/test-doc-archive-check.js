@@ -164,6 +164,44 @@ try {
     assertSumsToTotal(r.out);
   });
 
+  function blockquoteArchive(prefix) {
+    const { dir, base } = baseRepo();
+    write(dir, 'docs/GUIDE.md', GUIDE_STUB);
+    write(dir, 'docs/archive/GUIDE/2026-10-23-old-topic.md', archiveText(PARAGRAPH.map((l) => prefix + l)));
+    const c = commit(dir, 'archive old topic as a quote');
+    return check(dir, ['--range', `${base}..${c}`]);
+  }
+
+  test('T-851: paragraph archived with each line blockquoted passes as found-in-archive', () => {
+    const r = blockquoteArchive('> ');
+    assert.strictEqual(r.code, 0, `FAIL: expected exit 0:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'found-in-archive'), PARAGRAPH.length, r.out);
+    assert.strictEqual(count(r.out, 'missing'), 0, r.out);
+    assertSumsToTotal(r.out);
+  });
+
+  test('T-851: nested blockquote markers on the archive copy pass too', () => {
+    const r = blockquoteArchive('> > ');
+    assert.strictEqual(r.code, 0, `FAIL: expected exit 0:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'found-in-archive'), PARAGRAPH.length, r.out);
+    assert.strictEqual(count(r.out, 'missing'), 0, r.out);
+    assertSumsToTotal(r.out);
+  });
+
+  test('T-851: a perimeter line that is itself a quote, archived with its marker dropped, is missing', () => {
+    const { dir } = baseRepo();
+    write(dir, 'docs/GUIDE.md', GUIDE_BASE.replace('Keep line one.', 'Keep line one.\n\n> quoted line'));
+    const base = commit(dir, 'add a quoted perimeter line');
+    write(dir, 'docs/GUIDE.md', GUIDE_BASE.replace('Keep line one.', 'Keep line one.\n\nMoved: see docs/archive/GUIDE/2026-10-23-quote.md'));
+    write(dir, 'docs/archive/GUIDE/2026-10-23-quote.md', archiveText(['quoted line']));
+    const c = commit(dir, 'archive the quote without its marker');
+    const r = check(dir, ['--range', `${base}..${c}`]);
+    assert.strictEqual(r.code, 1, `FAIL: expected exit 1:\n${r.out}`);
+    assert.strictEqual(count(r.out, 'missing'), 1, r.out);
+    assert.ok(r.out.includes(`MISSING ${shortOf(dir, c)} docs/GUIDE.md: > quoted line`), r.out);
+    assertSumsToTotal(r.out);
+  });
+
   test('deletion without archive exits 1 naming commit, file and line text', () => {
     const { dir, base } = baseRepo();
     write(dir, 'docs/GUIDE.md', GUIDE_WITHOUT_PARAGRAPH);

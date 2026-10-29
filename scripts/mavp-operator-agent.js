@@ -41,7 +41,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { buildDeployQueue, classifyNextAction, countIntakeUntriaged, countUnackedFeedbackAnswers, resolveIntakeDir, semverCompare, computeDueRechecks, computeMustRead, detectPermissionModeConflict, partitionInstallerManaged, splitMustReadOversized, generateProcessStateMd, getDeployPendingForRepo, IN_FLIGHT_STATUSES, normalizeDeployField, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { buildDeployQueue, classifyNextAction, countIntakeUntriaged, countUnackedFeedbackAnswers, resolveIntakeDir, semverCompare, computeDueRechecks, computeMustRead, detectPermissionModeConflict, partitionInstallerManaged, splitMustReadOversized, generateProcessStateMd, guardReportingWrite, getDeployPendingForRepo, IN_FLIGHT_STATUSES, normalizeDeployField, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
@@ -302,6 +302,10 @@ function resolveNextAction(activeTasks, plannedTasks, staticFallback) {
     activeTasks.filter(t => t.status === 'merged').map(t => t.id)
   );
 
+  // T-850: a dependency archived out of TASK_STATUS.md's Active tasks (by --close-session)
+  // is still satisfied when its BACKLOG.md block — in ANY section — is terminal-completed.
+  const BACKLOG_DONE_STATUSES = new Set(['merged', 'runtime_verified', 'deployed_dev', 'deployed_prod']);
+  const backlogDoneIds = new Set();
   let backlogDeps = {};
   try {
     const backlog = readUtf8(BACKLOG_MD);
@@ -309,6 +313,10 @@ function resolveNextAction(activeTasks, plannedTasks, staticFallback) {
     for (const block of blocks) {
       const idMatch = block.match(/^###\s+(T-\d+)/m);
       const depMatch = block.match(/^- \*\*Depends on:\*\*\s+(.+)$/m);
+      const statusMatch = block.match(/^- \*\*Status:\*\*\s+(\S+)/m);
+      if (idMatch && statusMatch && BACKLOG_DONE_STATUSES.has(statusMatch[1].toLowerCase())) {
+        backlogDoneIds.add(idMatch[1]);
+      }
       if (idMatch && depMatch) {
         const raw = depMatch[1].trim();
         const deps = raw === '—' ? [] : raw.split(/[,\s]+/).filter(d => /^T-\d+$/.test(d));
@@ -337,7 +345,7 @@ function resolveNextAction(activeTasks, plannedTasks, staticFallback) {
     .filter(t => PLANNED_STATUSES.has(t.status))
     .filter(t => {
       const deps = backlogDeps[t.id] || [];
-      return deps.every(dep => mergedIds.has(dep));
+      return deps.every(dep => mergedIds.has(dep) || backlogDoneIds.has(dep));
     })
     .map(t => ({ task: t, priority: STATUS_PRIORITY[t.status] ?? 99 }));
 
@@ -347,7 +355,7 @@ function resolveNextAction(activeTasks, plannedTasks, staticFallback) {
     .filter(t => PLANNED_STATUSES.has(t.status))
     .filter(t => {
       const deps = backlogDeps[t.id] || [];
-      return deps.every(dep => mergedIds.has(dep));
+      return deps.every(dep => mergedIds.has(dep) || backlogDoneIds.has(dep));
     })
     .map(t => ({ task: t, priority: STATUS_PRIORITY[t.status] ?? 99 }));
 
@@ -572,11 +580,35 @@ function deletePersistedPermissionMode(root) {
   }
 }
 
+const USAGE_TEXT = [
+  'Usage: ./scripts/mavp-operator --agent',
+  '',
+  'Prints a compact JSON session brief for the Main Agent (stage, active slices,',
+  'next_action, blockers, must-read set). Takes no options; --help/-h prints this',
+  'text and exits before reading or writing any project state.',
+  '',
+].join('\n');
+
 function main() {
-  generateProcessStateMd(PROCESS_STATE_JSON, PROCESS_STATE_MD);
+  // T-847: a never-a-project root (placeholder tree, the machine-shared
+  // framework-source clone, a linked worktree, a caller inside one) is still
+  // reported on, but this surface's incidental writes are skipped there.
+  const writeGuard = guardReportingWrite(ROOT, '--agent');
+  if (writeGuard.skip) {
+    process.stderr.write(`${writeGuard.note}\n`);
+  } else {
+    generateProcessStateMd(PROCESS_STATE_JSON, PROCESS_STATE_MD);
+  }
 
   const json = readProcessStateJson();
-  const md = parseProcessStateMd(readUtf8(PROCESS_STATE_MD));
+  let processStateMdText = '';
+  try {
+    processStateMdText = readUtf8(PROCESS_STATE_MD);
+  } catch (error) {
+    // Only a skipped regeneration may tolerate a missing file; otherwise keep the original throw.
+    if (!writeGuard.skip) throw error;
+  }
+  const md = parseProcessStateMd(processStateMdText);
   const activeTasks = parseActiveTaskStatus(readUtf8(TASK_STATUS_MD));
   // IN_FLIGHT_STATUSES is imported from mavp-operator-lib.js — the single shared source
   // of truth for "what counts as active work" (see the note on that Set's definition
@@ -795,7 +827,11 @@ function main() {
   //     session's hook context.
   const hookPayload = readStdinHookPayload();
   const hookPayloadMode = extractHookPayloadPermissionMode(hookPayload);
-  if (hookPayloadMode) {
+  // T-847: neither the persist nor the delete runs when the write guard skipped
+  // this surface's writes (a never-a-project root must not gain or lose a .mavp file).
+  if (writeGuard.skip) {
+    // no .mavp/permission-mode write or delete
+  } else if (hookPayloadMode) {
     persistRuntimePermissionMode(ROOT, { mode: hookPayloadMode, sessionId: extractHookPayloadSessionId(hookPayload) });
   } else if (hookPayload !== null) {
     deletePersistedPermissionMode(ROOT);
@@ -859,6 +895,10 @@ function main() {
     ...(mustReadFramework.length > 0 ? { must_read_framework: mustReadFramework } : {}),
     ...(intakeUntriaged > 0 ? { intake_untriaged: intakeUntriaged } : {}),
     ...(feedbackAnswersUnacked > 0 ? { feedback_answers_unacked: feedbackAnswersUnacked } : {}),
+    // T-847: additive, present only when this run skipped its state writes in a never-a-project root.
+    ...(writeGuard.skip
+      ? { reporting_write_skipped: { discriminator: writeGuard.discriminator, resolved_root: writeGuard.resolvedRoot, reason: writeGuard.discriminatorText } }
+      : {}),
   };
 
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
@@ -873,7 +913,12 @@ function main() {
 // is the process entry point, never when it is require()d.
 if (require.main === module) {
   try {
-    main();
+    // T-847: --help/-h exits before any state read or write (main() regenerates PROCESS_STATE.md).
+    if (process.argv.slice(2).some((arg) => arg === '--help' || arg === '-h')) {
+      process.stdout.write(USAGE_TEXT);
+    } else {
+      main();
+    }
   } catch (error) {
     process.stderr.write(`agent summary failed: ${error.message}\n`);
     process.exitCode = 1;

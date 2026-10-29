@@ -54,6 +54,7 @@ const {
   isHashReachable,
   findAnnotatedFieldVariant,
   collectAlwaysLoadedContext,
+  guardReportingWrite,
   parseModuleRegistry,
   parseModuleRegistryFromText,
   readFileAtRevision,
@@ -733,7 +734,7 @@ function compareRecords({ backlogRecords, taskStatusRecords }) {
   };
 }
 
-function checkLastTaskId(backlogRecords, processStatePath) {
+function checkLastTaskId(backlogRecords, processStatePath, guardOptions = {}) {
   let lastTaskId;
   let parsedState;
 
@@ -763,6 +764,23 @@ function checkLastTaskId(backlogRecords, processStatePath) {
 
   if (maxTaskId === null || maxNumericId <= lastTaskId) {
     return [];
+  }
+
+  // T-847: a never-a-project root (placeholder tree, the machine-shared
+  // framework-source clone, a linked worktree, a caller inside one) is reported
+  // on but never written to - the same existing finding, no patch, and the
+  // discriminator text in its message. guardOptions injects homeDir/cwd/env for tests.
+  const writeGuard = guardReportingWrite(path.dirname(processStatePath), 'the validator', guardOptions);
+  if (writeGuard.skip) {
+    return [
+      createFinding({
+        checkName: 'last_task_id_auto_patched',
+        taskId: maxTaskId,
+        message: `last_task_id in PROCESS_STATE.json (${lastTaskId}) is behind highest task ID (${maxNumericId}) — auto-patch skipped: ${writeGuard.discriminatorText}`,
+        repairTarget: 'PROCESS_STATE.json',
+        suggestedAction: `No write was made. Update last_task_id to ${maxNumericId} in a real project root, or set MAVERICKS_ALLOW_NEVER_PROJECT_ROOT=1 to permit the auto-patch.`,
+      }),
+    ];
   }
 
   // Auto-patch PROCESS_STATE.json instead of blocking with a failure.

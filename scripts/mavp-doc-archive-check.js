@@ -53,6 +53,16 @@
  *     Every removed line lands in exactly one of found-in-working /
  *     found-in-archive / amended-in-place / missing, so the four counts sum to
  *     the removed-line total.
+ *   - Blockquoted archive copy (T-851): the archive-side line set also holds,
+ *     for each archive line, every form obtained by removing one leading
+ *     blockquote marker plus at most one following space, repeatedly, so a
+ *     displaced line archived as a quote (nested quotes included) still
+ *     matches its verbatim source. One-directional: the removed-side text is
+ *     never normalised, so an archive copy may carry more quote markers than
+ *     the source line, never fewer, and a source line that is itself a quote
+ *     archived with its marker dropped is reported missing. Only the archive
+ *     side changes; the multiset counts, amended-in-place and keyed judgments
+ *     are untouched.
  *   - Amended in place (T-793): a removed line that is neither verbatim in a
  *     working doc nor in a same-commit archive file is AMENDED-IN-PLACE when
  *     some line ADDED by the same step to a perimeter file (parent perimeter
@@ -380,8 +390,15 @@ function lineSet(reader, files) {
     const text = reader.read(rel);
     if (typeof text !== 'string') continue;
     for (const l of text.split(/\r?\n/)) {
-      const t = l.trim();
+      let t = l.trim();
       if (t) set.add(t);
+      // T-851: also admit every form with one more leading blockquote marker
+      // (and at most one following space) removed, so a verbatim copy archived
+      // as a quote still matches. Archive side only; never applied to removed text.
+      while (t.startsWith('>')) {
+        t = t.slice(t.startsWith('> ') ? 2 : 1);
+        if (t) set.add(t);
+      }
     }
   }
   return set;

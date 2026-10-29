@@ -63,7 +63,9 @@ const { normalizeDeployField, generateProcessStateMd, archiveActiveWaveInBacklog
 // directed call, so reusing them here inherits that hardening for free —
 // this file never calls mirrorGitEnv() itself; it is exercised transitively
 // through isGitRepo()/getMirrorTags(), which is the intended reuse shape.
-const { resolveMirrorHome, getMirrorTags, isGitRepo } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'check-changelog-frozen.js'));
+// T-849: the mirror's TAGGED TREE is read the same way, via
+// getMirrorTreeEntries() (mirrorGitEnv()-based) — never a local `git -C`.
+const { resolveMirrorHome, getMirrorTags, isGitRepo, getMirrorTreeEntries, parseLsTreeOutput } =require(path.join(MAVERICKS_SCRIPTS_DIR, 'check-changelog-frozen.js'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 
@@ -1460,6 +1462,70 @@ function classifyVersionBumpAdvisory({ changes, currentVersion, tags }) {
 // behavior" is not mechanically decidable in general; a single named
 // exemption is the whole fix.
 const VERSION_BUMP_EXEMPT_PATHSPEC = ':(exclude)scripts/publish-manifest.json';
+const VERSION_BUMP_EXEMPT_PATH = 'scripts/publish-manifest.json';
+
+/**
+ * T-849: pure drift computation between this checkout's scripts/ tree and
+ * the mirror's tagged scripts/ tree — no git/fs, directly unit-testable.
+ * Both inputs are Maps of repo-relative path -> blob OID.
+ *
+ *   localEntries  — tracked scripts/ files at HEAD
+ *   mirrorEntries — the scripts/ tree at the mirror's tag for the current
+ *                   version; null = unreadable -> returns null (the caller's
+ *                   "fall back to the pre-T-849 behaviour" signal)
+ *   shipSet       — Set of ship-classified paths, or null when no manifest
+ *                   exists (then every tracked scripts/ file counts)
+ *
+ * A path is drift when its OID differs, when it is a ship path absent on the
+ * mirror, or when the mirror carries it but this checkout no longer ships it
+ * (the next release would delete it). Local paths outside shipSet are
+ * ignored. scripts/publish-manifest.json is ignored on both sides (T-649).
+ * Returns a sorted array of drifting paths; empty means nothing to release.
+ */
+function computeScriptsDriftAgainstMirror(localEntries, mirrorEntries, shipSet) {
+  if (!mirrorEntries) return null;
+  const exempt = VERSION_BUMP_EXEMPT_PATH;
+  const local = new Map();
+  for (const [p, oid] of (localEntries || new Map())) {
+    if (p === exempt) continue;
+    if (shipSet && !shipSet.has(p)) continue;
+    local.set(p, oid);
+  }
+  const drift = new Set();
+  for (const [p, oid] of local) {
+    if (mirrorEntries.get(p) !== oid) drift.add(p);
+  }
+  for (const p of mirrorEntries.keys()) {
+    if (p === exempt) continue;
+    if (!local.has(p)) drift.add(p);
+  }
+  return Array.from(drift).sort();
+}
+
+/**
+ * T-849: read the mirror's tagged scripts/ tree for `tagName` through
+ * check-changelog-frozen.js's mirrorGitEnv()-based export. Returns a Map,
+ * or null when the mirror/tag cannot be read (caller degrades unchanged).
+ */
+function resolveMirrorScriptsTree(tagName) {
+  try {
+    const mirrorHome = resolveMirrorHome();
+    if (!mirrorHome || !fs.existsSync(mirrorHome) || !isGitRepo(mirrorHome)) return null;
+    return getMirrorTreeEntries(mirrorHome, `refs/tags/${tagName}`, 'scripts/');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * T-849: this checkout's tracked scripts/ tree at HEAD as a Map of path ->
+ * blob OID, or null when git cannot be read.
+ */
+function readLocalScriptsTree() {
+  const res = spawnSync('git', ['ls-tree', '-r', '-z', 'HEAD', '--', 'scripts/'], { encoding: 'utf8', cwd: ROOT });
+  if (res.status !== 0) return null;
+  return parseLsTreeOutput(res.stdout);
+}
 
 /**
  * Check whether scripts/ changed after the last version bump in mavp-version.js.
@@ -1505,6 +1571,27 @@ function checkVersionBump() {
     const tags = resolveMirrorTagsForVersionBump();
     const classification = classifyVersionBumpAdvisory({ changes, currentVersion, tags });
     if (!classification) return null;
+
+    // T-849: the current version IS tagged on the mirror — the log range
+    // above only says scripts/ commits exist since the last bump COMMIT,
+    // which can all already be inside the published release. Judge by
+    // content instead: advise only for scripts/ files whose blob differs
+    // from the mirror's tagged tree. Any unreadable side (mirror tree, local
+    // tree) leaves the classification and the log-derived paths unchanged.
+    if (classification.kind === 'bump' && tags && currentVersion) {
+      const tagName = currentVersion.startsWith('v') ? currentVersion : `v${currentVersion}`;
+      if (tags.has(tagName)) {
+        const mirrorEntries = resolveMirrorScriptsTree(tagName);
+        const localEntries = mirrorEntries ? readLocalScriptsTree() : null;
+        const drift = localEntries
+          ? computeScriptsDriftAgainstMirror(localEntries, mirrorEntries, loadShipManifestSet(ROOT))
+          : null;
+        if (drift) {
+          if (!drift.length) return null;
+          return { ...classification, paths: drift };
+        }
+      }
+    }
 
     // T-649: name the changed path(s) for the printed advisory. Additive —
     // classifyVersionBumpAdvisory()'s own return shape/unit tests stay
@@ -2842,4 +2929,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { NO_DEPLOY_LABEL, parseBacklogNoDeploy, moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE, findExecutionLogOmissions, printExecutionLogOmissionWarning, loadShipManifestSet, getCommitChangedFiles, findShipTouchingChangelogOmissions, printChangelogShipOmissionWarning, resetAdvisoryCollector, recordAdvisory, printAdvisoryRecap, CI_CHECK_COMMAND, CI_CHECK_POST_PUSH_LINE, CI_CHECK_REMINDER_SUFFIX, buildSuiteReceiptLine, buildFeedbackCaptureAdvisory };
+module.exports = { NO_DEPLOY_LABEL, parseBacklogNoDeploy, moveTaskToCompleted, sweepTerminalSkipTasks, assertMergedRecordsUncontaminated, ALREADY_TERMINAL_STATUSES, parseActiveTasks, updateTaskStatusField, isTaskHeadingFor, headingLeadingTaskId, updateProcessStateJson, resolveMode, buildVolatileNextActionNotice, buildWaveCompletionAnnouncement, buildWorktreeHygieneAdvisory, runValidator, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, printSessionCompletedTable, checkVersionBump, classifyVersionBumpAdvisory, computeScriptsDriftAgainstMirror, readCurrentMavericksVersion, resolveMirrorTagsForVersionBump, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, formatVersionBumpPathsLine, buildAutoSummary, findShippedUnbookedCandidates, computeShippedUnbookedAdvisory, formatShippedUnbookedProposal, printShippedUnbookedAdvisory, SHIPPED_UNBOOKED_ADVISORY_STATUS, SHIPPED_UNBOOKED_STANDDOWN_LINE, findExecutionLogOmissions, printExecutionLogOmissionWarning, loadShipManifestSet, getCommitChangedFiles, findShipTouchingChangelogOmissions, printChangelogShipOmissionWarning, resetAdvisoryCollector, recordAdvisory, printAdvisoryRecap, CI_CHECK_COMMAND, CI_CHECK_POST_PUSH_LINE, CI_CHECK_REMINDER_SUFFIX, buildSuiteReceiptLine, buildFeedbackCaptureAdvisory };

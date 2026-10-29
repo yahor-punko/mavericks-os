@@ -1542,6 +1542,7 @@ const T533_REAL_CONTRACT = JSON.parse(
   fs.readFileSync(path.join(REPO_ROOT, ...T533_CONTRACT_REL.split('/')), 'utf8')
 );
 const T533_REAL_FLOORS = T533_REAL_CONTRACT.min_direct_files;
+const T533_FIXTURE_SCRIPTS_FLOOR = 64;
 
 // Writes a fixture ledger at the same tree-relative path the overlay reads.
 function t533WriteContract(treeDir, floors) {
@@ -1562,6 +1563,19 @@ function t533RealFloorsFor(dirs, label) {
       `${label} FAIL: the committed ledger must declare a floor for "${dir === '' ? '(root)' : dir}"`
     );
     out[dir] = T533_REAL_FLOORS[dir];
+    if (dir === 'scripts') {
+      // The Test 32/33/37 fixtures model scripts/ as a 105-file bucket. T-792
+      // re-seeded the real scripts floor to 112 (live bucket of 187), which a
+      // 105-file fixture can never satisfy, so those fixtures pin the
+      // fixture-scale floor (64, the value they were built around) instead.
+      // The real floor must still be AT LEAST that value, so an under-seeded
+      // committed scripts floor keeps failing here directly.
+      assert.ok(
+        T533_REAL_FLOORS[dir] >= T533_FIXTURE_SCRIPTS_FLOOR,
+        `${label} FAIL: the committed scripts floor (${T533_REAL_FLOORS[dir]}) must be at least the fixture-scale floor ${T533_FIXTURE_SCRIPTS_FLOOR}`
+      );
+      out[dir] = T533_FIXTURE_SCRIPTS_FLOOR;
+    }
   }
   return out;
 }
@@ -1926,7 +1940,7 @@ const T533_EXPECTED_ERROR_LINE_ONE =
   // committed floor fails this assertion.
   assert.strictEqual(
     t533FindingLinesOf(result.stderr),
-    `  - scripts: 53 file(s) directly, below the committed floor of ${T533_REAL_FLOORS.scripts}`,
+    `  - scripts: 53 file(s) directly, below the committed floor of ${T533_FIXTURE_SCRIPTS_FLOOR}`,
     `Test 33 FAIL: expected the finding to name scripts/'s 53 remaining files against the committed floor, got:\n${result.stderr}`
   );
   assert.ok(

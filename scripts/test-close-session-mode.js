@@ -12,7 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawnSync, spawn: spawnChildProcess } = require('node:child_process');
 
-const { resolveMode, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, classifyVersionBumpAdvisory, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, CI_CHECK_COMMAND, CI_CHECK_REMINDER_SUFFIX } = require('./mavp-operator-close-session.js');
+const { resolveMode, getDeployLabel, isCommitReachableFromRemote, resolveRemoteTrackingRef, classifyVersionBumpAdvisory, computeScriptsDriftAgainstMirror, formatVersionBumpPathsLine, VERSION_BUMP_LINE, VERSION_UNRELEASED_LINE, CI_CHECK_COMMAND, CI_CHECK_REMINDER_SUFFIX } = require('./mavp-operator-close-session.js');
 
 // 1. --interactive flag always wins → 'interactive'
 assert.strictEqual(
@@ -1440,6 +1440,181 @@ function runCloseSessionCliWithEnv(repoDir, extraEnv) {
 console.log('All T-530 assertions passed.');
 
 // ---------------------------------------------------------------------------
+// T-849 — when the current version is tagged on the mirror, the bump advisory
+// counts only scripts/ files whose blob differs from the mirror's TAGGED tree,
+// not every commit since the last mavp-version.js change.
+// ---------------------------------------------------------------------------
+
+// Unit: computeScriptsDriftAgainstMirror() is pure over two {path -> OID} maps.
+{
+  const E = (obj) => new Map(Object.entries(obj));
+  const MANIFEST = 'scripts/publish-manifest.json';
+
+  assert.deepStrictEqual(
+    computeScriptsDriftAgainstMirror(E({ 'scripts/a.js': 'o1', 'scripts/b.js': 'o2' }), E({ 'scripts/a.js': 'o1', 'scripts/b.js': 'o2' }), null),
+    [],
+    'T-849 Unit FAIL: identical entries must yield an empty drift set'
+  );
+  assert.deepStrictEqual(
+    computeScriptsDriftAgainstMirror(E({ 'scripts/a.js': 'o1', 'scripts/b.js': 'o2' }), E({ 'scripts/a.js': 'o1', 'scripts/b.js': 'oX' }), null),
+    ['scripts/b.js'],
+    'T-849 Unit FAIL: a path with a differing OID must be the drift'
+  );
+  assert.deepStrictEqual(
+    computeScriptsDriftAgainstMirror(E({ 'scripts/a.js': 'o1', 'scripts/new.js': 'o3' }), E({ 'scripts/a.js': 'o1' }), new Set(['scripts/a.js', 'scripts/new.js'])),
+    ['scripts/new.js'],
+    'T-849 Unit FAIL: a ship path absent on the mirror must be the drift'
+  );
+  assert.deepStrictEqual(
+    computeScriptsDriftAgainstMirror(E({ 'scripts/a.js': 'o1' }), E({ 'scripts/a.js': 'o1', 'scripts/gone.js': 'o4' }), null),
+    ['scripts/gone.js'],
+    'T-849 Unit FAIL: a mirror path absent locally must be the drift'
+  );
+  assert.deepStrictEqual(
+    computeScriptsDriftAgainstMirror(E({ 'scripts/a.js': 'o1', [MANIFEST]: 'local-side' }), E({ 'scripts/a.js': 'o1' }), null),
+    [],
+    'T-849 Unit FAIL: scripts/publish-manifest.json present only locally must be ignored'
+  );
+  assert.deepStrictEqual(
+    computeScriptsDriftAgainstMirror(E({ 'scripts/a.js': 'o1' }), E({ 'scripts/a.js': 'o1', [MANIFEST]: 'mirror-side' }), null),
+    [],
+    'T-849 Unit FAIL: scripts/publish-manifest.json present only on the mirror must be ignored'
+  );
+  assert.deepStrictEqual(
+    computeScriptsDriftAgainstMirror(E({ 'scripts/a.js': 'o1', [MANIFEST]: 'x' }), E({ 'scripts/a.js': 'o1', [MANIFEST]: 'y' }), null),
+    [],
+    'T-849 Unit FAIL: scripts/publish-manifest.json differing on both sides must be ignored'
+  );
+  assert.deepStrictEqual(
+    computeScriptsDriftAgainstMirror(E({ 'scripts/a.js': 'o1', 'scripts/test-only.js': 'o5' }), E({ 'scripts/a.js': 'o1' }), new Set(['scripts/a.js'])),
+    [],
+    'T-849 Unit FAIL: a local non-ship path must be ignored'
+  );
+  assert.strictEqual(
+    computeScriptsDriftAgainstMirror(E({ 'scripts/a.js': 'o1' }), null, null),
+    null,
+    'T-849 Unit FAIL: unreadable mirror entries (null) must return null, the fallback signal'
+  );
+
+  console.log('T-849 unit tests passed: computeScriptsDriftAgainstMirror() covers identical/differing OID/absent on mirror/absent locally/manifest exempt/non-ship ignored/null mirror');
+}
+
+// Builds a project repo: bump commit (mavp-version.js at `version`) followed
+// by a scripts/ commit C1 (scripts/c1.js). Returns the repo dir.
+function makeT849Repo(version) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 't849-fixture-'));
+  gitT530(dir, ['init', '-q', '-b', 'main']);
+  gitT530(dir, ['config', 'user.email', 'demo@example.invalid']);
+  gitT530(dir, ['config', 'user.name', 'Fixture User']);
+  seedStateFilesT530(dir);
+  fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'scripts', 'mavp-version.js'), `module.exports = { MAVERICKS_VERSION: '${version}' };\n`);
+  commitAllT530(dir, `fixture: bump commit, version ${version}`);
+  fs.writeFileSync(path.join(dir, 'scripts', 'c1.js'), '// fixture C1\n');
+  commitAllT530(dir, 'fixture: C1 scripts commit after the bump');
+  return dir;
+}
+
+// Mirror fixture whose tag v<version> holds a scripts/ directory carrying
+// exactly `files` (a {name: content} map) — byte-identical contents give the
+// same blob OIDs as the repo's tracked files.
+function makeT849Mirror(version, files) {
+  const dir = makeMirrorFixtureRepo([]);
+  fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+  for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, 'scripts', name), content);
+  commitAllT530(dir, `fixture: released scripts tree for ${version}`);
+  gitT530(dir, ['tag', `v${version}`]);
+  return dir;
+}
+
+function t849ReleasedFiles(version) {
+  return {
+    'mavp-version.js': `module.exports = { MAVERICKS_VERSION: '${version}' };\n`,
+    'c1.js': '// fixture C1\n',
+  };
+}
+
+// Case A: the tagged release already carries C1 -> NEITHER advisory line.
+// Pre-fix code printed VERSION_BUMP_LINE here (11 commits since the bump).
+{
+  const repoDir = makeT849Repo('1.0.0');
+  const mirrorDir = makeT849Mirror('1.0.0', t849ReleasedFiles('1.0.0'));
+
+  const result = runCloseSessionCliWithEnv(repoDir, { MAVERICKS_HOME: mirrorDir });
+  const lines = (result.stdout || '').split('\n');
+  assert.ok(
+    !lines.includes(VERSION_BUMP_LINE),
+    `T-849 Case A FAIL: bump line must be ABSENT when the tagged mirror tree already carries every scripts/ file, got:\n${result.stdout}\nstderr: ${result.stderr}`
+  );
+  assert.ok(
+    !lines.includes(VERSION_UNRELEASED_LINE),
+    `T-849 Case A FAIL: unreleased line must be ABSENT too, got:\n${result.stdout}`
+  );
+
+  console.log('T-849 Case A passed: scripts/ commit already inside the tagged release -> no advisory line');
+  cleanup(repoDir, mirrorDir);
+}
+
+// Case B: a further scripts/ commit C2 after the tag -> bump line, and the
+// following `changed:` line names C2's path only, never C1's.
+{
+  const repoDir = makeT849Repo('1.0.0');
+  const mirrorDir = makeT849Mirror('1.0.0', t849ReleasedFiles('1.0.0'));
+  fs.writeFileSync(path.join(repoDir, 'scripts', 'c2.js'), '// fixture C2\n');
+  commitAllT530(repoDir, 'fixture: C2 scripts commit after the tag');
+
+  const result = runCloseSessionCliWithEnv(repoDir, { MAVERICKS_HOME: mirrorDir });
+  const lines = (result.stdout || '').split('\n');
+  const idx = lines.indexOf(VERSION_BUMP_LINE);
+  assert.ok(idx >= 0, `T-849 Case B FAIL: expected the bump line for a post-tag scripts/ change, got:\n${result.stdout}\nstderr: ${result.stderr}`);
+  assert.strictEqual(
+    lines[idx + 1],
+    formatVersionBumpPathsLine(['scripts/c2.js']),
+    `T-849 Case B FAIL: the line after the bump line must name exactly scripts/c2.js (not c1.js), got: ${lines[idx + 1]}`
+  );
+  assert.ok(!lines.includes(VERSION_UNRELEASED_LINE), `T-849 Case B FAIL: unreleased line must be ABSENT, got:\n${result.stdout}`);
+
+  console.log('T-849 Case B passed: post-tag scripts/ commit -> bump line + changed: naming only that path');
+  cleanup(repoDir, mirrorDir);
+}
+
+// Case C (GIT_DIR hardening, modelled on Case 27 but in the dangerous
+// direction): ambient GIT_DIR points at the project repo's own .git, and that
+// repo carries a same-named v1.0.0 tag at its OWN HEAD — so a mirror tree read
+// that leaked GIT_DIR would see the project's own scripts/ tree and report
+// zero drift. The mirror is tagged on an OLDER scripts/ tree -> the bump line
+// must still print.
+{
+  const repoDir = makeT849Repo('1.0.0');
+  gitT530(repoDir, ['tag', 'v1.0.0']); // decoy: tag at the repo's own HEAD
+  const mirrorDir = makeT849Mirror('1.0.0', { 'mavp-version.js': t849ReleasedFiles('1.0.0')['mavp-version.js'] }); // older tree: no c1.js
+
+  // Non-vacuousness: under a leaked GIT_DIR the decoy tag's tree equals the
+  // repo's HEAD scripts/ tree, i.e. zero drift.
+  const decoyTree = gitT530(repoDir, ['ls-tree', '-r', 'v1.0.0', '--', 'scripts/']);
+  const headTree = gitT530(repoDir, ['ls-tree', '-r', 'HEAD', '--', 'scripts/']);
+  assert.strictEqual(decoyTree, headTree, 'T-849 Case C FAIL (fixture bug): the decoy tag must hold the same scripts/ tree as HEAD');
+  assert.ok(!gitT530(mirrorDir, ['ls-tree', '-r', 'v1.0.0', '--', 'scripts/']).includes('c1.js'), 'T-849 Case C FAIL (fixture bug): mirror tree must lack c1.js');
+
+  const result = runCloseSessionCliWithEnv(repoDir, {
+    MAVERICKS_HOME: mirrorDir,
+    GIT_DIR: path.join(repoDir, '.git'),
+  });
+  const lines = (result.stdout || '').split('\n');
+  const idx = lines.indexOf(VERSION_BUMP_LINE);
+  assert.ok(
+    idx >= 0,
+    `T-849 Case C FAIL: bump line must still print — a mirror tree read that dropped mirrorGitEnv() would read the decoy tag via GIT_DIR and see zero drift, got:\n${result.stdout}\nstderr: ${result.stderr}`
+  );
+  assert.strictEqual(lines[idx + 1], formatVersionBumpPathsLine(['scripts/c1.js']), `T-849 Case C FAIL: changed: line must name scripts/c1.js, got: ${lines[idx + 1]}`);
+
+  console.log('T-849 Case C passed: ambient GIT_DIR with a same-named decoy tag does not hide drift against the mirror\'s tagged tree');
+  cleanup(repoDir, mirrorDir);
+}
+
+console.log('All T-849 assertions passed.');
+
+// ---------------------------------------------------------------------------
 // T-649 — checkVersionBump()'s two git calls must exempt exactly
 // scripts/publish-manifest.json (a classification-only DR-002 ledger entry,
 // not framework behavior) from the version-bump advisory, on BOTH the
@@ -1638,7 +1813,7 @@ console.log('All T-649 assertions passed.');
 // corruption and fails this case.
 // ---------------------------------------------------------------------------
 
-// Case 28: real scripts + real validator (MAVERICKS_SCRIPTS = __dirname).
+// Case A: real scripts + real validator (MAVERICKS_SCRIPTS = __dirname).
 // T-540 already sits at Status: merged in TASK_STATUS.md's Active tasks
 // (mirrors the incident: Main Agent had already set it merged before this
 // close-session run); T-541 is `planned` and was never touched by anyone.
@@ -1737,12 +1912,12 @@ console.log('All T-649 assertions passed.');
   const completedIdx = taskStatusAfter.indexOf('## Recently completed tasks');
   assert.ok(
     taskStatusAfter.indexOf('### T-540') > completedIdx,
-    `Case 28 FAIL: T-540 must be moved to TASK_STATUS Recently completed, got:\n${taskStatusAfter}`
+    `Case A FAIL: T-540 must be moved to TASK_STATUS Recently completed, got:\n${taskStatusAfter}`
   );
   const activeSectionTS = taskStatusAfter.slice(taskStatusAfter.indexOf('## Active tasks'), completedIdx);
   assert.ok(
     /### T-541 — Close the four T-540 security residuals — follow-up audit\n- \*\*Status:\*\* planned/.test(activeSectionTS),
-    `Case 28 FAIL: T-541 must remain in TASK_STATUS Active tasks, still planned, got:\n${activeSectionTS}`
+    `Case A FAIL: T-541 must remain in TASK_STATUS Active tasks, still planned, got:\n${activeSectionTS}`
   );
 
   // (b) BACKLOG.md: T-540 archived (mid-wave); T-541 remains under Active
@@ -1750,16 +1925,16 @@ console.log('All T-649 assertions passed.');
   const midWaveArchiveIdx = backlogAfter.indexOf('## Wave 1 — Archived (mid-wave)');
   assert.ok(
     midWaveArchiveIdx !== -1,
-    `Case 28 FAIL: expected a mid-wave archive heading in BACKLOG.md, got:\n${backlogAfter}`
+    `Case A FAIL: expected a mid-wave archive heading in BACKLOG.md, got:\n${backlogAfter}`
   );
   const activeWaveSection = backlogAfter.slice(backlogAfter.indexOf('## Active Wave'), midWaveArchiveIdx);
   assert.ok(
     !activeWaveSection.includes('### T-540'),
-    `Case 28 FAIL: T-540 must not remain under BACKLOG Active Wave, got:\n${activeWaveSection}`
+    `Case A FAIL: T-540 must not remain under BACKLOG Active Wave, got:\n${activeWaveSection}`
   );
   assert.ok(
     /### T-541 — Close the four T-540 security residuals — follow-up audit\n- \*\*Status:\*\* planned/.test(activeWaveSection),
-    `Case 28 FAIL: T-541 must remain under BACKLOG Active Wave, still planned (not fabricated to merged), got:\n${activeWaveSection}`
+    `Case A FAIL: T-541 must remain under BACKLOG Active Wave, still planned (not fabricated to merged), got:\n${activeWaveSection}`
   );
 
   // (c) The validator (run inside --close-session) genuinely passes — not a
@@ -1768,17 +1943,17 @@ console.log('All T-649 assertions passed.');
   // T-541 block had already been archived out of every checked section).
   assert.ok(
     /Validator passed/.test(result.stdout),
-    `Case 28 FAIL: expected validator to pass, got:\n${result.stdout}\nstderr: ${result.stderr}`
+    `Case A FAIL: expected validator to pass, got:\n${result.stdout}\nstderr: ${result.stderr}`
   );
 
-  console.log('Case 28 passed: close-session over the incident layout keeps T-541 planned in both artifacts/sections and does not archive it; only T-540 moves');
+  console.log('Case A passed: close-session over the incident layout keeps T-541 planned in both artifacts/sections and does not archive it; only T-540 moves');
 
   cleanup(repoDir);
 }
 
 console.log('All T-542 assertions passed.');
 
-// Case 29 (T-689): non-interactive wave-complete close, no --push flag —
+// Case B (T-689): non-interactive wave-complete close, no --push flag —
 // the printed reminder must append a CI-verification suggestion, worded as
 // a reminder (push has NOT happened yet), not a post-push confirmation.
 {
@@ -1791,19 +1966,19 @@ console.log('All T-542 assertions passed.');
   // assert on the two pieces separately rather than one contiguous string.
   assert.ok(
     result.stdout.includes('All tasks merged — run `git push` to publish this session'),
-    `Case 29 FAIL: expected the base git-push reminder line, got:\n${result.stdout}`
+    `Case B FAIL: expected the base git-push reminder line, got:\n${result.stdout}`
   );
   assert.ok(
     result.stdout.includes(CI_CHECK_REMINDER_SUFFIX),
-    `Case 29 FAIL: expected the CI-check suffix appended to the git-push reminder line, got:\n${result.stdout}`
+    `Case B FAIL: expected the CI-check suffix appended to the git-push reminder line, got:\n${result.stdout}`
   );
   assert.ok(
     result.stdout.includes(CI_CHECK_COMMAND),
-    `Case 29 FAIL: expected the suggested command "${CI_CHECK_COMMAND}" to appear in stdout, got:\n${result.stdout}`
+    `Case B FAIL: expected the suggested command "${CI_CHECK_COMMAND}" to appear in stdout, got:\n${result.stdout}`
   );
   assert.ok(
     !/you just pushed/.test(result.stdout),
-    `Case 29 FAIL: reminder text must not claim a push already happened, got:\n${result.stdout}`
+    `Case B FAIL: reminder text must not claim a push already happened, got:\n${result.stdout}`
   );
   // T-763: exactly one propose-only receipt line beside the reminder; this
   // fixture has no publish manifest, so it is the non-canonical stand-down.
@@ -1811,26 +1986,26 @@ console.log('All T-542 assertions passed.');
   assert.strictEqual(
     receiptLines29.length,
     1,
-    `Case 29 FAIL (T-763): expected exactly one "Suite receipt:" line, got ${receiptLines29.length}:\n${result.stdout}`
+    `Case B FAIL (T-763): expected exactly one "Suite receipt:" line, got ${receiptLines29.length}:\n${result.stdout}`
   );
   assert.ok(
     /Suite receipt: not checked — non-canonical repo/.test(receiptLines29[0]),
-    `Case 29 FAIL (T-763): expected the non-canonical stand-down line, got: ${receiptLines29[0]}`
+    `Case B FAIL (T-763): expected the non-canonical stand-down line, got: ${receiptLines29[0]}`
   );
   const reminderIdx29 = result.stdout.indexOf('All tasks merged — run `git push` to publish this session');
   assert.ok(
     result.stdout.indexOf('Suite receipt:') > reminderIdx29,
-    `Case 29 FAIL (T-763): the receipt line must sit beside (directly after) the push reminder, got:\n${result.stdout}`
+    `Case B FAIL (T-763): the receipt line must sit beside (directly after) the push reminder, got:\n${result.stdout}`
   );
 
-  console.log('Case 29 passed: non-interactive wave-complete close appends a CI-verification reminder, worded as a reminder rather than a post-push confirmation');
+  console.log('Case B passed: non-interactive wave-complete close appends a CI-verification reminder, worded as a reminder rather than a post-push confirmation');
 
   cleanup(repoDir);
 }
 
 console.log('All T-689 assertions passed.');
 
-// Case 30 (T-749): a deployed_dev block already archived into "## Recently
+// Case C (T-749): a deployed_dev block already archived into "## Recently
 // completed tasks", nothing left in Active tasks, deploy_contours=2 — the
 // advisory must not fire. This is the "announced forever" defect: before the
 // fix, the whole-file count kept finding this block after every close.
@@ -1841,10 +2016,10 @@ console.log('All T-689 assertions passed.');
 
   assert.ok(
     !/awaiting prod promotion/.test(result.stdout),
-    `Case 30 FAIL: an archived-only deployed_dev block must not print the advisory, got:\n${result.stdout}`
+    `Case C FAIL: an archived-only deployed_dev block must not print the advisory, got:\n${result.stdout}`
   );
 
-  console.log('Case 30 passed: a deployed_dev block already in Recently completed tasks does not re-trigger the advisory');
+  console.log('Case C passed: a deployed_dev block already in Recently completed tasks does not re-trigger the advisory');
 
   cleanup(repoDir);
 }

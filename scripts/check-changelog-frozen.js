@@ -82,9 +82,9 @@
 // values — an explicitly absent key is easier to reason about than a
 // second source of truth that could itself go stale. (GIT_PREFIX doesn't
 // actually change which repo gets resolved — it only affects pathspec
-// interpretation relative to an invocation subdirectory — but none of the
-// mirror-directed calls below pass pathspecs, so stripping it is
-// belt-and-suspenders, not load-bearing.)
+// interpretation relative to an invocation subdirectory — and only the
+// T-849 tree read below passes a pathspec, always root-relative, so
+// stripping it is belt-and-suspenders, not load-bearing.)
 //
 // Best-effort fetch (~4s timeout) before the tag check, following the same
 // shape as detectBehindUpstreamGuard() in scripts/mavp-install.js
@@ -285,6 +285,46 @@ function getMirrorTags(mirrorHome) {
       env: mirrorGitEnv(),
     });
     return new Set(out.split('\n').map((s) => s.trim()).filter(Boolean));
+  } catch {
+    return null;
+  }
+}
+
+// T-849: parses `git ls-tree -r -z` output into a Map of path -> blob OID.
+// Pure (no git/fs). Each record is `<mode> SP <type> SP <oid> TAB <path>`;
+// records that do not match that shape are skipped, never guessed at.
+function parseLsTreeOutput(output) {
+  const entries = new Map();
+  for (const record of String(output || '').split('\0')) {
+    const m = /^\d+ \w+ ([0-9a-f]{40,64})\t([\s\S]+)$/.exec(record);
+    if (m) entries.set(m[2], m[1]);
+  }
+  return entries;
+}
+
+// T-849: the mirror's tree under `pathspec` at `ref`, as a Map of path ->
+// blob OID, or null on any failure (unknown ref, unreadable clone, git
+// missing) — the caller treats null as "cannot compare, degrade to the
+// pre-T-849 behaviour". An EMPTY Map means the ref resolved but holds
+// nothing under the pathspec — a distinct, readable answer. Like every
+// other mirror-directed call in this file it runs through mirrorGitEnv()
+// (the T-517 GIT_DIR hardening above): a leaked ambient GIT_DIR would make
+// this read the PRIVATE repo's tree instead — and that repo can carry a
+// same-named tag at its own HEAD, which would report zero drift. The
+// pathspec is passed after `--`; a ref beginning with a dash is refused so
+// it can never be read as an option. No network fetch here: getMirrorTags()
+// already made its best-effort attempt.
+function getMirrorTreeEntries(mirrorHome, ref, pathspec) {
+  if (typeof ref !== 'string' || !ref || ref.startsWith('-')) return null;
+  try {
+    const args = ['-C', mirrorHome, 'ls-tree', '-r', '-z', ref];
+    if (pathspec) args.push('--', pathspec);
+    const out = execFileSync('git', args, {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+      env: mirrorGitEnv(),
+    });
+    return parseLsTreeOutput(out);
   } catch {
     return null;
   }
@@ -566,6 +606,8 @@ module.exports = {
   mirrorGitEnv,
   GIT_REPO_ENV_KEYS,
   getMirrorTags,
+  parseLsTreeOutput,
+  getMirrorTreeEntries,
   isGitRepo,
   STABLE_TAG_RE,
   compareVersionTriples,

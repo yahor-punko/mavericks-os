@@ -104,6 +104,28 @@ const merged = [{ id: 'T-7', title: 'done', status: 'merged', owner: 'developer'
   console.log('Test 5 passed: fallback source, and none/empty placeholders normalise to null');
 }
 
+{ // Test 8 (T-850): dependency present only under an archived heading counts when terminal-completed
+  const archived = (id, status) =>
+    `\n## Wave 1 — Archived (mid-wave)\n\n### ${id} — archived dep\n- **Status:** ${status}\n- **Owner role:** developer\n\n`;
+  const blockFor = (id, dep) =>
+    `### ${id} — gated ${id}\n- **Status:** planned\n- **Owner role:** developer\n- **Depends on:** ${dep}\n\n`;
+  const origBacklog = fs.readFileSync(path.join(DEP_ROOT, 'BACKLOG.md'), 'utf8');
+  const plannedGated = id => [{ id, title: `gated ${id}`, status: 'planned', owner: 'developer' }];
+  try {
+    for (const [status, expected] of [['merged', true], ['runtime_verified', true], ['deployed_dev', true],
+      ['deployed_prod', true], ['deprecated', false], ['deferred', false], ['planned', false]]) {
+      fs.writeFileSync(path.join(DEP_ROOT, 'BACKLOG.md'),
+        '# BACKLOG\n\n## Active Wave\n\n' + blockFor('T-20', 'T-21') + archived('T-21', status), 'utf8');
+      const r = resolveNextAction([], plannedGated('T-20'), null);
+      assert.strictEqual(r.value, expected ? 'T-20 → developer → gated T-20' : null,
+        `Test 8 FAIL: archived dep status ${status} expected satisfied=${expected}, got ${JSON.stringify(r)}`);
+    }
+  } finally {
+    fs.writeFileSync(path.join(DEP_ROOT, 'BACKLOG.md'), origBacklog, 'utf8');
+  }
+  console.log('Test 8 passed: archived-section dependency satisfied only for merged/runtime_verified/deployed_*');
+}
+
 // ---- Part 2: real --agent subprocess ------------------------------------
 { // Test 6: JSON next_action null + generated PROCESS_STATE.md "- none"
   const dir = makeProject('agent-none', [], { wave: 1, stage: 'execution', next_action: null });
@@ -132,6 +154,39 @@ const merged = [{ id: 'T-7', title: 'done', status: 'merged', owner: 'developer'
   assert.strictEqual(out2.next_action, 'T-990 → developer → first planned', 'Test 7b FAIL');
   assert.strictEqual(out2.next_action_source, 'computed');
   console.log('Test 7 passed: --agent emits stored directive (source=stored) / computed when ineligible');
+}
+
+{ // Test 9 (T-850): --agent keeps the stored directive when its dependency was archived as merged
+  const makeArchivedProject = (name, archivedStatus, state) => {
+    const dir = path.join(BASE, name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'BACKLOG.md'),
+      '# BACKLOG\n\n## Active Wave\n\n' +
+      '### T-1 — first task\n- **Status:** planned\n- **Owner role:** developer\n- **Depends on:** T-9\n\n' +
+      '### T-2 — second task\n- **Status:** planned\n- **Owner role:** developer\n\n' +
+      '## Wave 1 — Archived (mid-wave)\n\n' +
+      `### T-9 — archived dep\n- **Status:** ${archivedStatus}\n- **Owner role:** developer\n\n`, 'utf8');
+    fs.writeFileSync(path.join(dir, 'TASK_STATUS.md'),
+      '# TASK_STATUS\n\n## Active tasks\n\n' +
+      '### T-1 — first task\n- **Status:** planned\n- **Owner:** developer\n- **Evidence:** none\n\n' +
+      '### T-2 — second task\n- **Status:** planned\n- **Owner:** developer\n- **Evidence:** none\n\n' +
+      '## Recently completed tasks\n\n' +
+      `### T-9 — archived dep\n- **Status:** ${archivedStatus}\n- **Owner:** developer\n- **Evidence:** commit: abc1234\n\n`, 'utf8');
+    fs.writeFileSync(path.join(dir, 'PROCESS_STATE.json'),
+      JSON.stringify({ wave: 1, stage: 'execution', ...state }, null, 2) + '\n', 'utf8');
+    return dir;
+  };
+  const stored = 'T-1 → developer → do it first';
+  const a = runAgent(makeArchivedProject('arch-merged', 'merged', { next_action: stored }));
+  assert.strictEqual(a.next_action, stored, 'Test 9 FAIL: stored directive must survive archived-merged dependency');
+  assert.strictEqual(a.next_action_source, 'stored');
+  const b = runAgent(makeArchivedProject('arch-deferred', 'deferred', { next_action: stored }));
+  assert.strictEqual(b.next_action, 'T-2 → developer → second task', 'Test 9b FAIL');
+  assert.strictEqual(b.next_action_source, 'computed');
+  const c = runAgent(makeArchivedProject('arch-nostored', 'merged', { next_action: null }));
+  assert.strictEqual(c.next_action, 'T-1 → developer → first task', 'Test 9c FAIL');
+  assert.strictEqual(c.next_action_source, 'computed');
+  console.log('Test 9 passed: --agent stored directive survives archived-merged dependency; deferred does not');
 }
 
 console.log('All T-807 tests passed');

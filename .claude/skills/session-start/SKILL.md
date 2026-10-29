@@ -31,7 +31,7 @@ Read the JSON above. Key fields:
 - `next_action` — what to do next
 - `blocker` — stop if non-null, resolve blocker first
 - `wave` — current wave number
-- `wave_session` — session counter within the wave (may be absent or null)
+- `wave_session` — ordinal of the current session (1 = first session after a wave close), so the header renders it as-is (may be absent or null)
 - `permission_mode` — the best-known Claude Code permission mode (T-663: read its provenance from the three fields below before rendering it — never render this value bare)
 - `permission_mode_source` — `hook_payload` (observed on THIS session's SessionStart hook stdin), `persisted_runtime` (a hook payload from an EARLIER session, cached in `.mavp/permission-mode`), or `settings_file` (`.claude/settings.local.json` / `.claude/settings.json` — no live signal at all)
 - `permission_mode_verified` — `true` only when `permission_mode_source` is `hook_payload`; `false` otherwise, even when `persisted_runtime` originally came from a real payload — a mode resolved once at session start can be stale even when every settings file agrees, so "verified" always means "observed this session", never "read from more files"
@@ -42,6 +42,7 @@ Read the JSON above. Key fields:
 - `must_read_framework` — string array: changed files that `mavp-install.js --update` rewrites from the framework source (framework-managed agents, skills, rules, hooks and synced scripts); reported only in an adopter repo, never in a framework source tree, and present only when non-empty
 - `intake_untriaged` — integer: adopter feedback items awaiting triage; reported only in the framework repository, present only when above zero
 - `feedback_answers_unacked` — integer: answers to your own alias's feedback items you have not yet acknowledged; reported only in an adopter project that has a `feedback_alias`, present only when above zero
+- `reporting_write_skipped` — `{discriminator, resolved_root, reason}`: present only when the resolved root is a never-a-project root (the shipped placeholder tree, the machine-shared framework-source clone, a linked git worktree, or a caller inside one) and this run therefore skipped its state writes (the `PROCESS_STATE.md` regeneration and the `.mavp/permission-mode` record); `discriminator` is one of `placeholder`, `dot_mavericks`, `linked_worktree`, `caller_in_linked_worktree`
 
 Always render the wave digest header:
 
@@ -128,6 +129,12 @@ If `intake_untriaged` is present (framework repository only: the count of adopte
 
 ```
 > [!NOTE] Intake: {intake_untriaged} untriaged adopter item(s) — run ./scripts/mavp-operator --intake
+```
+
+If `reporting_write_skipped` is present, render one line directly after the permission mode line (and its conflict line, when shown) — a fact report, no action is required of you:
+
+```
+> [!NOTE] Reporting writes skipped: {reporting_write_skipped.resolved_root} is a never-a-project root ({reporting_write_skipped.discriminator}) — PROCESS_STATE.md was not regenerated. Set MAVERICKS_ALLOW_NEVER_PROJECT_ROOT=1 only if that write is intended.
 ```
 
 If `feedback_answers_unacked` is present (adopter projects only: the count of your own alias's feedback items that have an answer you have not acknowledged), render one line directly after that callout (or after the rechecks callout when there is no intake callout):

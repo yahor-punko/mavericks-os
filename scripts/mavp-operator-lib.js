@@ -317,6 +317,65 @@ function gitWorktreeToplevel(dir) {
 }
 
 /**
+ * T-847: the single discriminator-text mapping shared by guardMutatingRoot()
+ * (refusal message) and guardReportingWrite() (skip note / validator finding),
+ * so the two surfaces can never describe the same discriminator differently.
+ *
+ * @param {{discriminator: string, primaryWorktreePath?: string, callerWorktreePath?: string}} check -
+ *   a blocked checkNeverAProjectRoot() result.
+ * @returns {string}
+ */
+function describeNeverProjectDiscriminator(check) {
+  return check.discriminator === 'dot_mavericks'
+    ? `root resolves to $HOME/.mavericks (the adopter-resolved framework-source clone)`
+    : check.discriminator === 'linked_worktree'
+    ? `root is a linked (non-primary) git worktree; the primary checkout is at ${check.primaryWorktreePath}`
+    : check.discriminator === 'caller_in_linked_worktree'
+    ? `caller is inside the linked (non-primary) git worktree at ${check.callerWorktreePath}, targeting that repo's primary checkout at ${check.primaryWorktreePath}`
+    : `PROCESS_STATE.json's mavericks_version is the shipped placeholder "${NEVER_PROJECT_VERSION_PLACEHOLDER}" (never installed/adopted)`;
+}
+
+/**
+ * T-847: the reporting-surface sibling of guardMutatingRoot(). Reporting
+ * surfaces (--agent, --snapshot, the validator) do not refuse - they keep
+ * reporting - but their incidental state writes (PROCESS_STATE.md
+ * regeneration, the .mavp/permission-mode record, the validator's
+ * last_task_id auto-patch) must not land in a never-a-project root, where a
+ * stray write to a tracked file in the framework-source clone makes the
+ * installer's dirty-source guard refuse every adopter update on the machine.
+ *
+ * Reuses checkNeverAProjectRoot() and the override env var. Never prints
+ * and never exits; the caller decides how to surface the skip.
+ *
+ * @param {string} root - Absolute path to the project root being reported on.
+ * @param {string} surfaceName - The surface's flag name (e.g. "--agent"), used only in `note`.
+ * @param {{homeDir?: string, cwd?: string, skipCallerWorktreeCheck?: boolean, env?: Record<string,string>}} [options] -
+ *   same injectables as guardMutatingRoot().
+ * @returns {{skip: boolean, discriminator: (string|null), resolvedRoot: (string|undefined), overridden: boolean, discriminatorText: (string|null), note: (string|null)}}
+ *   `discriminatorText` and `note` are additive conveniences (null unless skipped).
+ */
+function guardReportingWrite(root, surfaceName, options = {}) {
+  const env = (options && options.env) || process.env;
+  if (env[NEVER_PROJECT_ROOT_OVERRIDE_ENV]) {
+    return { skip: false, discriminator: null, resolvedRoot: undefined, overridden: true, discriminatorText: null, note: null };
+  }
+  const check = checkNeverAProjectRoot(root, options);
+  if (!check || !check.blocked) {
+    return {
+      skip: false,
+      discriminator: null,
+      resolvedRoot: check ? check.resolvedRoot : undefined,
+      overridden: false,
+      discriminatorText: null,
+      note: null,
+    };
+  }
+  const discriminatorText = describeNeverProjectDiscriminator(check);
+  const note = `note: ${surfaceName} skipped its state writes - ${check.resolvedRoot} is a never-a-project root (${discriminatorText}); set ${NEVER_PROJECT_ROOT_OVERRIDE_ENV}=1 to allow them.`;
+  return { skip: true, discriminator: check.discriminator, resolvedRoot: check.resolvedRoot, overridden: false, discriminatorText, note };
+}
+
+/**
  * T-624/T-670: guard entry point for every mutating ritual command. Refuses
  * BEFORE any file write when checkNeverAProjectRoot() finds a match, unless
  * the override env var (NEVER_PROJECT_ROOT_OVERRIDE_ENV) is set to a truthy
@@ -350,13 +409,7 @@ function guardMutatingRoot(root, commandName, options = {}) {
     return { blocked: false };
   }
 
-  const discriminatorText = check.discriminator === 'dot_mavericks'
-    ? `root resolves to $HOME/.mavericks (the adopter-resolved framework-source clone)`
-    : check.discriminator === 'linked_worktree'
-    ? `root is a linked (non-primary) git worktree; the primary checkout is at ${check.primaryWorktreePath}`
-    : check.discriminator === 'caller_in_linked_worktree'
-    ? `caller is inside the linked (non-primary) git worktree at ${check.callerWorktreePath}, targeting that repo's primary checkout at ${check.primaryWorktreePath}`
-    : `PROCESS_STATE.json's mavericks_version is the shipped placeholder "${NEVER_PROJECT_VERSION_PLACEHOLDER}" (never installed/adopted)`;
+  const discriminatorText = describeNeverProjectDiscriminator(check);
 
   const messageLines = [
     `REFUSED: ${commandName} refuses to run against a never-a-project repo root.`,
@@ -6941,6 +6994,8 @@ module.exports = {
   DEFERRED_TASK_STATUS_HEADING,
   detectPermissionModeConflict,
   guardMutatingRoot,
+  guardReportingWrite,
+  describeNeverProjectDiscriminator,
   NEVER_PROJECT_ROOT_OVERRIDE_ENV,
   NEVER_PROJECT_VERSION_PLACEHOLDER,
   ensureSectionHeading,

@@ -187,6 +187,7 @@
     "scripts/test-migrate-workarounds.js",
     "scripts/test-mirror-ci-gate.js",
     "scripts/test-must-read.js",
+    "scripts/test-never-a-project-reporting-surfaces.js",
     "scripts/test-never-a-project-root-guard.js",
     "scripts/test-next-action-classify.js",
     "scripts/test-next-action-preserve.js",
