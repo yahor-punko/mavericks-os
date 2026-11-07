@@ -65,6 +65,8 @@ This is an observational, N=1 case study — one operator, one control
 backlog, no control group — so the numbers show operational continuity and
 auditability across a coordinated system, not causal productivity.
 
+These figures are a one-time snapshot, measured through 13 July 2026; they are not re-measured with each release. Any later re-measurement is compared against the case study's own "Measurement method" section, so a new figure and today's mean the same thing.
+
 [Read the full methodology, findings, and limitations →](docs/case-studies/synth.md)
 
 ## Why Mavericks is different
@@ -127,6 +129,8 @@ A session is one sitting: you tell your agent where things stand or what you'd l
 
 A wave is the bigger container: a batch of work aimed at one goal you set together with your agent. Once that goal is met, you close the wave together and move on to the next one.
 
+Closing a session never closes a wave: the wave closes only when you tell your agent its goal is met (`--close-wave`), as the 0.52.0 upgrade step in [`CHANGELOG.md`](CHANGELOG.md) explains.
+
 ### Requirements
 
 - Node.js 20+
@@ -173,12 +177,14 @@ This creates, in `your-project/`:
 - `BACKLOG.md`, `TASK_STATUS.md`, `PROCESS_STATE.md`, `PROCESS_STATE.json` — live state artifacts, from templates
 - `.claude/agents/*.md`, `.claude/skills/*/SKILL.md`, `.claude/rules/*.md` — sub-agent specs, skills, and rules, copied from this repo
 - `.claude/settings.json` / `.claude/settings.local.json` — shared and personal Claude Code settings (see **[Security model](#security-model)** below)
+- `docs/ARCHITECTURE.md` — an architecture document template, to fill in at project start
+- `.vscode/settings.json` — created, or merged into the one you have, with entries that hide `.claude/worktrees` from the editor's file tree and search
 
 Pass `--transcript-archive` to opt into a gitignored session-transcript archive at `.mavp/transcripts/`, with retention bounded via the `MAVP_TRANSCRIPT_RETENTION_DAYS` env var — off by default. See **[`docs/core/BOOTSTRAP_GUIDE.md`](docs/core/BOOTSTRAP_GUIDE.md)** for details.
 
 Core framework scripts (the operator library, dashboard, validator) are **not copied** into your project — the generated `scripts/mavp-operator` wrapper runs them directly from this Mavericks checkout.
 
-The wrapper resolves the Mavericks install location in this order: an explicit `MAVERICKS_HOME` env var, if set, always wins; otherwise `$HOME/.mavericks` — the canonical default, and where `install.sh` clones Mavericks — is used if it exists; otherwise `$HOME/Documents/mavericks` is used as a legacy fallback. If you cloned Mavericks somewhere else entirely, set `MAVERICKS_HOME` to that path (e.g. in your shell profile or before invoking the wrapper):
+The wrapper resolves the Mavericks install location in this order: an explicit `MAVERICKS_HOME` env var, if set, always wins; otherwise the checkout the wrapper was generated from is used, as long as it still holds the framework; otherwise `$HOME/.mavericks` — the canonical default, and where `install.sh` clones Mavericks — is used if it exists; otherwise `$HOME/Documents/mavericks` is used as a legacy fallback. If none of these resolves, the wrapper refuses and names every location it tried. If you moved or deleted the checkout you installed from, set `MAVERICKS_HOME` to its new path (e.g. in your shell profile or before invoking the wrapper):
 
 ```bash
 export MAVERICKS_HOME=<path-to-mavericks>
@@ -199,6 +205,8 @@ git -C "$HOME/.mavericks" pull --ff-only    # use your <path-to-mavericks> if yo
 ```
 
 Re-running the `curl | sh` installer does the same thing — it is idempotent and pulls an existing checkout instead of re-cloning.
+
+The clone `install.sh` creates tracks the stable `main` branch by default, and stable releases are tagged `v<version>`. An `edge` branch carries every working build and is opt-in: switch with `git -C "${MAVERICKS_HOME:-$HOME/.mavericks}" checkout edge && git -C "${MAVERICKS_HOME:-$HOME/.mavericks}" pull`, and go back with `checkout main`. Edge moves several times a day, so it trips the installer's behind-upstream guard more often. To pin a branch or tag at clone time, pass `install.sh --ref <branch/tag>`.
 
 **2. Re-sync each bootstrapped project.** The files the installer *copied* into your project (`.claude/` agents, skills, rules, hooks, and the wrapper and project scripts) don't update themselves. From each project's directory:
 
@@ -332,11 +340,11 @@ Cross-repo *ordering* is enforced, not just recorded: a task may declare
 distinct from the same-repo `Depends on:` field). The validator resolves
 `<repo>` to a local working copy via the repo-map registry
 ([`docs/REPO_MAP.md`](docs/REPO_MAP.md)) and reads the blocker task's status
-from that repo's own artifacts: a task promoted to `merged` or `qa_passed`
-while its blocker is not yet `merged` is a blocking failure (exit 2), a task
-at `ready_for_qa` gets a warning, and an unresolvable reference (unknown repo
-id or missing blocker task) surfaces as an info-level advisory rather than a
-block.
+from that repo's own artifacts: a task recorded `merged` while its blocker is
+not yet `merged` is a blocking failure (exit 2), a task at `qa_passed` or
+`ready_for_qa` with an unmet blocker gets a warning, and an unresolvable
+reference (unknown repo id or missing blocker task) surfaces as an info-level
+advisory rather than a block.
 
 This is production-exercised, not a design sketch: 10 of the Synth case
 study's 20 repositories were declared as task targets from the one control
@@ -406,6 +414,19 @@ All in [`docs/core/`](docs/core/):
 | [`DECISIONS.md`](docs/core/DECISIONS.md) | Framework decision records (`DR-NNN`) with greppable lineage fields (`Informed by:` / `Supersedes:` / `Tasks:` / `Session:`) |
 | [`RCA_CODIFICATION.md`](docs/core/RCA_CODIFICATION.md) | RCA-to-codification — every root-cause analysis must route each root cause to exactly one durable fix mechanism, with a tracked follow-up task |
 | [`SECRET_LEAK_RESPONSE.md`](docs/core/SECRET_LEAK_RESPONSE.md) | Post-publish secret-leak response runbook |
+| [`FEEDBACK_INTAKE.md`](docs/core/FEEDBACK_INTAKE.md) | Adopter feedback loop — file friction with `--feedback`, follow the answer, and retire a tagged stop-gap with `--migrate` |
+
+## Feedback from adopters
+
+When the framework gets in your way, you can say so in a form the maintainers can act on, and find out what became of it. Nothing leaves your machine unless you say so.
+
+1. Set a neutral alias once: `./scripts/mavp-operator --feedback --set-alias <alias>`. Never use a private project name — the alias travels with every item.
+2. Copy [`templates/FEEDBACK_ITEM_TEMPLATE.md`](templates/FEEDBACK_ITEM_TEMPLATE.md), fill it in, and file it with `./scripts/mavp-operator --feedback --file <path>`. It lands in a per-user local inbox on your machine, and nothing is sent anywhere.
+3. Follow it with `--feedback --status`, and clear the answer's reminder with `--feedback --ack <id>`.
+4. To post an item as a public GitHub issue, use `--feedback --github`. It goes out only after a blocking scan of the outbound text finds nothing and you pass `--operator-confirmed` with your own statement. Fetch the maintainer's answer with `--feedback --pull`.
+5. If you wrote a stop-gap to dodge the problem, tag it `mavp-workaround:<alias>-NNN`. When the fix ships, the read-only `./scripts/mavp-operator --migrate` lists the tag as retirable, and you remove it by hand.
+
+The full loop, including what the maintainer's side does with your item, is in [`docs/core/FEEDBACK_INTAKE.md`](docs/core/FEEDBACK_INTAKE.md).
 
 ## Contributing
 

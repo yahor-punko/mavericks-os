@@ -472,7 +472,7 @@ function writeFile(filePath, content) {
 {
   const {
     dirOf, findDirectoryViolations, MIN_DIR_SIZE, DIR_MAX_DELETE_RATIO,
-    AGGREGATE_SMALL_DIR_LABEL, MULTI_DIR_AGGREGATE_LABEL, planDeletion,
+    MULTI_DIR_AGGREGATE_LABEL, planDeletion,
   } = require('./mavp-publish-overlay.js');
 
   assert.strictEqual(MIN_DIR_SIZE, 5, 'Test 12 FAIL: expected MIN_DIR_SIZE of 5');
@@ -483,9 +483,8 @@ function writeFile(filePath, content) {
   assert.strictEqual(dirOf('docs/core/a.md'), 'docs/core', 'Test 12 FAIL: unexpected dirOf for a depth-2 path — must be the full ancestor path, not just the leaf segment');
 
   // A directory bucket below MIN_DIR_SIZE with a PARTIAL deletion stays
-  // exempt (both individually — ratio math on 3 files is noisy — and via
-  // the small-directory aggregate, which itself stays below MIN_DIR_SIZE
-  // here since only 1 of 3 files is involved).
+  // exempt (ratio math on 3 files is noisy; the small-directory aggregate
+  // that once also covered this case was retired by T-873).
   const smallCloneFiles = ['tiny/a.md', 'tiny/b.md', 'tiny/c.md'];
   const smallAssembledSet = new Set(['tiny/b.md', 'tiny/c.md']); // 1 of 3 deleted
   const smallPlan = planDeletion(smallCloneFiles, smallAssembledSet, []);
@@ -538,12 +537,14 @@ function writeFile(filePath, content) {
   assert.strictEqual(nestedViolations.length, 1, 'Test 12 FAIL: expected exactly one violation (docs/core), not the parent docs/ bucket');
   assert.strictEqual(nestedViolations[0].dir, 'docs/core', 'Test 12 FAIL: expected the violation to name the nested docs/core bucket specifically');
 
-  // T-507 round 1 (F1) — the aggregate-of-small-directories rule: four
-  // directories, each individually below MIN_DIR_SIZE and each only
-  // PARTIALLY deleted (never a full wipe on its own), combine to a 50%
-  // aggregate that IS a violation — this is what catches "dropping all 11
-  // exempt directories at once" even when no single one of them is fully
-  // wiped.
+  // T-873 — the aggregate-of-small-directories rule (composition-gate
+  // tier 5, T-507 round 1 F1) is RETIRED: four directories, each
+  // individually below MIN_DIR_SIZE and each only PARTIALLY deleted, no
+  // longer yield a violation with reason 'aggregate' (tier 1's declared
+  // floors cover the real published directories; the declared-directory pin
+  // test holds that). The SAME call still returns the multi-directory
+  // aggregate violation (tier 6 tallies separately: 4 of 8 touched across
+  // four buckets = 50% >= the 25% ceiling), so the shape is not silent.
   const manySmallCloneFiles = [
     'small-a/1.md', 'small-a/2.md', 'small-b/1.md', 'small-b/2.md',
     'small-c/1.md', 'small-c/2.md', 'small-d/1.md', 'small-d/2.md',
@@ -551,11 +552,15 @@ function writeFile(filePath, content) {
   const manySmallAssembledSet = new Set(['small-a/2.md', 'small-b/2.md', 'small-c/2.md', 'small-d/2.md']);
   const manySmallPlan = planDeletion(manySmallCloneFiles, manySmallAssembledSet, []);
   const manySmallViolations = findDirectoryViolations(manySmallPlan.dirStats, MIN_DIR_SIZE, DIR_MAX_DELETE_RATIO);
-  const aggregateViolation = manySmallViolations.find((v) => v.reason === 'aggregate');
-  assert.ok(aggregateViolation, 'Test 12 FAIL: expected an aggregate-of-small-directories violation');
-  assert.strictEqual(aggregateViolation.dir, AGGREGATE_SMALL_DIR_LABEL, 'Test 12 FAIL: unexpected aggregate violation label');
-  assert.strictEqual(aggregateViolation.total, 8, 'Test 12 FAIL: unexpected aggregate total');
-  assert.strictEqual(aggregateViolation.deleted, 4, 'Test 12 FAIL: unexpected aggregate deleted count');
+  assert.ok(
+    !manySmallViolations.some((v) => v.reason === 'aggregate'),
+    'Test 12 FAIL: the retired small-directory aggregate (tier 5) must no longer produce a violation with reason "aggregate"'
+  );
+  const manySmallMultiDir = manySmallViolations.find((v) => v.reason === 'multi-directory-aggregate');
+  assert.ok(manySmallMultiDir, 'Test 12 FAIL: expected the four-small-buckets input to still return the multi-directory-aggregate violation');
+  assert.strictEqual(manySmallMultiDir.dir, MULTI_DIR_AGGREGATE_LABEL, 'Test 12 FAIL: unexpected multi-directory violation label for the four-small-buckets input');
+  assert.strictEqual(manySmallMultiDir.total, 8, 'Test 12 FAIL: unexpected multi-directory total for the four-small-buckets input');
+  assert.strictEqual(manySmallMultiDir.deleted, 4, 'Test 12 FAIL: unexpected multi-directory deleted count for the four-small-buckets input');
 
   // T-507 round 1 (F2) — the multi-directory budget-summing rule: three
   // directories, each individually staying comfortably under its own 50%
@@ -604,7 +609,7 @@ function writeFile(filePath, content) {
   const singleDirViolations = findDirectoryViolations(singleDirPlan.dirStats, MIN_DIR_SIZE, DIR_MAX_DELETE_RATIO);
   assert.deepStrictEqual(singleDirViolations, [], 'Test 12 FAIL: a single touched directory at 40% must not trip anything (neither its own ratio nor the multi-directory rule)');
 
-  console.log('Test 12 passed: dirOf()/findDirectoryViolations() unit-level checks — full-wipe (any size), >= ratio boundary, small-dir aggregate, and multi-directory budget-summing rules all hold');
+  console.log('Test 12 passed: dirOf()/findDirectoryViolations() unit-level checks — full-wipe (any size), >= ratio boundary, retired small-dir aggregate (no aggregate-reason violation), and multi-directory budget-summing rules all hold');
 }
 
 // Test 13: --allow-mass-delete overrides BOTH the whole-clone AND the
@@ -4527,8 +4532,8 @@ const t541DatedNoteOf = (stderr) =>
 // rules (the wrong variable read, a dropped call, a mis-ordered check) could
 // ship even while Test 12 stays green. Tests 54-58 below close that gap for
 // the five rules that had no CLI-driven killer at all: the per-directory >=
-// boundary (54), the multi-directory aggregate ceiling (55), the small-
-// directory aggregate (56), the whole-clone >=-with-floor boundary (57, which
+// boundary (54), the multi-directory aggregate ceiling (55), the retired
+// small-directory aggregate's no-refusal pin (56, T-873), the whole-clone >=-with-floor boundary (57, which
 // had NO killer of any kind, unit or e2e), and the tier-1 full-wipe rule's
 // immunity to move credit on a basename-preserving relocation (58, which
 // also had no e2e killer — Test 13's laundering fixture renames its files,
@@ -4658,19 +4663,21 @@ const t541DatedNoteOf = (stderr) =>
   console.log('Test 55 passed: T-527 case 2 — multi-directory aggregate ceiling (49 of 193 across two buckets, each individually within its own 50% budget) is refused end-to-end');
 }
 
-// Test 56 (T-527 case 3): a small-directory aggregate drop, END TO END — two
-// directories, each individually below MIN_DIR_SIZE (4 files each, so
-// exempt from the per-directory ratio rule) and each only PARTIALLY deleted
-// (never a full wipe on its own: 3 of 4, then 2 of 4), fold into one
-// synthetic bucket that IS a violation (5 of 8 = 62.5% >= 50%). A large
-// untouched padding directory (50 files) dilutes both the whole-clone ratio
-// AND the multi-directory ratio (5 of 58 = 8.6%, comfortably under both the
-// 50% and 25% ceilings) without diluting the small-directory aggregate at
-// all (the padding bucket is >= MIN_DIR_SIZE, so it is never folded in) —
-// isolating the aggregate-of-small-directories rule as the sole refusing tier.
-// Live mutant (reverted immediately, never committed): the entire
-// `if (aggregateTotal >= minDirSize) { ... }` block in
-// findDirectoryViolations() neutralized (condition forced false).
+// Test 56 (T-527 case 3, retargeted by T-873): the small-directory aggregate
+// drop, END TO END, now RUNS TO COMPLETION. Two directories, each
+// individually below MIN_DIR_SIZE (4 files each, so exempt from the
+// per-directory ratio rule) and each only PARTIALLY deleted (never a full
+// wipe on its own: 3 of 4, then 2 of 4) — 5 of 8 = 62.5% in aggregate. This
+// fixture used to be refused by composition-gate tier 5 (the
+// aggregate-of-small-directories rule); T-873 retired that tier because
+// tier 1's declared floors cover every declared published directory (the
+// declared-directory pin test below holds that condition). A large
+// untouched padding directory (50 files) keeps the whole-clone ratio and
+// the multi-directory ratio (5 of 58 = 8.6%, comfortably under both the 50%
+// and 25% ceilings) quiet, so with tier 5 gone nothing refuses. Kill-check
+// (T-873): re-adding the retired aggregate tally/violation block to
+// findDirectoryViolations() turns this test red (exit != 0 with the old
+// aggregated-small-directories refusal on stderr).
 {
   const assembledDir = mkTempDir('mavp-overlay-t527-c3-assembled-');
   const cloneDir = mkTempDir('mavp-overlay-t527-c3-clone-');
@@ -4691,29 +4698,30 @@ const t541DatedNoteOf = (stderr) =>
     [OVERLAY_SCRIPT, assembledDir, cloneDir],
     { encoding: 'utf8' }
   );
-  assert.notStrictEqual(
+  assert.strictEqual(
     result.status, 0,
-    `Test 56 FAIL: expected the small-directory aggregate drop (5 of 8) to be refused, got exit ${result.status}:\n${result.stderr}`
+    `Test 56 FAIL: expected the small-directory aggregate drop (5 of 8) to run to a successful overlay now that tier 5 is retired, got exit ${result.status}:\n${result.stderr}`
   );
   assert.ok(
-    /\(aggregated small directories, each individually below MIN_DIR_SIZE\): 5 of 8 \(62\.5%\)/.test(result.stderr),
-    `Test 56 FAIL: expected the small-directory aggregate refusal naming 5 of 8 (62.5%), got: ${result.stderr}`
-  );
-  assert.ok(
+    !/aggregated small directories/.test(result.stderr) &&
+    !/refusing to overlay/.test(result.stderr) &&
     !/max-delete-ratio threshold/.test(result.stderr) &&
     !/aggregate across multiple simultaneously-touched directories/.test(result.stderr),
-    `Test 56 FAIL: neither the whole-clone guard (8.6%) nor the multi-directory guard (8.6%, both well under their ` +
-    `ceilings) should fire — the small-directory aggregate rule alone must refuse, got: ${result.stderr}`
+    `Test 56 FAIL: no composition-gate refusal text may appear on stderr (tier 5 is retired; the whole-clone and ` +
+    `multi-directory guards stay silent at 8.6%), got: ${result.stderr}`
   );
-  console.log('Test 56 passed: T-527 case 3 — small-directory aggregate drop (5 of 8 across two individually-exempt directories) is refused end-to-end, with the whole-clone and multi-directory guards both confirmed silent');
+  assert.strictEqual(
+    fs.existsSync(path.join(cloneDir, 'small-1', 'b.md')), false,
+    'Test 56 FAIL: the overlay should have deleted small-1/b.md (the run is permitted, not a dry refusal)'
+  );
+  console.log('Test 56 passed: T-873 — the former tier-5 fixture (5 of 8 across two individually-exempt directories) now overlays successfully with no refusal text, whole-clone and multi-directory guards silent');
 }
 
 // Test 57 (T-527 case 4): the whole-clone >=-with-floor boundary, END TO
 // END — currently unbound at ANY level, unit or e2e. A single touched
 // directory (bigdir: 6 files, 5 deleted = 83.3%, comfortably under a
 // deliberately widened --max-dir-delete-ratio of 1.0) plus an untouched
-// 4-file directory (smalldir, folded into the aggregate-of-small check but
-// below MIN_DIR_SIZE so never evaluated) bring the WHOLE-CLONE ratio to
+// 4-file directory (smalldir, below MIN_DIR_SIZE so never evaluated) bring the WHOLE-CLONE ratio to
 // exactly 5 of 10 = 50.0%. Widening --max-dir-delete-ratio to 1.0 (its
 // maximum) neutralizes every per-directory-family rule so the whole-clone
 // tier is the sole possible refusing guard — round 1's own floor logic
@@ -4765,7 +4773,7 @@ const t541DatedNoteOf = (stderr) =>
 // location while every file's CONTENT and BASENAME reappear at a RELATED
 // destination (widgets/archive/ — same first path segment, so isRelatedMove()
 // credits it) — move credit zeroes the ADJUSTED deleted count for this
-// bucket to 0, so every OTHER tier (per-directory ratio, aggregates,
+// bucket to 0, so every OTHER tier (per-directory ratio, multi-directory aggregate,
 // whole-clone) sees nothing. Only tier 1, reading rawDeleted (immune to move
 // credit by design), must still refuse. Padded with 20 untouched files so
 // the whole-run move-credit cap (5 of 25 = 20%, under its 25% ceiling) does
@@ -4812,6 +4820,54 @@ const t541DatedNoteOf = (stderr) =>
     'Test 58 FAIL: no writes should have happened — widgets/f0.md must still exist'
   );
   console.log('Test 58 passed: T-527 case 5 — the tier-1 laundered full wipe (widgets/ fully drained, every file relocated byte-identical under its own basename to a RELATED destination) is refused via rawDeleted, immune to move credit');
+}
+
+// Test 59 (T-873): declared-directory pin. Composition-gate tier 5 (the
+// small-directory aggregate) was retired on the ground that tier 1's
+// declared floors (scripts/publish-shape-contract.json min_direct_files)
+// cover EVERY published directory. This test holds that ground: every
+// directory bucket the overlay derives (its own dirOf() bucketing, root
+// included as '') from publish-manifest.json's `ship` paths must be a key of
+// min_direct_files. A new ship directory added without a declared floor
+// fails here, naming the missing bucket — the residual the retirement
+// accepts (an undeclared sub-MIN_DIR_SIZE directory partially deleted would
+// be refused by no tier) is closed at review time by this pin, not at
+// overlay time. If this fails, the retirement's activation condition no
+// longer holds: declare the floor (a reviewable contract edit) rather than
+// weakening this test.
+//
+// The bucket set is the whole assembled tree, not only `ship`: the assembler's
+// post-assembly completeness check treats the assembled tree as the `ship`
+// paths plus the `reset` destinations (the reset KEYS — the values are
+// templates/ starters and are never assembled at those paths), so tier 1 sees
+// reset destinations too and their buckets are derived here as well. Under
+// today's manifest this is an equivalence, not a kill: both live reset
+// buckets (the root and `.claude`) are already declared, so adding the reset
+// keys changes no outcome today; it only keeps a future reset destination in
+// a new directory from escaping the pin.
+//
+// No assertion is made here about the ledger's own `ship` classification:
+// Test 35 already pins it (`t533LoadContract(assembledDir)` must be non-empty
+// on the real assembled tree; canonical repo only).
+{
+  const { dirOf } = require('./mavp-publish-overlay.js');
+  const shipManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'scripts', 'publish-manifest.json'), 'utf8'));
+  const shapeContract = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'scripts', 'publish-shape-contract.json'), 'utf8'));
+  assert.ok(Array.isArray(shipManifest.ship) && shipManifest.ship.length > 0, 'Test 59 FAIL: publish-manifest.json has no ship paths to derive buckets from');
+  assert.ok(
+    shipManifest.reset && typeof shipManifest.reset === 'object' && !Array.isArray(shipManifest.reset),
+    'Test 59 FAIL: publish-manifest.json `reset` must be an object of destination -> template (its keys are assembled-tree destinations)'
+  );
+  const declaredFloors = shapeContract.min_direct_files;
+  assert.ok(declaredFloors && typeof declaredFloors === 'object' && Object.keys(declaredFloors).length > 0, 'Test 59 FAIL: publish-shape-contract.json has no min_direct_files');
+  const shipBuckets = [...new Set([...shipManifest.ship, ...Object.keys(shipManifest.reset)].map((p) => dirOf(p)))].sort();
+  const undeclaredBuckets = shipBuckets.filter((b) => !Object.prototype.hasOwnProperty.call(declaredFloors, b));
+  assert.deepStrictEqual(
+    undeclaredBuckets, [],
+    `Test 59 FAIL: published directory bucket(s) with no declared floor in publish-shape-contract.json min_direct_files ` +
+    `(tier 5 is retired, so tier 1 is the only cover): ${undeclaredBuckets.map((b) => (b === '' ? '(root)' : b)).join(', ')}`
+  );
+  console.log(`Test 59 passed: T-873 — every published directory bucket has a declared floor (${shipBuckets.length - undeclaredBuckets.length} of ${shipBuckets.length} declared)`);
 }
 
 console.log('\nAll T-356 + T-504 + T-507 + T-532 + T-533 + T-540 + T-541 (rounds 1-4) + T-549 security fixes assertions passed.');

@@ -137,14 +137,24 @@ const DEFAULT_MAX_DELETE_RATIO = 0.5;
 //   (`.claude/hooks/`, `.claude/rules/`, `.github/workflows/`), each a
 //   single-digit file count. A one-line manifest edit dropping any one of
 //   them (e.g. moving `.github/workflows/ci.yml` from `ship` to `exclude`)
-//   was completely silent. Two independent, unconditional rules now cover
-//   what the size floor alone cannot (see findDirectoryViolations()):
-//   COMPLETE emptying of ANY bucket (deleted === total, total > 0) is
-//   always a violation regardless of size — total loss is never routine
-//   cleanup — and every bucket below MIN_DIR_SIZE is additionally folded
-//   into ONE aggregate bucket that IS ratio-checked, so touching many
-//   small, individually-exempt directories at once is no longer invisible
-//   just because no single one of them crosses the floor.
+//   was completely silent. Two independent rules covered what the size
+//   floor alone cannot (see findDirectoryViolations()): COMPLETE emptying
+//   of ANY bucket (deleted === total, total > 0) is always a violation
+//   regardless of size — total loss is never routine cleanup — and every
+//   bucket below MIN_DIR_SIZE was additionally folded into ONE aggregate
+//   bucket that was ratio-checked, so touching many small,
+//   individually-exempt directories at once was no longer invisible just
+//   because no single one of them crossed the floor.
+//
+//   T-873 RETIRED that second rule (composition-gate tier 5, the
+//   small-directory aggregate): its activation trigger — every published
+//   directory declared a floor in scripts/publish-shape-contract.json, so
+//   tier 1 covers each of them — was met, and a declared-directory pin test
+//   in scripts/test-publish-overlay.js holds that condition. The ledger row
+//   "Overlay tiers 3/5/6/7 + move credit" in docs/core/GATE_LEDGER.md
+//   carries the history. The full-wipe rule and the multi-directory
+//   ceiling stay; the aggregate-of-small-directories tally and its
+//   sentinel label no longer exist.
 //
 //   DIR_MAX_DELETE_RATIO (default 0.5): same threshold as the whole-clone
 //   ratio (DEFAULT_MAX_DELETE_RATIO) for consistency — a directory losing
@@ -158,18 +168,13 @@ const DEFAULT_MAX_DELETE_RATIO = 0.5;
 //   mathematically incapable of lowering the AGGREGATE volume ceiling much
 //   below the whole-clone ratio itself — capping N independent buckets at
 //   just-under-R still permits an aggregate close to R — so this guard's
-//   real, defensible contribution is SHAPE (no bucket, and no aggregate of
-//   small buckets, can be silently emptied past the ratio) rather than a
+//   real, defensible contribution is SHAPE (no bucket can be silently
+//   emptied past the ratio, and no declared directory loses a file below
+//   its floor) rather than a
 //   materially lower volume bound than T-504 already provides; see the
 //   CHANGELOG entry, corrected to say so plainly.
 const MIN_DIR_SIZE = 5;
 const DIR_MAX_DELETE_RATIO = 0.5;
-
-// T-507 round 1 (F1) — sentinel key for the aggregate bucket that every
-// sub-MIN_DIR_SIZE directory is folded into for ratio-checking purposes.
-// Deliberately starts with '(' — no real directory path (they use '/' as a
-// separator and never start with a parenthesis) can collide with it.
-const AGGREGATE_SMALL_DIR_LABEL = '(aggregated small directories, each individually below MIN_DIR_SIZE)';
 
 // T-507 round 1 (F2, "absolute floor on the ship-set count delta") —
 // sentinel key for the cross-directory budget-summing check: see
@@ -499,8 +504,9 @@ function planDeletion(cloneFiles, assembledSet, preserveKeys) {
 // built by planDeletion() above (after move-adjustment — see
 // adjustDirStatsForMoves() below; `dirStats` passed in here should already
 // have moved-not-deleted files excluded from `deleted`, AND carry
-// `rawDeleted` per bucket). Four independent rules, all checked, all sorted
-// together into one violations list:
+// `rawDeleted` per bucket). Three independent rules (a fourth, the
+// small-directory aggregate, was retired by T-873 — see rule 3 below), all
+// checked, all sorted together into one violations list:
 //
 //   1. Full wipe, ANY size, using RAW (pre-move-credit) counts (T-507
 //      round 1, F1; move-credit exclusion added round 2, N1 tier 1): a
@@ -520,17 +526,17 @@ function planDeletion(cloneFiles, assembledSet, preserveKeys) {
 //      rename): a violation when
 //      `deleted / total >= dirMaxDeleteRatio` (>=, not >, since round 1 (F2)
 //      found an EXACT half-deletion silently passed under the original `>`).
-//   3. Aggregate of every bucket BELOW minDirSize (T-507 round 1, F1): every
-//      sub-minDirSize bucket's total/deleted is folded into ONE synthetic
-//      bucket (AGGREGATE_SMALL_DIR_LABEL), which is itself ratio-checked
-//      (same >= rule, same minDirSize floor applied to the aggregate's own
-//      total) — this is what catches a manifest edit touching many small,
-//      individually-exempt directories at once (this project's own
-//      `.claude/hooks/`, `.claude/rules/`, `.github/workflows/`, etc.),
-//      which stayed invisible under per-bucket-only checking. Buckets
-//      already flagged by rule 1 (a full wipe) are excluded from the
-//      aggregate sum — they are already reported on their own, and folding
-//      them in too would just double-count the same underlying file loss.
+//   3. RETIRED by T-873 (was: aggregate of every bucket BELOW minDirSize,
+//      T-507 round 1, F1). Tier 5 folded every sub-minDirSize bucket into
+//      one synthetic bucket and ratio-checked it; it is retired because
+//      tier 1's declared floors (scripts/publish-shape-contract.json
+//      min_direct_files) now cover every declared published directory, so
+//      a drop in any of them is refused by tier 1 before this tally could
+//      matter — see the ledger row "Overlay tiers 3/5/6/7 + move credit"
+//      in docs/core/GATE_LEDGER.md. The number 3 is kept (tier numbers
+//      are cited by ledger rows and T-507 history); sub-minDirSize buckets
+//      are simply not ratio-checked on their own, and still count toward
+//      rule 4's tally below.
 //   4. Cross-directory budget-summing (T-507 round 1, F2 — see
 //      MULTI_DIR_AGGREGATE_LABEL's comment): once MORE than one bucket is
 //      simultaneously touched, the combined deletion across ALL touched
@@ -541,13 +547,11 @@ function planDeletion(cloneFiles, assembledSet, preserveKeys) {
 //      see as suspicious on its own.
 //
 // The empty-clone bootstrap case (dirStats empty) yields zero violations
-// from all four rules — vacuously safe, matching the whole-clone guard's
+// from every rule — vacuously safe, matching the whole-clone guard's
 // own zero-denominator handling. Returns violations sorted by directory
 // label for deterministic, reproducible error output.
 function findDirectoryViolations(dirStats, minDirSize, dirMaxDeleteRatio) {
   const violations = [];
-  let aggregateTotal = 0;
-  let aggregateDeleted = 0;
   // T-507 round 1 (F2) — cross-directory budget-summing tally. Deliberately
   // excludes buckets already flagged as a full wipe (see the `continue`
   // above) — those are already reported on their own, so folding them in
@@ -574,28 +578,15 @@ function findDirectoryViolations(dirStats, minDirSize, dirMaxDeleteRatio) {
     deletedAcrossTouchableBuckets += stat.deleted;
     if (stat.deleted > 0) touchedBuckets += 1;
 
-    if (stat.total < minDirSize) {
-      aggregateTotal += stat.total;
-      aggregateDeleted += stat.deleted;
-      continue;
-    }
+    // Sub-minDirSize buckets are not ratio-checked on their own (ratio math
+    // on 1-4 files is too noisy). T-873 retired the small-directory
+    // aggregate that used to fold them together; they still count toward
+    // the multi-directory tally above.
+    if (stat.total < minDirSize) continue;
 
     const ratio = stat.deleted / stat.total;
     if (ratio >= dirMaxDeleteRatio) {
       violations.push({ dir, deleted: stat.deleted, total: stat.total, ratio, reason: 'ratio' });
-    }
-  }
-
-  if (aggregateTotal >= minDirSize) {
-    const aggregateRatio = aggregateDeleted / aggregateTotal;
-    if (aggregateRatio >= dirMaxDeleteRatio) {
-      violations.push({
-        dir: AGGREGATE_SMALL_DIR_LABEL,
-        deleted: aggregateDeleted,
-        total: aggregateTotal,
-        ratio: aggregateRatio,
-        reason: 'aggregate',
-      });
     }
   }
 
@@ -1990,7 +1981,6 @@ function formatDirViolationLine(v) {
   const label = v.dir === '' ? '(root)' : v.dir;
   const reasonLabel =
     v.reason === 'full-wipe' ? ' [complete removal]' :
-    v.reason === 'aggregate' ? ' [aggregate of small directories]' :
     v.reason === 'multi-directory-aggregate' ? ' [multiple directories touched at once]' :
     '';
   return `  - ${label}: ${v.deleted} of ${v.total} (${(v.ratio * 100).toFixed(1)}%)${reasonLabel}`;
@@ -2391,7 +2381,6 @@ module.exports = {
   findDirectoryViolations,
   MIN_DIR_SIZE,
   DIR_MAX_DELETE_RATIO,
-  AGGREGATE_SMALL_DIR_LABEL,
   MULTI_DIR_AGGREGATE_LABEL,
   detectMovedPaths,
   adjustDirStatsForMoves,
