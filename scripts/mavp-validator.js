@@ -220,6 +220,10 @@ function parseTaskBlock({ block, source, sourceSection }) {
     module: getField(block, 'Module'),
     staleRisk: getField(block, 'Stale risk'),
     requiresConfigCheck: getField(block, 'Requires config check'),
+    // T-860: the field is written as "Requires ux" by --new-task/--apply-decomposition
+    // and spelled "Requires UX review" by BACKLOG_TEMPLATE.md; getField is label-case-sensitive,
+    // so both labels are looked up.
+    requiresUx: getField(block, 'Requires ux') || getField(block, 'Requires UX review'),
     // T-412: normalize a bracket-wrapped placeholder value (e.g. from BACKLOG_TEMPLATE.md)
     // to null before any downstream comma-split — a placeholder must not be parsed as repo ids.
     repo: (() => {
@@ -380,6 +384,8 @@ function getSeverityForCheck(checkName) {
     docs_ref_not_found: 'warning',
     active_slices_mismatch: 'warning',
     config_check_missing: 'warning',
+    visual_without_ux: 'warning',
+    ux_evidence_missing: 'warning',
     dev_done_missing_branch: 'warning',
     architecture_doc_stale: 'warning',
     merged_missing_needs_fix_rounds: 'info',
@@ -1159,7 +1165,9 @@ function checkExplorationOutputDoc(backlogRecords) {
 /**
  * cross_repo_evidence: cross-repo evidence check.
  * When a merged task has Repos: with 2+ repos, verify that each repo name has
- * at least one evidence line containing both "commit:" and the repo name (case-insensitive).
+ * at least one `commit:` entry whose parenthesized annotation names the repo
+ * as one of its tokens (case-insensitive; T-858 — the first token is the repo
+ * name, further tokens such as a branch may follow).
  * Only applies to multi-repo tasks (Repos: field, not single Repo:).
  */
 function checkCrossRepoEvidence(backlogRecords, taskStatusRecords) {
@@ -1188,19 +1196,24 @@ function checkCrossRepoEvidence(backlogRecords, taskStatusRecords) {
       continue;
     }
 
+    // T-858: a repo counts as covered only when some `commit:` entry's
+    // parenthesized annotation names it (case-insensitive token match) — a
+    // `commit:` elsewhere in the evidence plus a bare repo-name mention no
+    // longer counts.
+    const annotatedTokens = new Set();
+    for (const { repoAnnotation } of extractCommitEntriesFromEvidence(evidence)) {
+      for (const token of tokenizeRepoAnnotation(repoAnnotation)) annotatedTokens.add(token.toLowerCase());
+    }
+
     for (const repoName of repoNames) {
-      const lowerEvidence = evidence.toLowerCase();
-      const lowerRepo = repoName.toLowerCase();
-      // Check if there is a substring match of "commit:" AND repoName in the evidence
-      const hasCommitForRepo = lowerEvidence.includes('commit:') && lowerEvidence.includes(lowerRepo);
-      if (!hasCommitForRepo) {
+      if (!annotatedTokens.has(repoName.toLowerCase())) {
         findings.push(
           createFinding({
             checkName: 'cross_repo_missing_evidence',
             taskId: record.taskId,
-            message: `${record.taskId} is merged with repos: [${repoNames.join(', ')}] but evidence has no commit: for repo "${repoName}"`,
+            message: `${record.taskId} is merged with repos: [${repoNames.join(', ')}] but evidence has no commit: entry annotated with repo "${repoName}"`,
             repairTarget: 'TASK_STATUS.md',
-            suggestedAction: `Add a line with both "commit:" and "${repoName}" to the evidence block (e.g., "commit: <hash> (${repoName})").`,
+            suggestedAction: `Add a "commit: <hash> (${repoName})" entry to the evidence block — the repo name must be the first token inside the parentheses (further tokens such as a branch may follow, e.g. "commit: <hash> (${repoName} main)").`,
           })
         );
       }
@@ -1239,6 +1252,62 @@ function checkConfigCheck(backlogRecords, taskStatusRecords) {
           suggestedAction: 'Add "config_check: <key1> ✓, <key2> ✓" to the evidence field listing each config key confirmed present and correct in the target environment.',
         })
       );
+    }
+  }
+  return findings;
+}
+
+/**
+ * ux_gate (T-860): reads the Requires ux field.
+ *  - visual_without_ux: a visual-verification task that does not declare
+ *    requires ux true (deprecated/deferred and superseded tasks are skipped).
+ *  - ux_evidence_missing: a requires-ux task that is past the UX review stage
+ *    but whose TASK_STATUS Evidence carries no `ux:` line. The token is matched
+ *    at the start of the text or after whitespace, so `linux:` / `flux:` in
+ *    prose never satisfies it.
+ * Fed the Active Wave records only (archived waves are never judged).
+ */
+const UX_EVIDENCE_REQUIRED_STATUSES = new Set([
+  'ux_passed', 'ready_for_qa', 'qa_in_progress', 'qa_passed', ...TERMINAL_TASK_STATUSES,
+]);
+const UX_EVIDENCE_TOKEN = /(^|\s)ux:\s*\S/i;
+
+function checkUxGate(backlogRecords, taskStatusRecords) {
+  const findings = [];
+  const taskStatusIndex = createTaskRecordIndex(taskStatusRecords);
+
+  for (const record of backlogRecords) {
+    if (record.status === 'deprecated' || record.status === 'deferred') continue;
+    if (record.supersededBy) continue;
+    const requiresUx = Boolean(record.requiresUx) && record.requiresUx.toLowerCase() === 'true';
+
+    if (record.verificationType && record.verificationType.toLowerCase() === 'visual' && !requiresUx) {
+      findings.push(
+        createFinding({
+          checkName: 'visual_without_ux',
+          taskId: record.taskId,
+          message: `${record.taskId} has verification type visual but does not declare Requires ux: true`,
+          repairTarget: 'BACKLOG.md',
+          suggestedAction: 'Add "- **Requires ux:** true" to the task block so the ux_review stage applies, or change the verification type if no UX review is intended.',
+        })
+      );
+    }
+
+    if (requiresUx && UX_EVIDENCE_REQUIRED_STATUSES.has(record.status)) {
+      const tsRecord = (taskStatusIndex.get(record.taskId) || [])[0] || null;
+      if (!tsRecord) continue;
+      const evidence = getFieldMultiline(tsRecord.rawBlock, 'Evidence');
+      if (!evidence || !UX_EVIDENCE_TOKEN.test(evidence)) {
+        findings.push(
+          createFinding({
+            checkName: 'ux_evidence_missing',
+            taskId: record.taskId,
+            message: `${record.taskId} has Requires ux: true and status ${record.status} but evidence has no ux: line`,
+            repairTarget: 'TASK_STATUS.md',
+            suggestedAction: 'Add "ux: <pass|needs_fix> frames: <id> viewed: <n img>/<m txt>/<k unopened>" to the evidence field recording the UX review outcome.',
+          })
+        );
+      }
     }
   }
   return findings;
@@ -1916,6 +1985,33 @@ function extractCommitEntriesFromEvidence(evidence) {
 }
 
 /**
+ * (T-858) Split a cross-repo evidence annotation (the text inside the
+ * parentheses of `commit: <hash> (repo-a main)`) into tokens on whitespace,
+ * commas and semicolons. The documented grammar is: the FIRST token inside
+ * the parentheses names the repo (a docs/REPO_MAP.md id); further tokens
+ * such as a branch name may follow. Pure — no I/O. Returns [] for a
+ * null/empty annotation.
+ */
+function tokenizeRepoAnnotation(annotation) {
+  if (!annotation) return [];
+  return String(annotation).split(/[\s,;]+/).filter(Boolean);
+}
+
+/**
+ * (T-858) Resolve an annotation to a known repo-map id: the first token that
+ * matches (case-insensitively) a key of `repoMapIdByLowerId` (a Map of
+ * lowercased id -> id as written) wins. Returns that id, or null when the
+ * annotation is empty or no token resolves. Pure — no I/O.
+ */
+function resolveAnnotationRepoId(annotation, repoMapIdByLowerId) {
+  for (const token of tokenizeRepoAnnotation(annotation)) {
+    const id = repoMapIdByLowerId.get(token.toLowerCase());
+    if (id) return id;
+  }
+  return null;
+}
+
+/**
  * (T-746) Resolve the effective Repo:/Repos: value for a TASK_STATUS.md
  * record. `Repo:`/`Repos:` is a BACKLOG-owned field — the sync-status mirror
  * (mavp-operator-sync-status.js) only ever propagates Status, the heading
@@ -2128,17 +2224,26 @@ function checkCommitReachable({ activeRecords, recentlyCompletedRecords, root, r
       const evidence = getFieldMultiline(record.rawBlock, 'Evidence');
       const entries = extractCommitEntriesFromEvidence(evidence);
       for (const { hash, repoAnnotation } of entries) {
+        let unresolvedAnnotation = null;
         if (repoAnnotation) {
-          const resolvedId = repoMapIdByLowerId.get(repoAnnotation.toLowerCase());
+          // T-858: the first token inside the parentheses names the repo;
+          // further tokens (e.g. a branch) may follow.
+          const resolvedId = resolveAnnotationRepoId(repoAnnotation, repoMapIdByLowerId);
           if (resolvedId && (!selfRepoId || resolvedId.toLowerCase() !== selfRepoId.toLowerCase())) {
             continue; // annotation names a KNOWN other repo — its history lives there, skip
           }
           // Annotation names the self repo, or matches no known repo-map id
           // at all — fall through to the normal local check below.
+          if (!resolvedId) unresolvedAnnotation = repoAnnotation;
         }
 
         const finding = buildHashFinding(record, noRefSeverity, hash);
-        if (finding) collected.push(finding);
+        if (finding) {
+          if (unresolvedAnnotation) {
+            finding.suggestedAction += ` The annotation "(${unresolvedAnnotation})" matches no docs/REPO_MAP.md id — write the repo-map id as the FIRST token inside the parentheses (e.g. "commit: ${hash} (<repo-id>)"; further tokens such as a branch may follow); an annotated hash that names another known repo is skipped here.`;
+          }
+          collected.push(finding);
+        }
       }
     }
 
@@ -3090,6 +3195,9 @@ const CHECKS = [
   { name: 'cross_repo_evidence', run: (ctx) => checkCrossRepoEvidence(ctx.backlogAllWaveRecords, ctx.taskStatusRecords) },
   // Config check: qa_passed/merged tasks with requires_config_check: true need config_check: in evidence.
   { name: 'config_check', run: (ctx) => checkConfigCheck(ctx.backlogAllWaveRecords, ctx.taskStatusRecords) },
+  // UX gate (T-860): visual tasks need Requires ux; requires-ux tasks past ux_passed need a ux: evidence line.
+  // Active Wave records only (all-wave set, which keeps merged tasks the ux_evidence_missing check must reach).
+  { name: 'ux_gate', run: (ctx) => checkUxGate(ctx.backlogAllWaveRecords, [...ctx.taskStatusRecords, ...ctx.taskStatusRecentlyCompletedRecords]) },
   // Docs ref validator: warn on docs/[A-Z_]+.md refs in Evidence/Notes of merged tasks.
   { name: 'docs_refs', run: (ctx) => checkDocsRefs(ctx.taskStatusRecords) },
   // dev_done branch check: warn when dev_done evidence has commit: but no branch:.
@@ -3488,6 +3596,8 @@ module.exports = {
   resolveTaskStatusRecordRepo,
   extractCommitHashesFromEvidence,
   extractCommitEntriesFromEvidence,
+  tokenizeRepoAnnotation,
+  resolveAnnotationRepoId,
   ARCHIVED_UNREACHABLE_AGGREGATE_THRESHOLD,
   buildReachableHashIndex,
   isHashReachable,

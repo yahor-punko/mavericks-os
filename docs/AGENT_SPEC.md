@@ -22,6 +22,8 @@ Effort: [medium | high | xhigh | max]   # optional — only include when deviati
 Turn budget: [role's maxTurns from the "Per-role maxTurns table" below]   # optional override/retry channel — most roles now self-state their budget (see "Budget awareness" below); fill this on a retry after a cap-hit, or when deviating from the role's own stated number; see "Turn budget selection" below
 Test scope: [worktree developer only — seed a `node scripts/run-tests.js --filter <fragment>` baseline; the developer extends it with its own test files and grep-derived coverage and reports the delta; marked corpus-wide guard tests run automatically with any `--filter` and must not be seeded; never instruct the full suite in a worktree — see docs/core/ORCHESTRATION_RULES.md — "Test-execution scope (worktree developers)"]
 Scratch dir: [optional — set whenever the brief names scratch files or asks for probes, fuzzers or throwaway scripts: a per-task directory such as <session scratch root>/T-NNN/, never the shared session scratch root, which parallel sub-agents overwrite — see "Scratch dir" below]
+Frame set: [ux product-surface reviews only — path of the frame-set index taken at commit <hash>; see "Frame set" below]
+Reviewing as: [ux product-surface reviews only — who sees the screen and when]
 Files to modify: [explicit list, repo-relative paths only — never absolute: an absolute path points a worktree agent at the shared main checkout instead of its own worktree — see docs/core/ORCHESTRATION_RULES.md "GAP D"]
 What NOT to change: [boundaries — other files, other tasks]
 Definition of done: [acceptance criteria verbatim from BACKLOG.md]
@@ -82,6 +84,23 @@ Enforcement is by discipline, not mechanism — no hook of ours can fire inside 
 
 ### Scratch dir
 Optional. Brief-only — it has no BACKLOG.md counterpart. The harness provides one session scratch directory that every parallel sub-agent in the session writes to, so two agents share one namespace (observed 2026-10-25, T-839/T-840: one agent overwrote the other's probe file). Whenever a brief names scratch files or asks for probes, fuzzers or throwaway scripts, the Main Agent sets `Scratch dir:` to a per-task subdirectory of the session scratch root (`<session scratch root>/T-NNN/`, a placeholder — never a literal absolute path in a shipped doc) and the agent keeps everything of that kind under it. Enforcement is by discipline; see `docs/core/ORCHESTRATION_RULES.md` — "Repository-global exclusive resources" (fifth enumerated instance).
+
+### Frame set
+Optional. Brief-only — it has no BACKLOG.md counterpart. Used on ux product-surface reviews (see `.claude/agents/ux.md` — "Product surfaces"), where the frame is the review unit. `Reviewing as:` carries who sees the screen and when; `Frame set:` carries the path of the index below, taken at a named commit. A frame set is a shape, not a tool: any way of producing it satisfies the rule, and hand-taken screenshots plus an index file qualify.
+
+A frame set is:
+- **An index** mapping screen × state × role × width to an image file and the visible text of that frame.
+- **A per-frame layout-check result**: whether the page is wider than the viewport, and whether any element clips its content, with the clipped element named. The reason this check exists: a table set to `overflow:hidden` was invisible to both the frames and the reviewer until a clipping check existed.
+- **A declared list of what frames do not show** — collapsed disclosures, screen-reader text, field values.
+- **The commit the set was taken at.**
+
+Rules:
+- The Main Agent or CI produces the set before the ux spawn, because ux has no Bash.
+- The set is regenerated on every fix round; a review never reuses frames from before a surface-changing fix.
+- Every finding cites the frame by name; the recommended form is `<screen>-<state>-<role>-<width>`.
+- The operator reviews the same set the ux role reviewed.
+
+A ux product-surface brief with no `Frame set:` line is a `Frame set missing` blocker, and one with no `Reviewing as:` line is a blocker too.
 
 ### commit: in evidence
 All tasks with `merged` status must include `commit: <hash>` in the evidence field in TASK_STATUS.md. The validator will block (exit code 2) on merged tasks without a commit hash in the evidence.
@@ -177,6 +196,7 @@ All worker roles (developer, qa, ux, product-docs, technical-writer, security-re
 | High risk / blast radius | Change can affect production data, billing, auth, or many downstream consumers | `opus` |
 | Cross-cutting change | Touches shared libraries, conventions, or contracts used by multiple modules/repos | `opus` |
 | Full (non-checklist) security review | `security-reviewer` performing a full review (see CLAUDE.md — Security review) rather than a lightweight self-checklist | `opus` |
+| Whole-surface consistency review | `ux` reviewing every screen × state × width of a frame set for cross-screen consistency | `opus` |
 | None of the above | Mechanical edits, boilerplate, well-understood single-file changes, checklist-style reviews | `sonnet` (default — no override needed) |
 
 Escalation is a Main Agent judgment call applied at spawn time; it does not change the role's frontmatter default. When escalating, record it in the sub-agent brief with an optional `Model:` field (see "Sub-agent brief — optional Model: and Effort: fields" below).
@@ -245,7 +265,7 @@ Omit both fields when spawning at defaults (`sonnet` frontmatter model, session-
 
 ### Turn budget selection
 
-This section is the **single source of truth** for `maxTurns` calibration across the framework, alongside "Model selection" and "Effort selection" above. The source calibration document is `docs/TURN_BUDGET.md` — consult it for the underlying evidence and confidence caveats before changing any value here.
+This section is the **single source of truth** for `maxTurns` calibration across the framework, alongside "Model selection" and "Effort selection" above. The source calibration document is `docs/TURN_BUDGET.md`, an internal calibration record not included in the public distribution — in the canonical repository, consult it for the underlying evidence and confidence caveats before changing any value here.
 
 `maxTurns` is a **runaway guard**, not a working ceiling: an agent should never reach it in normal operation. Each role's frontmatter in `.claude/agents/<role>.md` declares a fixed `maxTurns:` value; there is no per-invocation override mechanism for turn budget (unlike model and effort, which support spawn-time overrides).
 
@@ -262,18 +282,18 @@ The ×1.5 multiplier converts the highest observed turn count for a role class i
 | Role | maxTurns | Basis |
 |------|----------|-------|
 | developer | 140 | Implementation role with verify loops; a full verify-heavy slice hit the prior cap of 90 twice across resumes (T-552). |
-| product-docs | 70 | Doc-authoring role; a censored cap-hit (T-521, 42 vs the prior cap of 40) drove a third recalibration — see `docs/TURN_BUDGET.md` "T-557 recalibration". |
+| product-docs | 70 | Doc-authoring role; a censored cap-hit (T-521, 42 vs the prior cap of 40) drove a third recalibration — see the "T-557 recalibration" in `docs/TURN_BUDGET.md` (an internal calibration record not included in the public distribution). |
 | technical-writer | 70 | Same doc-authoring class as product-docs — aligned for consistency (still zero independent observations). |
 | frontend-design | 45 | Implementation role with build/preview verify loops — between docs and developer. |
-| architect | 50 | Read-heavy role; tool-use counts over-count turns for this role class. Nine-run external table shows truncations at 39/40 vs the prior cap of 25; recalibrated per `docs/TURN_BUDGET.md` "T-727 recalibration" — ceil(40×1.5)=60 → 60, discounted for read-heavy over-count (same precedent as this row's own original basis) → 50. |
-| qa | 70 | Bounded read → run → verdict. Wave-100 session-2 evidence (four runtime QA spawns against the prior cap of 40): one cap-hit (T-763, 40/40, resumed to 47 cumulative) and two completions within five turns of cap (T-771 36/40, T-769 35/40); recalibrated per `docs/TURN_BUDGET.md` "Session 6 evidence" — ceil(47×1.5)=71 → ceiling-to-next-multiple-of-10 per resolution 3 → 80, discounted for read-heavy over-count (T-310/T-727 precedent) → 70, 49% headroom over the 47 floor. |
+| architect | 50 | Read-heavy role; tool-use counts over-count turns for this role class. Nine-run external table shows truncations at 39/40 vs the prior cap of 25; recalibrated per the "T-727 recalibration" in `docs/TURN_BUDGET.md` (an internal calibration record not included in the public distribution) — ceil(40×1.5)=60 → 60, discounted for read-heavy over-count (same precedent as this row's own original basis) → 50. |
+| qa | 70 | Bounded read → run → verdict. Wave-100 session-2 evidence (four runtime QA spawns against the prior cap of 40): one cap-hit (T-763, 40/40, resumed to 47 cumulative) and two completions within five turns of cap (T-771 36/40, T-769 35/40); recalibrated per "Session 6 evidence" in `docs/TURN_BUDGET.md` (an internal calibration record not included in the public distribution) — ceil(47×1.5)=71 → ceiling-to-next-multiple-of-10 per resolution 3 → 80, discounted for read-heavy over-count (T-310/T-727 precedent) → 70, 49% headroom over the 47 floor. |
 | ui-designer | 20 | Bounded visual-design role; no observed cap pressure. |
 | analyst | 15 | Read-only research; no observed cap pressure. |
 | exa-researcher | 15 | Bounded retrieval; no observed cap pressure. |
 | security-reviewer | 40 | A full single-repo self-recon review needs strictly more than the prior cap of 25 — three independent reviews truncated at cap+1 (T-552). |
-| ux | 15 | Read-only review; no observed cap pressure. |
+| ux | 50 | Read-only review that now includes product-surface frame review (one screen per unit of work). Evidence is adopter-reported (wpadopter-012) and NOT locally corroborated: one censored cap-hit at the prior cap of 15 with 4 of ~60 states opened, and two batched-read runs completing inside 15 turns. This is a role-class estimate under the Headroom-formula "no in-wave data" clause, not a derived value. |
 
-These values are derived from a small, anecdotal evidence set (see `docs/TURN_BUDGET.md` — "Evidence" and "Confidence & recheck"). They are deliberately generous so under-calibration cannot re-orphan work. Recompute and re-derive per role class once historical `tool_uses` data is instrumented, per the recheck plan in `docs/TURN_BUDGET.md`.
+These values are derived from a small, anecdotal evidence set (see the "Evidence" and "Confidence & recheck" sections of `docs/TURN_BUDGET.md`, an internal calibration record not included in the public distribution). They are deliberately generous so under-calibration cannot re-orphan work. Recompute and re-derive per role class once historical `tool_uses` data is instrumented, per the recheck plan in that record, which is not included in the public distribution.
 
 ### Budget awareness
 
@@ -284,6 +304,8 @@ This section is the **single source of truth** for the budget-awareness mechanis
 **The mechanism.** Each roster role's spec file carries a `## Budget awareness` section stating its own turn budget in a machine-readable, backticked `` `maxTurns: N` `` literal, plus a self-count instruction, a convergence trigger at roughly 80% of budget, a note that the brief-line `Turn budget:` field can override it, and a role-tailored target for what "converge" means for that role. `scripts/test-agent-spec-sync.js` asserts, for every roster role, that the section exists and that its stated `N` equals the role's own frontmatter `maxTurns` — so an agent reading only its own spec file always has a live, correct number to converge against, without needing to read `AGENT_SPEC.md`, a brief field, or any other file at all.
 
 **QA convergence is event-based, not count-based.** The `qa` role's tailored convergence target no longer rests on self-counting to roughly 80% of `maxTurns`; its `## Budget awareness` section now prescribes a plan phase of at most 5 tool calls (task block, `git show --stat` of the evidence commit, then one executed check per criterion plus a reading set), a per-criterion ceiling of 8 tool calls (then `NOT verified — budget`), and a one-line ledger emitted as text after each criterion, with the final report written at the earliest of all criteria ledgered, the plan allowance exhausted, or the retained 80% trigger. Why: the count-based trigger shipped in 0.48.0 (T-728) and failed on an adopter's 0.51.1 (a qa spawn used all 70 turns and returned one sentence) and locally on T-763 (cap-hit 40/40) — a global count to roughly 56 calls is not something the agent tracks reliably, whereas "I finished a criterion" is an event it observes. No `maxTurns` value changes; the heading and backticked `maxTurns: N` literal that `scripts/test-agent-spec-sync.js` asserts are unchanged. The ledger is insurance whose return at cap the framework cannot verify.
+
+**UX convergence is event-based too, on the same model.** The `ux` role's `## Budget awareness` section prescribes one screen as the unit of work (all of its states and widths read in one turn, batched as parallel calls), one ledger line emitted as text after each screen, and the final report written at the earliest of all screens ledgered, the brief's screen list exhausted, or roughly 80% of the turn budget; the count is of turns, so parallel calls in one turn are one turn, and the brief's `Turn budget:` line can still lower it. Why: a product-surface review is many screens, each with several states and widths, so "I finished a screen" is an event the agent observes where a global count is not. The `ux` `maxTurns` value moves from 15 to 50 alongside this change (see the Per-role maxTurns table for its adopter-reported, not locally corroborated, basis); the heading and backticked `maxTurns: N` literal that `scripts/test-agent-spec-sync.js` asserts stay in sync with the frontmatter.
 
 **Why the mandatory-brief-line alternative was refused.** The obvious-looking fix — make the `Turn budget:` brief-line field mandatory on every spawn — was considered and rejected, for three reasons:
 

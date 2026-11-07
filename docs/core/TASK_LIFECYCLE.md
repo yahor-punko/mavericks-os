@@ -45,7 +45,12 @@ A task whose deliverable reaches users outside any deploy contour (for example a
 ```
 planned → in_progress → dev_done → ux_review → ux_passed → ready_for_qa → qa_in_progress → qa_passed → merged
                                              ↘ ux_needs_fix ↗                            ↘ needs_fix ↗
+                                   ↑                                                          │
+                                   └──── ux_review (again, when a fix changed the surface) ←─┘
+                                                                              (needs_fix → ux_review)
 ```
+
+On a `requires_ux` task, every fix round that changes the visible surface — after `ux_needs_fix`, after `needs_fix`, or after an operator finding — re-enters `ux_review` on a regenerated frame set before `ready_for_qa`. No mechanical check enforces this: status history is not recorded in the artifacts, so the validator cannot tell that a `needs_fix` round happened between `ux_passed` and `ready_for_qa`. The rule rests on the Main Agent's routing.
 
 ## Flow with security review (requires_security_review: true)
 
@@ -227,6 +232,8 @@ Each task in BACKLOG.md must declare a `verification_type`:
 
 **Visual QA rule:** a task with `verification_type: visual` must not receive `qa_passed` based on build success alone. The user must explicitly confirm: "I reviewed T-XXX — looks correct." Record this confirmation as evidence in TASK_STATUS.md before setting `qa_passed`.
 
+**Visual QA order:** on a `requires_ux` task, operator confirmation comes after `ux_passed` on the final frames and after `qa_passed`, never before either. An operator finding about a screen is handed to the ux role, which classifies it and sweeps the screen for the same class of defect; the orchestrator never authors the fix pack itself.
+
 **Runtime QA rule — behavioral assertion required:** acceptance criteria for a `verification_type: runtime` task MUST state a behavioral assertion: a known input and the expected observable output that input must produce. "Script executes without error" or "exit code 0" alone is a structural check and is not sufficient.
 
 - **Concrete example:** for a spam-classifier inference script, the criterion must read "given known-spam message X, the model classifies it `spam`; given known-ham message Y, the model classifies it `ham`" — not "the script runs and returns an output tensor."
@@ -237,6 +244,7 @@ Each task in BACKLOG.md must declare a `verification_type`:
 - A task should not silently jump from development to merge if it entered QA. The QA path should remain visible in project artifacts.
 - UX review is skipped unless the task explicitly has `requires_ux: true` in the backlog.
 - UX sub-agent does not accept its own work — `ux_passed` transitions to `ready_for_qa`, not `merged`.
+- On a `requires_ux: true` task, a fix round that changes the visible surface (after `ux_needs_fix`, `needs_fix` or an operator finding) returns to `ux_review` on a regenerated frame set before `ready_for_qa`. Not mechanically enforced — status history is not recorded in the artifacts.
 - Security review is skipped unless the task explicitly has `requires_security_review: true` in the backlog.
 - Security-reviewer sub-agent does not accept its own work — `security_passed` transitions to `ready_for_qa`, not `merged`.
 - Sub-agents do not self-approve QA — `qa_passed` is set by the Main Agent after reviewing evidence.
@@ -251,9 +259,10 @@ Required when `merged`:
 Optional fields:
 - `branch: <branch-name>` — branch merged (e.g. `main`, `develop`)
 - `manual_changes: <description>` — any operations performed outside version control
+- `ux: <pass|needs_fix> [frames: <id>] [viewed: <n img>/<m txt>/<k unopened>]` — the ux review verdict, the frame set it was taken from, and how many frames the reviewer opened as image, read as text only, or left unopened. The validator's `ux_evidence_missing` warning fires when a requires-ux task at `ux_passed` or later has no `ux:` line; it judges the BACKLOG.md Active Wave only (archived waves are never judged) and never blocks.
 
 For cross-repo tasks (declared with `- **Repos:** repo-a, repo-b`):
-- One evidence line per repo: `commit: <hash-a> (repo-a)` and `commit: <hash-b> (repo-b)`
+- One evidence line per repo: `commit: <hash-a> (repo-a)` and `commit: <hash-b> (repo-b)` (the first token inside the parentheses is the repo name; further tokens such as a branch may follow, e.g. `(repo-b main)`)
 
 Common mistake: writing `Commit abc1234` (capitalized, no colon) instead of `commit: abc1234` — the validator will reject the capitalized form and emit `merged_missing_commit_field`.
 

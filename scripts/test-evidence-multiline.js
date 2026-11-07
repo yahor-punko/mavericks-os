@@ -82,6 +82,18 @@ const BACKLOG_FIXTURE = `# BACKLOG
 - **Owner role:** developer
 - **Verification type:** runtime
 - **Repos:** repo-a, repo-b
+
+### T-917 — Fixture cross-repo merged task, repo-b named without a commit: entry
+- **Status:** merged
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Repos:** repo-a, repo-b
+
+### T-918 — Fixture cross-repo merged task, trailing branch token in the annotation
+- **Status:** merged
+- **Owner role:** developer
+- **Verification type:** runtime
+- **Repos:** repo-a, repo-b
 `;
 
 const TASK_STATUS_FIXTURE = `# TASK_STATUS
@@ -140,6 +152,20 @@ const TASK_STATUS_FIXTURE = `# TASK_STATUS
 - **Evidence:**
   - commit: aaa1111 (repo-a)
   - commit: bbb2222 (repo-b)
+
+### T-917 — Fixture cross-repo merged task, repo-b named without a commit: entry
+- **Status:** merged
+- **Owner:** developer
+- **Verification type:** runtime
+- **Repos:** repo-a, repo-b
+- **Evidence:** commit: aaa1111 (repo-a); repo-b: done
+
+### T-918 — Fixture cross-repo merged task, trailing branch token in the annotation
+- **Status:** merged
+- **Owner:** developer
+- **Verification type:** runtime
+- **Repos:** repo-a, repo-b
+- **Evidence:** commit: aaa1111 (repo-a); commit: bbb2222 (repo-b main)
 
 ## Recently completed tasks
 `;
@@ -201,6 +227,28 @@ assert.strictEqual(
   findFinding('cross_repo_missing_evidence', 'T-916'),
   undefined,
   `FAIL (case 8): T-916 has commit: for both repo-a and repo-b as separate sub-bullets, expected no cross_repo_missing_evidence finding, got: ${JSON.stringify(findFinding('cross_repo_missing_evidence', 'T-916'))}`
+);
+
+// Case 9 (T-858): repo-b is only named as bare prose ("repo-b: done") while the
+// sole commit: entry is annotated repo-a — repo-b is NOT covered.
+{
+  const f = findFinding('cross_repo_missing_evidence', 'T-917');
+  assert.ok(f, 'FAIL (case 9): T-917 covers repo-b only by a bare mention, expected cross_repo_missing_evidence for repo-b');
+  assert.ok(f.message.includes('"repo-b"'), `FAIL (case 9): finding must name repo-b, got: ${f.message}`);
+  assert.ok(f.suggestedAction.includes('first token'), `FAIL (case 9): suggestedAction must state the grammar, got: ${f.suggestedAction}`);
+  assert.strictEqual(
+    findings.filter((x) => x.checkName === 'cross_repo_missing_evidence' && x.taskId === 'T-917').length,
+    1,
+    'FAIL (case 9): exactly one finding expected (repo-b only; repo-a is covered)'
+  );
+}
+
+// Case 10 (T-858): a trailing token after the repo name inside the parentheses
+// ("repo-b main") still counts as covering repo-b.
+assert.strictEqual(
+  findFinding('cross_repo_missing_evidence', 'T-918'),
+  undefined,
+  `FAIL (case 10): T-918 annotates repo-b as "(repo-b main)", expected no cross_repo_missing_evidence finding, got: ${JSON.stringify(findFinding('cross_repo_missing_evidence', 'T-918'))}`
 );
 
 // ---------------------------------------------------------------------------

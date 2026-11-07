@@ -334,6 +334,7 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "  --close-session  Run end-of-session ritual (sweep merged tasks, commit; never advances the wave)"
   echo "  --close-wave     Advance the wave (the ONLY wave-advance path): terminal = type the wave number; agent = --operator-confirmed \\"<operator's statement>\\""
   echo "                       Usage: --close-wave [--interactive] [--operator-confirmed \\"statement\\"] [--next-goal \\"text\\"]"
+  echo "                       Run --close-session first: it sweeps merged tasks out of Active tasks; --close-wave refuses while any remain"
   echo "  --set-strategy-note  Set wave strategy context note (persists until --close-session)"
   echo "  --set-wave-goal  Set the wave goal (PROCESS_STATE.json wave_goal) non-interactively"
   echo "                       Usage: --set-wave-goal \\"text\\" (empty string clears; missing argument exits 1)"

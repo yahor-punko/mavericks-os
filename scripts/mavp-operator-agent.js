@@ -41,7 +41,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { buildDeployQueue, classifyNextAction, countIntakeUntriaged, countUnackedFeedbackAnswers, resolveIntakeDir, semverCompare, computeDueRechecks, computeMustRead, detectPermissionModeConflict, partitionInstallerManaged, splitMustReadOversized, generateProcessStateMd, guardReportingWrite, getDeployPendingForRepo, IN_FLIGHT_STATUSES, normalizeDeployField, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { buildDeployQueue, classifyNextAction, countIntakeUntriaged, countUnackedFeedbackAnswers, countUnreviewedSkillProposals, resolveIntakeDir, semverCompare, computeDueRechecks, computeMustRead, detectPermissionModeConflict, partitionInstallerManaged, splitMustReadOversized, generateProcessStateMd, guardReportingWrite, getDeployPendingForRepo, IN_FLIGHT_STATUSES, normalizeDeployField, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
@@ -863,6 +863,13 @@ function main() {
     }
   } catch { /* intake counters are advisory */ }
 
+  // T-865: additive, read-only count of SKILL_PROPOSALS/*.md with no Decision ticked.
+  // Reported in framework and adopter roots alike; writes nothing; never breaks --agent.
+  let skillProposalsUnreviewed = 0;
+  try {
+    skillProposalsUnreviewed = countUnreviewedSkillProposals(path.join(ROOT, 'SKILL_PROPOSALS'));
+  } catch { /* skill-proposal counter is advisory */ }
+
   const output = {
     initiative,
     stage,
@@ -895,6 +902,7 @@ function main() {
     ...(mustReadFramework.length > 0 ? { must_read_framework: mustReadFramework } : {}),
     ...(intakeUntriaged > 0 ? { intake_untriaged: intakeUntriaged } : {}),
     ...(feedbackAnswersUnacked > 0 ? { feedback_answers_unacked: feedbackAnswersUnacked } : {}),
+    ...(skillProposalsUnreviewed > 0 ? { skill_proposals_unreviewed: skillProposalsUnreviewed } : {}),
     // T-847: additive, present only when this run skipped its state writes in a never-a-project root.
     ...(writeGuard.skip
       ? { reporting_write_skipped: { discriminator: writeGuard.discriminator, resolved_root: writeGuard.resolvedRoot, reason: writeGuard.discriminatorText } }

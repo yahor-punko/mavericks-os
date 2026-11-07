@@ -41,6 +41,7 @@ const {
   buildTaskStatusEntry,
   printRepoIdentityHeader,
   guardMutatingRoot,
+  normalizeDeployField,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -117,7 +118,7 @@ function parseTaskBlock(raw) {
     if ([
       'title', 'owner_role', 'depends_on', 'verification_type',
       'problem', 'acceptance_criteria', 'evidence_expected',
-      'requires_ux', 'requires_security_review', 'touches', 'type', 'repo',
+      'requires_ux', 'requires_security_review', 'touches', 'type', 'repo', 'deploy',
     ].includes(key)) {
       task[key] = value;
     }
@@ -181,6 +182,68 @@ function resolveRepoLine(task, repoName) {
   return `- **Repo:** ${parts[0]}`;
 }
 
+/** Normalize a title for same-block matching: trim, collapse whitespace, lowercase. */
+function normalizeTitleKey(title) {
+  return String(title || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+/**
+ * Rewrite each task's `depends_on` so a reference to another task of the same
+ * block by title becomes that task's assigned T-NNN (T-857). Matching is
+ * same-block only, normalized (trim, whitespace-collapse, case-insensitive).
+ * Forward references resolve too, since ids for the whole batch are known up
+ * front. A title shared by two tasks is ambiguous and stays verbatim. Parts
+ * that are already T-NNN pass through; anything unresolved is written
+ * verbatim with a non-blocking warning.
+ *
+ * @param {object[]} tasks - Parsed tasks, in registration order
+ * @param {string[]} ids - Assigned ids, parallel to `tasks`
+ * @returns {{tasks: object[], warnings: string[]}} New task objects (inputs untouched) plus warning lines
+ */
+function resolveDependsOnTitles(tasks, ids) {
+  const byTitle = new Map();
+  tasks.forEach((t, i) => {
+    const key = normalizeTitleKey(t.title);
+    if (!byTitle.has(key)) byTitle.set(key, []);
+    byTitle.get(key).push(ids[i]);
+  });
+  const warnings = [];
+  const resolved = tasks.map((task, i) => {
+    const raw = task.depends_on;
+    if (!raw || !raw.trim() || ['—', '-'].includes(raw.trim())) return task;
+    const lookup = (text) => {
+      const hits = byTitle.get(normalizeTitleKey(text));
+      if (!hits) return { kind: 'none' };
+      if (hits.length > 1) return { kind: 'ambiguous', hits };
+      if (hits[0] === ids[i]) return { kind: 'self' };
+      return { kind: 'ok', id: hits[0] };
+    };
+    const describe = (part, r) => {
+      let why = 'matches no T-NNN and no title in this block';
+      if (r.kind === 'ambiguous') why = `is ambiguous (title shared by ${r.hits.join(', ')})`;
+      else if (r.kind === 'self') why = 'names the task itself';
+      warnings.push(`apply-decomposition: task "${task.title}" — depends_on "${part}" ${why}; written verbatim`);
+    };
+    const whole = lookup(raw);
+    if (whole.kind === 'ok') return { ...task, depends_on: whole.id };
+    const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
+    if (parts.length <= 1) {
+      if (parts.length === 1 && /^T-\d+$/i.test(parts[0])) return task;
+      describe(raw.trim(), whole);
+      return task;
+    }
+    const out = parts.map(part => {
+      if (/^T-\d+$/i.test(part)) return part;
+      const r = lookup(part);
+      if (r.kind === 'ok') return r.id;
+      describe(part, r);
+      return part;
+    });
+    return { ...task, depends_on: out.join(', ') };
+  });
+  return { tasks: resolved, warnings };
+}
+
 /**
  * Build a BACKLOG.md entry for a task.
  * @param {string} id - Task ID (e.g. "T-222")
@@ -217,6 +280,10 @@ function buildBacklogEntry(id, task, repoName) {
   }
   if (task.type && task.type.trim()) {
     lines.push(`- **Type:** ${task.type}`);
+  }
+  // Only `Deploy: none` is meaningful (T-815); other values are reserved and omitted.
+  if (normalizeDeployField(task.deploy) === 'none') {
+    lines.push(`- **Deploy:** none`);
   }
 
   lines.push('');
@@ -360,15 +427,27 @@ async function applyDecompositionFromString(input, repoName) {
     return;
   }
 
+  // A deploy value other than none is reserved (T-815): omitted, with a warning.
+  for (const task of parsedTasks) {
+    if (task.deploy && task.deploy.trim() && normalizeDeployField(task.deploy) !== 'none') {
+      console.warn(`apply-decomposition: task "${task.title}" — deploy "${task.deploy.trim()}" is not recognised (only "none" is carried); omitted`);
+    }
+  }
+
   // Determine starting ID
   const backlog = readUtf8(BACKLOG_MD);
   const taskStatus = readUtf8(TASK_STATUS_MD);
   const firstIdStr = getNextTaskId(BACKLOG_MD, TASK_STATUS_MD, PROCESS_STATE_JSON);
   const firstIdNum = parseInt(firstIdStr.replace('T-', ''), 10);
 
+  // Resolve same-block title references in depends_on to assigned ids (T-857).
+  const assignedIds = parsedTasks.map((_, idx) => formatTaskId(firstIdNum + idx));
+  const dep = resolveDependsOnTitles(parsedTasks, assignedIds);
+  for (const w of dep.warnings) console.warn(w);
+
   // Build all entries in memory
-  const entries = parsedTasks.map((task, idx) => {
-    const id = formatTaskId(firstIdNum + idx);
+  const entries = dep.tasks.map((task, idx) => {
+    const id = assignedIds[idx];
     return {
       id,
       task,
@@ -451,6 +530,7 @@ module.exports = {
   buildBacklogEntry,
   buildTaskStatusEntry,
   resolveRepoLine,
+  resolveDependsOnTitles,
   parseCliArgs,
   applyDecompositionFromString,
 };

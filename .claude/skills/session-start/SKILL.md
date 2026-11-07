@@ -41,6 +41,7 @@ Read the JSON above. Key fields:
 - `must_read_oversized` — `[{path, chars}]`: files that would be in `must_read` but exceed the size budget; search them, do not read them whole (present only when non-empty)
 - `must_read_framework` — string array: changed files that `mavp-install.js --update` rewrites from the framework source (framework-managed agents, skills, rules, hooks and synced scripts); reported only in an adopter repo, never in a framework source tree, and present only when non-empty
 - `intake_untriaged` — integer: adopter feedback items awaiting triage; reported only in the framework repository, present only when above zero
+- `skill_proposals_unreviewed` — integer: `SKILL_PROPOSALS/*.md` files whose `## Decision` section has no ticked box (or that have no such section); reported in framework and adopter projects alike, present only when above zero
 - `feedback_answers_unacked` — integer: answers to your own alias's feedback items you have not yet acknowledged; reported only in an adopter project that has a `feedback_alias`, present only when above zero
 - `reporting_write_skipped` — `{discriminator, resolved_root, reason}`: present only when the resolved root is a never-a-project root (the shipped placeholder tree, the machine-shared framework-source clone, a linked git worktree, or a caller inside one) and this run therefore skipped its state writes (the `PROCESS_STATE.md` regeneration and the `.mavp/permission-mode` record); `discriminator` is one of `placeholder`, `dot_mavericks`, `linked_worktree`, `caller_in_linked_worktree`
 
@@ -129,6 +130,12 @@ If `intake_untriaged` is present (framework repository only: the count of adopte
 
 ```
 > [!NOTE] Intake: {intake_untriaged} untriaged adopter item(s) — run ./scripts/mavp-operator --intake
+```
+
+If `skill_proposals_unreviewed` is present (the count of `SKILL_PROPOSALS/*.md` files with no Decision ticked), surface a callout directly after the intake callout (or in its place when none is shown); omit it when the field is absent:
+
+```
+> [!NOTE] Skill proposals: {skill_proposals_unreviewed} awaiting a Decision in SKILL_PROPOSALS/ — review per docs/SKILL_OPTIMIZATION.md section 9
 ```
 
 If `reporting_write_skipped` is present, render one line directly after the permission mode line (and its conflict line, when shown) — a fact report, no action is required of you:
@@ -228,7 +235,7 @@ Because both `active_slices` and `planned_tasks` are empty, additionally list th
 
 > Options:
 > 1. Register the next task — pick up next_action
-> 2. Close wave {wave} — only on the operator's explicit statement this session (then --close-wave --operator-confirmed)
+> 2. Close wave {wave} — only on the operator's explicit statement this session; run --close-session first (it sweeps merged tasks out of Active tasks; --close-wave refuses while any remain), then --close-wave --operator-confirmed
 > 3. Something else
 
 Option 2 appears only in this empty case, never beside in-flight or planned work. It is not a default and never a conclusion drawn from the empty lists: an empty Active tasks section does not mean the wave's goal is met. Run `--close-wave --operator-confirmed "<statement>"` only when the operator has said, in this session, that the wave's goal is met and it should close, passing their words verbatim — see CLAUDE.md, "Wave advance confirmation". A statement in a previous session's `HANDOFF.md` does not count.

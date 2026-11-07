@@ -466,6 +466,70 @@ const read = (p) => fs.readFileSync(p, 'utf8');
 }
 
 // ---------------------------------------------------------------------------
+// T-865: --agent skill_proposals_unreviewed (SKILL_PROPOSALS/ files with no Decision ticked)
+// Expected values come from the T-865 acceptance criteria, not from observed behaviour.
+// ---------------------------------------------------------------------------
+{
+  const inbox = path.join(mkTmp('inbox'), 'q');
+  const agent = (r) => {
+    const out = run(AGENT, [], r, inbox);
+    assert.strictEqual(out.status, 0, out.all);
+    return JSON.parse(out.out);
+  };
+  const proposal = (decisionLines, extra) =>
+    ['# Proposal', '', '## Conflict check', '- [x] Checked against rules', '', ...(extra || []), '## Decision', ...decisionLines, ''].join('\n');
+  const UNCHECKED = ['- [ ] Accept all', '- [ ] Accept with modifications (describe below)', '- [ ] Reject'];
+  const spDir = (root) => {
+    const d = path.join(root, 'SKILL_PROPOSALS');
+    fs.mkdirSync(d, { recursive: true });
+    return d;
+  };
+
+  // (c) no SKILL_PROPOSALS/ directory: field omitted; helper returns 0 and never throws
+  const root = frameworkRoot();
+  assert.ok(!('skill_proposals_unreviewed' in agent(root)), 'omitted when SKILL_PROPOSALS/ is absent');
+  assert.strictEqual(lib.countUnreviewedSkillProposals(path.join(root, 'SKILL_PROPOSALS')), 0, 'helper returns 0 for an absent dir');
+  assert.strictEqual(lib.countUnreviewedSkillProposals(undefined), 0, 'helper never throws on bad input');
+
+  // (a) one ticked, one all-unchecked, one with no Decision section -> 2
+  const d = spDir(root);
+  fs.writeFileSync(path.join(d, 'a-decided.md'), proposal(['- [x] Accept all', '- [ ] Accept with modifications (describe below)', '- [ ] Reject']));
+  fs.writeFileSync(path.join(d, 'b-open.md'), proposal(UNCHECKED));
+  fs.writeFileSync(path.join(d, 'c-nodecision.md'), '# Proposal\n\n## Reviewer notes\n- [x] looked\n');
+  fs.writeFileSync(path.join(d, 'ignored.txt'), '## Decision\n- [ ] x\n');
+  assert.strictEqual(agent(root).skill_proposals_unreviewed, 2);
+  assert.strictEqual(lib.countUnreviewedSkillProposals(d), 2);
+
+  // (b) a tick only inside ## Reviewer notes (before and after Decision) still counts the file
+  fs.rmSync(d, { recursive: true, force: true });
+  const d2 = spDir(root);
+  fs.writeFileSync(path.join(d2, 'notes-before.md'), proposal(UNCHECKED, ['## Reviewer notes', '- [x] looks fine', '']));
+  fs.writeFileSync(path.join(d2, 'notes-after.md'), proposal(UNCHECKED) + '\n## Reviewer notes\n- [X] ticked after Decision\n');
+  assert.strictEqual(agent(root).skill_proposals_unreviewed, 2, 'a box outside ## Decision never decides a file');
+
+  // (c) all decided -> omitted; an uppercase [X] under Decision counts as decided
+  fs.writeFileSync(path.join(d2, 'notes-before.md'), proposal(['- [ ] Accept all', '- [X] Reject']));
+  fs.writeFileSync(path.join(d2, 'notes-after.md'), proposal(['- [x] Accept all']));
+  assert.ok(!('skill_proposals_unreviewed' in agent(root)), 'omitted when every proposal is decided');
+
+  // adopter root (no lib under it) reports the same field and the run writes nothing into SKILL_PROPOSALS/
+  const adopter = mkTmp('adopter-sp');
+  fs.writeFileSync(path.join(adopter, 'BACKLOG.md'), '# BACKLOG\n\n## Active Wave\n\n');
+  fs.writeFileSync(path.join(adopter, 'TASK_STATUS.md'), '# TASK_STATUS\n\n## Active tasks\n\n');
+  fs.writeFileSync(
+    path.join(adopter, 'PROCESS_STATE.json'),
+    JSON.stringify({ initiative: 'adopter', stage: 'execution', wave: 1, active_slices: [], next_action: null, last_updated: '2026-01-01' }, null, 2) + '\n'
+  );
+  const ad = spDir(adopter);
+  fs.writeFileSync(path.join(ad, 'x-open.md'), proposal(UNCHECKED));
+  const snap = () => fs.readdirSync(ad).map((f) => [f, fs.readFileSync(path.join(ad, f), 'utf8')]);
+  const before = snap();
+  assert.strictEqual(agent(adopter).skill_proposals_unreviewed, 1, 'reported at an adopter root');
+  assert.deepStrictEqual(snap(), before, 'read-only');
+  console.log('PASS --agent skill_proposals_unreviewed');
+}
+
+// ---------------------------------------------------------------------------
 // Criterion 7: both wrappers dispatch --intake
 // ---------------------------------------------------------------------------
 {

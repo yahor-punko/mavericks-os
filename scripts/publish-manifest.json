@@ -248,6 +248,7 @@
     "scripts/test-validator-missing-task-status-record.js",
     "scripts/test-validator-review-statuses.js",
     "scripts/test-validator-root-resolution.js",
+    "scripts/test-validator-ux-gates.js",
     "scripts/test-version-sync.js",
     "scripts/test-wave-close-sweep.js",
     "scripts/test-wave-summary-scope.js",

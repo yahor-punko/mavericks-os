@@ -323,6 +323,8 @@ The optimizer that generated this proposal was not shown this project's own oper
 feat(skill-opt): apply <role> spec edits from wave <N> reflect run
 ```
 
+**Session-start surfacing (T-865):** `--agent` reports the additive field `skill_proposals_unreviewed` — the number of `SKILL_PROPOSALS/*.md` files that still have no Decision ticked — and the session-start skill renders it as a callout, present only when the count is above zero. The rule is deterministic and read-only (`countUnreviewedSkillProposals()` in `scripts/mavp-operator-lib.js`): a file counts when it has no `## Decision` section, or its `## Decision` section (bounded to the next `## ` heading) contains no checked box line (`- [x]`, case-insensitive); a box ticked under any other section, such as "Reviewer notes" or "Conflict check", never decides a file. A proposal that was applied to the role spec but whose Decision box was never ticked counts by design — the count reads the artifact, not the role spec — and the remedy is step 5 above: tick the box.
+
 ---
 
 ## 10. Artifact paths

@@ -6474,6 +6474,49 @@ function countIntakeUntriaged(dir) {
   return listIntakeItems(dir).filter((e) => e.item && !(e.item.fields.Disposition || '').trim()).length;
 }
 
+/**
+ * T-865: count SKILL_PROPOSALS-style files (*.md directly under `dir`) that have
+ * no Decision ticked. A file counts when it has no `## Decision` section, or its
+ * `## Decision` section (bounded: from that heading to the next `## ` heading or
+ * end of file) holds no checked box line (`- [x]`, case-insensitive). A box
+ * ticked elsewhere (e.g. under `## Reviewer notes` or `## Conflict check`) never
+ * decides a file. Pure and read-only: 0 when `dir` is absent or unreadable;
+ * never throws.
+ */
+function countUnreviewedSkillProposals(dir) {
+  try {
+    if (typeof dir !== 'string' || !dir) return 0;
+    let count = 0;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue;
+      let text;
+      try {
+        text = fs.readFileSync(path.join(dir, entry.name), 'utf8');
+      } catch {
+        continue;
+      }
+      let inDecision = false;
+      let hasDecision = false;
+      let decided = false;
+      for (const line of text.split(/\r?\n/)) {
+        if (/^##\s/.test(line)) {
+          inDecision = /^##\s+Decision\s*$/i.test(line);
+          if (inDecision) hasDecision = true;
+          continue;
+        }
+        if (inDecision && /^\s*[-*+]\s+\[x\]/i.test(line)) {
+          decided = true;
+          break;
+        }
+      }
+      if (!hasDecision || !decided) count += 1;
+    }
+    return count;
+  } catch {
+    return 0;
+  }
+}
+
 /** Count an alias's items that have a Disposition but no Acknowledged stamp (adopter side). */
 function countUnackedFeedbackAnswers(dir, alias) {
   return listIntakeItems(dir).filter(
@@ -6897,6 +6940,7 @@ module.exports = {
   ROOT,
   computeShipsIn,
   countIntakeUntriaged,
+  countUnreviewedSkillProposals,
   countUnackedFeedbackAnswers,
   FEEDBACK_ADOPTER_FIELDS,
   FEEDBACK_ANSWER_COMMENT_MAX_CHARS,

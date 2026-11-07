@@ -4,7 +4,7 @@
 |---|---|---|---|
 | Developer | Narrow, self-contained implementation slices | Sonnet | [`.claude/agents/developer.md`](../../.claude/agents/developer.md) |
 | QA | Functional validation against acceptance criteria — `qa_passed` or `needs_fix` | Sonnet | [`.claude/agents/qa.md`](../../.claude/agents/qa.md) |
-| UX | Flows, microcopy, feedback states, accessibility — `ux_passed` or `ux_needs_fix` (optional per task) | Sonnet | [`.claude/agents/ux.md`](../../.claude/agents/ux.md) |
+| UX | Flows, microcopy, feedback states, accessibility, rendered product surfaces — `ux_passed` or `ux_needs_fix` (optional per task) | Sonnet | [`.claude/agents/ux.md`](../../.claude/agents/ux.md) |
 | Security reviewer | Security review for new inputs/outputs, auth flows, integrations — `security_passed` or `security_needs_fix` (optional per task) | Sonnet | [`.claude/agents/security-reviewer.md`](../../.claude/agents/security-reviewer.md) |
 | Product/docs | Backlog clarity, process docs, artifact sync | Sonnet | [`.claude/agents/product-docs.md`](../../.claude/agents/product-docs.md) |
 | Technical writer | User-facing docs — README, getting-started guides, API reference, changelog | Sonnet | [`.claude/agents/technical-writer.md`](../../.claude/agents/technical-writer.md) |
@@ -73,7 +73,8 @@ QA should be distinct from developer completion.
 
 Primary responsibilities:
 - review task acceptance criteria for UX completeness before development starts
-- review implemented UI slices before QA: flows, microcopy, feedback states (loading, empty, error), basic accessibility
+- review the rendered frames of a user-visible surface, before QA and again before any operator pass over it: flows, microcopy, feedback states (loading, empty, error), basic accessibility
+- authors every visible-copy change as a pack (where → was → becomes); the Main Agent relays, never authors
 - return `ux_passed` or `ux_needs_fix` with a concrete, actionable list of issues
 - not responsible for functional correctness — that belongs to QA
 

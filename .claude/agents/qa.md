@@ -45,6 +45,13 @@ Each task declares one verification type. Match your QA method to it exactly.
 **Runtime behavioral-assertion gate:** REJECT (`needs_fix`) any `runtime` task whose acceptance criteria assert only structure — tensor/output shape, exit code, "no exception thrown" — with no stated input and expected observable output. Structure-only checks cannot catch a functionally broken implementation that is structurally well-formed. Concrete example of what is required: "given known-spam message X, the model output classifies it `spam`; given known-ham message Y, the model output classifies it `ham`." Anti-pattern that this gate exists to catch: a degenerate ONNX spam-classification model reached production because its check asserted only correct tensor shape (`[1,128]` in → `[1,2]` out) while the model had collapsed to a constant output and never separated spam from ham. If acceptance criteria lack a behavioral assertion, do not attempt to verify — return `needs_fix` and name the missing assertion as the issue.
 <!-- /protected -->
 
+## Verifying invariant-conditioned guard claims
+
+When a developer's evidence claims a guard is an "invariant-conditioned guard" rather than a mutant-killable rule (see `.claude/agents/architect.md` — "Unkillable-rule triage: dead rule vs invariant-conditioned guard"), do not accept the claim on the comment's word alone. Check both of its required conditions before treating the coverage as real:
+
+1. The comment/docstring names the specific external invariant and states it as an honest equivalence under today's conditions (e.g. "equivalent to X under today's Y; guards against Z breaking") — not as a claimed mutant kill. A claim phrased as a kill when no such mutant exists is a finding, not a pass — return `needs_fix` rather than letting a false protection claim stand.
+2. A test exists that pins the invariant through the codebase's own predicate or wrapper, not by asserting on the underlying tool/library directly. Read the test to confirm which code path it calls; then require the developer's quoted red run for it, obtained by mutating that predicate (`.claude/agents/developer.md` — "Maximizing QA outcomes"), since you cannot mutate files yourself. If the only test in evidence exercises the raw tool in isolation, or no red run through the predicate is quoted, treat the invariant as unpinned even though a test exists — it would not redden under the refactor class the guard is meant to catch.
+
 ## Failure modes
 
 - **Artifact or script to verify is inaccessible:** Report which file is missing and its expected location. Do not mark qa_passed or qa_failed — mark the finding as `blocked: artifact_missing`.

@@ -111,6 +111,8 @@ const {
   getSeverityForCheck,
   createTaskRecordIndex,
   parseBacklogAllTasksAnySection,
+  tokenizeRepoAnnotation,
+  resolveAnnotationRepoId,
 } = require('./mavp-validator.js');
 const { getCommitHashesReachableFromHead, isShallowRepository } = require('./mavp-operator-lib.js');
 
@@ -1137,8 +1139,65 @@ function makeShallowFixture(name) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 17 (T-858): annotation tokenizer — the first token inside the
+// parentheses names the repo; trailing tokens (e.g. a branch) are allowed.
+// ---------------------------------------------------------------------------
+{
+  const { root, orphanHash } = makeGitFixture('t858-annotation-fixture');
+  const repoMap = { 'this-repo': { path: root }, 'other-repo': { path: '/tmp/does-not-matter' } };
+  const run = (taskId, evidenceLine) =>
+    checkCommitReachable({
+      activeRecords: [
+        {
+          taskId,
+          status: 'merged',
+          repo: 'this-repo, other-repo',
+          rawBlock: taskBlock({ taskId, status: 'merged', repo: 'this-repo, other-repo', evidenceLine }),
+        },
+      ],
+      recentlyCompletedRecords: [],
+      root,
+      repoMap,
+    });
+
+  // Pure tokenizer unit assertions (contract: split on whitespace/comma/semicolon).
+  assert.deepStrictEqual(tokenizeRepoAnnotation('other-repo main'), ['other-repo', 'main'], 'Test 17 FAIL: whitespace split');
+  assert.deepStrictEqual(tokenizeRepoAnnotation('other-repo, main;x'), ['other-repo', 'main', 'x'], 'Test 17 FAIL: comma/semicolon split');
+  assert.deepStrictEqual(tokenizeRepoAnnotation(null), [], 'Test 17 FAIL: null -> []');
+  const idMap = new Map([['other-repo', 'other-repo']]);
+  assert.strictEqual(resolveAnnotationRepoId('main OTHER-repo', idMap), 'other-repo', 'Test 17 FAIL: first resolving token wins, case-insensitively, not only the first token');
+  assert.strictEqual(resolveAnnotationRepoId('nonesuch main', idMap), null, 'Test 17 FAIL: no token resolves -> null');
+
+  // (1) known other repo id first, trailing branch token -> skipped.
+  {
+    const findings = run('T-930', `commit: ${orphanHash} (other-repo main)`);
+    assert.strictEqual(findings.length, 0, `Test 17-1 FAIL: expected no finding for "(other-repo main)", got: ${JSON.stringify(findings)}`);
+  }
+  // (2) unresolvable annotation -> finding whose suggestedAction quotes it and states the grammar.
+  {
+    const findings = run('T-931', `commit: ${orphanHash} (nonesuch)`);
+    assert.strictEqual(findings.length, 1, `Test 17-2 FAIL: expected 1 finding for "(nonesuch)", got: ${JSON.stringify(findings)}`);
+    assert.strictEqual(findings[0].checkName, 'commit_unreachable', 'Test 17-2 FAIL: checkName');
+    assert.ok(findings[0].suggestedAction.includes('nonesuch'), `Test 17-2 FAIL: suggestedAction must quote the annotation: ${findings[0].suggestedAction}`);
+    assert.ok(/first token/i.test(findings[0].suggestedAction), `Test 17-2 FAIL: suggestedAction must state the grammar (first token): ${findings[0].suggestedAction}`);
+  }
+  // (3) existing T-489 behaviour preserved: bare known-other-repo annotation -> skipped.
+  {
+    const findings = run('T-932', `commit: ${orphanHash} (other-repo)`);
+    assert.strictEqual(findings.length, 0, `Test 17-3 FAIL: expected no finding for "(other-repo)", got: ${JSON.stringify(findings)}`);
+  }
+  // Control: an unannotated hash gets no annotation note in suggestedAction.
+  {
+    const findings = run('T-933', `commit: ${orphanHash}`);
+    assert.strictEqual(findings.length, 1, 'Test 17 FAIL: unannotated orphan hash must still fire');
+    assert.ok(!findings[0].suggestedAction.includes('REPO_MAP'), `Test 17 FAIL: unannotated finding must not carry the annotation note: ${findings[0].suggestedAction}`);
+  }
+  console.log('Test 17 passed: annotation tokenizer — first token names the repo, trailing tokens allowed, unresolved annotation is named in suggestedAction');
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
 
-console.log('\nAll T-448/T-489/T-565 assertions passed.');
+console.log('\nAll T-448/T-489/T-565/T-858 assertions passed.');

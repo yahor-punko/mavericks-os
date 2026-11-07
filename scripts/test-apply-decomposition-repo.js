@@ -213,6 +213,116 @@ function makeFixtureRoot(name) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 8 (T-857): same-block depends_on titles resolve to the assigned T-NNN,
+// and `deploy: none` is carried as `- **Deploy:** none`. Runs the real CLI
+// against fixture roots (last_task_id 900, so ids are T-901, T-902, ...) and
+// captures stderr for the warnings.
+// ---------------------------------------------------------------------------
+{
+  const { parseTasksWithRepo, isDeployOptOut } = require('./mavp-operator-lib.js');
+  const runCli = (root, inputFile) => spawnSync(process.execPath, [
+    path.join(__dirname, 'mavp-operator-apply-decomposition.js'), inputFile,
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, MAVERICKS_PROJECT_ROOT: root, MAVERICKS_SCRIPTS: __dirname },
+  });
+  const wrap = body => `<!-- mavp-decomposition-start -->\n${body}\n<!-- mavp-decomposition-end -->`;
+  const task = (title, extra) =>
+    `title: ${title}\nowner_role: developer\nverification_type: unit\nproblem: P.\nacceptance_criteria: C.` + (extra ? '\n' + extra : '');
+  const register = (name, tasks) => {
+    const root = makeFixtureRoot('t857-' + name);
+    const inputFile = path.join(root, 'decomposition.md');
+    fs.writeFileSync(inputFile, wrap(tasks.join('\n---\n')), 'utf8');
+    const res = runCli(root, inputFile);
+    const backlog = fs.readFileSync(path.join(root, 'BACKLOG.md'), 'utf8');
+    const taskStatus = fs.readFileSync(path.join(root, 'TASK_STATUS.md'), 'utf8');
+    return { res, backlog, taskStatus };
+  };
+  const blockOf = (backlog, id) => {
+    const rest = backlog.split(`### ${id} `)[1];
+    assert.ok(rest !== undefined, `block ${id} missing in:\n${backlog}`);
+    return rest.split(/\n### T-/)[0];
+  };
+  const dependsLine = block => (block.match(/^- \*\*Depends on:\*\* .*$/m) || [null])[0];
+
+  // 8a: backward reference by title, trim / whitespace / case-normalized.
+  {
+    const { backlog } = register('8a', [
+      task('First task title'),
+      task('Second task', 'depends_on:    FIRST   task  TITLE  '),
+    ]);
+    assert.strictEqual(dependsLine(blockOf(backlog, 'T-902')), '- **Depends on:** T-901', `Test 8a FAIL:\n${backlog}`);
+    console.log('Test 8a passed: depends_on equal to task 1 title (normalized) -> "- **Depends on:** T-901"');
+  }
+
+  // 8b: forward reference.
+  {
+    const { backlog } = register('8b', [
+      task('Early task', 'depends_on: Late task'),
+      task('Late task'),
+    ]);
+    assert.strictEqual(dependsLine(blockOf(backlog, 'T-901')), '- **Depends on:** T-902', `Test 8b FAIL:\n${backlog}`);
+    console.log('Test 8b passed: forward reference by title -> "- **Depends on:** T-902"');
+  }
+
+  // 8c: mixed T-NNN and title.
+  {
+    const { backlog } = register('8c', [
+      task('First task title'),
+      task('Mixed task', 'depends_on: T-123, First task title'),
+    ]);
+    assert.strictEqual(dependsLine(blockOf(backlog, 'T-902')), '- **Depends on:** T-123, T-901', `Test 8c FAIL:\n${backlog}`);
+    console.log('Test 8c passed: "T-123, <title>" -> "- **Depends on:** T-123, T-901"');
+  }
+
+  // 8d: unmatched value verbatim + warning naming the task.
+  {
+    const { res, backlog } = register('8d', [
+      task('First task title'),
+      task('Lonely task', 'depends_on: Some other thing'),
+    ]);
+    assert.strictEqual(dependsLine(blockOf(backlog, 'T-902')), '- **Depends on:** Some other thing', `Test 8d FAIL:\n${backlog}`);
+    assert.ok(res.stderr.includes('matches no T-NNN and no title in this block'), `Test 8d FAIL: warning missing, stderr:\n${res.stderr}`);
+    assert.ok(res.stderr.includes('task "Lonely task"'), `Test 8d FAIL: warning must name the task, stderr:\n${res.stderr}`);
+    assert.strictEqual(res.status === 0 || res.status === 1, true, 'Test 8d FAIL: warning must not abort the run');
+    console.log('Test 8d passed: unmatched depends_on written verbatim, stderr warning names the task');
+  }
+
+  // 8e: two tasks share a normalized title -> reference ambiguous.
+  {
+    const { res, backlog } = register('8e', [
+      task('Twin title'),
+      task('twin   TITLE'),
+      task('Dependent task', 'depends_on: Twin title'),
+    ]);
+    assert.strictEqual(dependsLine(blockOf(backlog, 'T-903')), '- **Depends on:** Twin title', `Test 8e FAIL:\n${backlog}`);
+    assert.ok(res.stderr.includes('task "Dependent task"') && res.stderr.includes('is ambiguous'), `Test 8e FAIL: ambiguity warning missing, stderr:\n${res.stderr}`);
+    console.log('Test 8e passed: ambiguous shared title written verbatim with a warning');
+  }
+
+  // 8f: deploy key.
+  {
+    const { res, backlog, taskStatus } = register('8f', [
+      task('Opt out task', 'deploy: none'),
+      task('Prod task', 'deploy: prod'),
+      task('Plain task'),
+    ]);
+    assert.ok(/^- \*\*Deploy:\*\* none$/m.test(blockOf(backlog, 'T-901')), `Test 8f FAIL: T-901 needs Deploy line:\n${backlog}`);
+    assert.ok(!blockOf(backlog, 'T-902').includes('**Deploy:**'), 'Test 8f FAIL: deploy: prod must not emit a Deploy line');
+    assert.ok(!blockOf(backlog, 'T-903').includes('**Deploy:**'), 'Test 8f FAIL: no deploy key must emit no Deploy line');
+    assert.ok(res.stderr.includes('task "Prod task"') && res.stderr.includes('deploy "prod"'), `Test 8f FAIL: deploy: prod warning missing, stderr:\n${res.stderr}`);
+    assert.ok(!res.stderr.includes('task "Opt out task" — deploy'), 'Test 8f FAIL: deploy: none must not warn');
+    const parsed = parseTasksWithRepo(taskStatus, backlog);
+    const entry = parsed.find(t => t.id === 'T-901');
+    assert.ok(entry, `Test 8f FAIL: T-901 not parsed, got ${JSON.stringify(parsed.map(t => t.id))}`);
+    assert.strictEqual(isDeployOptOut(entry), true, 'Test 8f FAIL: isDeployOptOut must be true for the registered Deploy: none task');
+    assert.strictEqual(isDeployOptOut(parsed.find(t => t.id === 'T-902')), false, 'Test 8f FAIL: deploy: prod task must not be an opt-out');
+    console.log('Test 8f passed: deploy: none -> Deploy line + isDeployOptOut true; deploy: prod -> no line + warning; no key -> no line');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Test 6: end-to-end through applyDecompositionFromString() — confirms the
 // full pipeline (parse -> build -> write) produces the same repo-field
 // behavior on real BACKLOG.md/TASK_STATUS.md fixture files, and that the

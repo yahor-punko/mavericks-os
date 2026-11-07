@@ -636,3 +636,35 @@ Two adjacent conventions were tightened as part of closing this out. First, `CLA
 **Scope limit:** this decision adds no validator check, no hook and no new file, and it governs sub-agents only. It does not restrict the Main Agent's or an operator's own per-operator memory, whose use DR-013 already bounds (route (c) there is residual, chosen by the portability test). It does not forbid a sub-agent from reading the repository's artifacts, which is how it gets its context. Reopen trigger: a role whose spec and briefs demonstrably cannot carry a lesson that recurs across spawns, shown by the reflection loop's evidence, not by preference.
 
 **Documented in:** `docs/core/DECISIONS.md` (this record); `docs/SKILL_OPTIMIZATION.md` (the reflection loop, one of the three routes); `docs/core/RCA_CODIFICATION.md` (routing of a durable lesson); `CHANGELOG.md` — the `## [0.52.0]` entry for T-844.
+
+---
+
+## DR-020 — A user-visible surface defaults to a UX review on regenerated frames, a fix round re-enters that review, and the operator confirms last
+
+**Date:** 2026-11-06
+
+**Informed by:** adopter reports wpadopter-007, wpadopter-008, wpadopter-009, wpadopter-010, wpadopter-011, wpadopter-012 and wpadopter-013 (one adopter's account of reviewing end-user screens, including a table clipped by an `overflow:hidden` rule that neither the frames nor the reviewer could see); the ux role's product-surface section added by T-859; the validator's `visual_without_ux` and `ux_evidence_missing` warnings added by T-860.
+
+**Tasks:** T-859, T-860, T-861 (this record and the lifecycle, decomposition and brief-template text), T-862, T-863. T-864 holds the deferred follow-ups and is the reopen holder named below.
+
+**Problem:** The lifecycle already had an optional `ux_review` stage, but nothing made a task that renders something to an end user enter it. `requires_ux` was a per-task opt-in the architect had no stated duty to set. The stage was also entered once: a `needs_fix` or operator finding after `ux_passed` sent the task back to a developer and on to QA with no second look at the changed screen. The operator was asked to confirm before the final frames were reviewed, and when the operator reported a screen defect the orchestrator wrote the fix pack, so the same class of defect stayed on the screens nobody re-swept. A review done from source code, with no image or text of the rendered screen, could not see clipping at all.
+
+**What was considered:**
+1. **A validator check that blocks a visual task without `requires_ux`** — rejected. Whether a diff reaches a rendered surface is a judgment about the change, and a blocking rule on it would force an escape hatch on every false positive. The adopted design is a warning (`visual_without_ux`) plus the architect's default.
+2. **A mechanical check that a fix round re-entered `ux_review`** — rejected as not possible: status history is not recorded in the artifacts, so a task that went `ux_passed` → `needs_fix` → `ready_for_qa` is indistinguishable from one that went `ux_passed` → `ready_for_qa`. The rule is stated plainly as unenforced and rests on the Main Agent's routing.
+3. **Letting the orchestrator author the fix pack for an operator finding** — rejected. The orchestrator fixes the one screen named and has no mandate to sweep for the class; the ux role classifies the finding and sweeps every screen for it, so the class is closed rather than the instance.
+4. **Reviewing from source code with a description of the screen** — rejected. Code tells why a screen looks as it does, not what it looks like; a clipped element is invisible in it. The frame (image plus visible text per screen, state, role and width) is the review unit.
+5. **Prescribing a screenshot tool** — rejected. The frame set is defined as a shape; hand-taken screenshots plus an index file satisfy it, and a tool that generates frames is a deferred follow-up.
+
+**What was adopted:**
+1. The architect sets `requires_ux: true` whenever a task's diff reaches a user-visible rendered surface (page, screen, email, plugin view, dashboard panel), and sets it `false` on such a task only with the reason stated in `problem:` or `acceptance_criteria:`.
+2. On a `requires_ux` task every fix round that changes the visible surface (after `ux_needs_fix`, `needs_fix` or an operator finding) re-enters `ux_review` on a regenerated frame set before `ready_for_qa`. Not mechanically enforced, for the reason in consideration 2.
+3. The Visual QA order: operator confirmation comes after `ux_passed` on the final frames and after `qa_passed`; an operator finding is handed to ux, which classifies it and sweeps the screen for the same class; the orchestrator never authors the fix pack.
+4. The evidence line `ux: <pass|needs_fix> [frames: <id>] [viewed: <n img>/<m txt>/<k unopened>]`, whose absence on a requires-ux task at `ux_passed` or later the validator reports as the warning `ux_evidence_missing` (Active Wave only).
+5. Two optional brief fields, `Frame set:` and `Reviewing as:`, and a "Frame set" field description in `docs/AGENT_SPEC.md` defining the shape: an index of screen × state × role × width to image and visible text, a per-frame layout-check result, a declared list of what frames do not show, and the commit the set was taken at. It is produced by the Main Agent or CI before the spawn, regenerated on every fix round, cited by frame name in every finding, and the operator reviews the same set.
+
+**Scope limit:** no new status, no blocking validator check, no script and no screenshot tool. The two validator checks are warnings and were added by T-860; this record adds none. Only the requires-ux path changes; a task without `requires_ux` follows the lifecycle exactly as before.
+
+**Reopen trigger:** T-864 holds the deferred follow-ups: the blind-pass protocol, a `frames_command` that generates a frame set, and `ui_paths` that lets a check recognise a task reaching a rendered surface. Reopen this decision if a re-entry that should have happened is shown to have been skipped in more than one task, which would make the unenforced rule of adopted item 2 a candidate for a recorded signal.
+
+**Documented in:** `docs/core/DECISIONS.md` (this record); `docs/core/TASK_LIFECYCLE.md` — "Flow with UX review", "Transition rules", "Verification types" (Visual QA order) and "Evidence format"; `docs/ARCHITECT_OUTPUT.md` — the `requires_ux:` row; `.claude/agents/architect.md` — Rules; `docs/AGENT_SPEC.md` — the brief template and "Frame set"; `CLAUDE.md` — the brief template; `.claude/agents/ux.md` — "Product surfaces" (T-859); `CLAUDE.md` — the UX review convention (T-860).
