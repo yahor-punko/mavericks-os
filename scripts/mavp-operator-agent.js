@@ -41,7 +41,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { buildDeployQueue, classifyNextAction, countIntakeUntriaged, countUnackedFeedbackAnswers, countUnreviewedSkillProposals, resolveIntakeDir, semverCompare, computeDueRechecks, computeMustRead, detectPermissionModeConflict, partitionInstallerManaged, splitMustReadOversized, generateProcessStateMd, guardReportingWrite, getDeployPendingForRepo, IN_FLIGHT_STATUSES, normalizeDeployField, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { buildDeployQueue, renderSessionBrief, classifyNextAction, countIntakeUntriaged, countUnackedFeedbackAnswers, countUnreviewedSkillProposals, resolveIntakeDir, semverCompare, computeDueRechecks, computeMustRead, detectPermissionModeConflict, partitionInstallerManaged, splitMustReadOversized, generateProcessStateMd, guardReportingWrite, getDeployPendingForRepo, IN_FLIGHT_STATUSES, normalizeDeployField, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
@@ -581,11 +581,12 @@ function deletePersistedPermissionMode(root) {
 }
 
 const USAGE_TEXT = [
-  'Usage: ./scripts/mavp-operator --agent',
+  'Usage: ./scripts/mavp-operator --agent [--brief]',
   '',
   'Prints a compact JSON session brief for the Main Agent (stage, active slices,',
-  'next_action, blockers, must-read set). Takes no options; --help/-h prints this',
-  'text and exits before reading or writing any project state.',
+  'next_action, blockers, must-read set). --brief runs the same collection and',
+  'side effects but prints the operator-facing session brief text instead of JSON.',
+  '--help/-h prints this text and exits before reading or writing any project state.',
   '',
 ].join('\n');
 
@@ -909,6 +910,13 @@ function main() {
       : {}),
   };
 
+  if (process.argv.slice(2).includes('--brief')) {
+    // T-888: same run, same side effects as above — only the rendering differs.
+    // firstRun = the project's onboarding file is still present (the session-start
+    // skill deletes it only after this brief has been printed).
+    process.stdout.write(renderSessionBrief(output, { firstRun: fs.existsSync(path.join(ROOT, 'ONBOARDING.md')) }));
+    return;
+  }
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 

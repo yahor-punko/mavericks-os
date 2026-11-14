@@ -326,6 +326,7 @@ if [[ "\${1-}" == "--help" ]]; then
   echo ""
   echo "Flags:"
   echo "  --agent          Print session context summary for the Main Agent"
+  echo "                       Usage: --agent [--brief] (--brief prints the operator-facing session brief text instead of JSON)"
   echo "  --watch          Dashboard watch mode (r = refresh, s = snapshot, q = quit)"
   echo "  --snapshot       Print a text snapshot of current project state"
   echo "  --emit-bundle    Print a task's context prefetch bundle to stdout (read-only)"

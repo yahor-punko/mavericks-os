@@ -97,7 +97,7 @@ The installer creates or copies (skipping files that already exist):
 | `BACKLOG.md`, `TASK_STATUS.md`, `PROCESS_STATE.md` | live state artifacts | mavericks templates |
 | `PROCESS_STATE.json` | machine-readable state | default |
 | `.claude/agents/*.md` | sub-agent definitions (developer, product-docs, technical-writer, qa, ux, frontend-design, …) | copied from mavericks |
-| `.claude/skills/*/SKILL.md` | user-invocable skills (session-start, validate, frontend-design, …) | copied from mavericks |
+| `.claude/skills/*/SKILL.md` | user-invocable skills (session-start, validate, spawn-brief, frontend-design, …) | copied from mavericks |
 | `.claude/rules/*.md` | Claude Code rules for this project; framework-owned files are re-copied by `--update`, but `.claude/rules/project-*.md` is **adopter-owned** — install and `--update` never write or delete it (put always-loaded project rules there) | copied from mavericks |
 | `docs/ARCHITECTURE.md` | architecture document template (fill in at project start) | copied from mavericks |
 | `.claude/settings.local.json` | seeds `effortLevel: "high"`, `alwaysThinkingEnabled: true`, and `fallbackModel: ["opus"]` (default-ceiling reasoning + opus safety net) | generated |

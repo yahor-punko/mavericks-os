@@ -20,7 +20,7 @@ Base floor: [target repo's base-branch head hash at spawn time — REQUIRED for 
 Model: [opus | sonnet]     # optional — only include when escalating a worker away from its sonnet default; see "Model selection" below
 Effort: [medium | high | xhigh | max]   # optional — only include when deviating from the session default; see "Effort selection" below
 Turn budget: [role's maxTurns from the "Per-role maxTurns table" below]   # optional override/retry channel — most roles now self-state their budget (see "Budget awareness" below); fill this on a retry after a cap-hit, or when deviating from the role's own stated number; see "Turn budget selection" below
-Test scope: [worktree developer only — seed a `node scripts/run-tests.js --filter <fragment>` baseline; the developer extends it with its own test files and grep-derived coverage and reports the delta; marked corpus-wide guard tests run automatically with any `--filter` and must not be seeded; never instruct the full suite in a worktree — see docs/core/ORCHESTRATION_RULES.md — "Test-execution scope (worktree developers)"]
+Test scope: [worktree developer only — seed a `node scripts/run-tests.js --filter <fragment>` baseline; the developer extends it with its own test files and grep-derived coverage and reports the delta; marked corpus-wide guard tests run automatically with any `--filter` and must not be seeded; never instruct the full suite in a worktree — see docs/core/ORCHESTRATION_RULES.md — "Test-execution scope (worktree developers)"; on a requires_ux surface round write the literal `deferred (surface round)` instead of a seed — see docs/core/TASK_LIFECYCLE.md "Flow with UX review"]
 Scratch dir: [optional — set whenever the brief names scratch files or asks for probes, fuzzers or throwaway scripts: a per-task directory such as <session scratch root>/T-NNN/, never the shared session scratch root, which parallel sub-agents overwrite — see "Scratch dir" below]
 Frame set: [ux product-surface reviews only — path of the frame-set index taken at commit <hash>; see "Frame set" below]
 Reviewing as: [ux product-surface reviews only — who sees the screen and when]
@@ -46,7 +46,7 @@ One sentence describing the outcome. No implementation details — those belong 
 Absolute path to the target repository. **Omit for same-repo (mavericks) tasks.** Only include when the task modifies a different repository. Developer agents use CWD (worktree root) by default.
 
 ### Context prefetch bundle — inject content, never reference the path
-The context prefetch bundle (see CLAUDE.md — "Context prefetch bundle") is a **Main-Agent-only** brief-composition input. Retrieve it with `./scripts/mavp-operator --emit-bundle T-NNN` and paste the relevant CONTENT directly into the brief text. `.mavp/context/` is gitignored and does not exist inside a worktree checkout, so a brief must never instruct a worktree sub-agent to read a `.mavp/context/T-NNN.md` path — that read will silently fail.
+The context prefetch bundle (see .claude/rules/backlog.md — "Context prefetch bundle") is a **Main-Agent-only** brief-composition input. Retrieve it with `./scripts/mavp-operator --emit-bundle T-NNN` and paste the relevant CONTENT directly into the brief text. `.mavp/context/` is gitignored and does not exist inside a worktree checkout, so a brief must never instruct a worktree sub-agent to read a `.mavp/context/T-NNN.md` path — that read will silently fail.
 
 ### Module
 Optional. Module ID from `docs/MODULES.md`. When provided, the sub-agent should load the module's `context_docs` before starting. The `--agent` JSON includes this field for each in-flight task.
@@ -130,7 +130,7 @@ A complete task entry example with all optional fields:
 
 ## Report completion token
 
-This section is the **single source of truth** for the sub-agent report completion-token contract. `CLAUDE.md`'s sub-agent brief template and every role spec under `.claude/agents/` reference this section rather than re-defining the grammar.
+This section is the **single source of truth** for the sub-agent report completion-token contract. The spawn-brief skill (`.claude/skills/spawn-brief/SKILL.md`, which holds the sub-agent brief template) and every role spec under `.claude/agents/` reference this section rather than re-defining the grammar.
 
 **The contract:** every sub-agent's final report must end with a literal last line — the completion token — in this exact grammar, with no other text following it:
 
@@ -195,7 +195,7 @@ All worker roles (developer, qa, ux, product-docs, technical-writer, security-re
 | Novel / non-boilerplate logic | New algorithm, non-templated business logic, first-of-its-kind integration | `opus` |
 | High risk / blast radius | Change can affect production data, billing, auth, or many downstream consumers | `opus` |
 | Cross-cutting change | Touches shared libraries, conventions, or contracts used by multiple modules/repos | `opus` |
-| Full (non-checklist) security review | `security-reviewer` performing a full review (see CLAUDE.md — Security review) rather than a lightweight self-checklist | `opus` |
+| Full (non-checklist) security review | `security-reviewer` performing a full review (see .claude/rules/backlog.md — Security review) rather than a lightweight self-checklist | `opus` |
 | Whole-surface consistency review | `ux` reviewing every screen × state × width of a frame set for cross-screen consistency | `opus` |
 | None of the above | Mechanical edits, boilerplate, well-understood single-file changes, checklist-style reviews | `sonnet` (default — no override needed) |
 

@@ -2396,7 +2396,7 @@ const T533_EXPECTED_ERROR_LINE_ONE =
 //     rule is codified IN the file, so a forger has everything the test has.
 //     Test 41's CODE is unchanged (still recomputes floor_rule over the
 //     recorded observed counts and deep-equals the committed floor map for
-//     all 18 keys, still catches a changed fraction, a perturbed floor, or an
+//     all 19 keys, still catches a changed fraction, a perturbed floor, or an
 //     added/removed key) — what changes is the CLAIM: it is a drift invariant
 //     that the committed floors still match what the codified algorithm
 //     computes from the recorded observations, i.e. it catches a SLOPPY
@@ -2554,7 +2554,7 @@ const T533_EXPECTED_ERROR_LINE_ONE =
   // fails here too.
   const t540RaisedFloors = [
     { dir: '.claude', floor: 2, was: 1, why: 'observed 3, small-directory term: max(floor(3*0.6)=1, 3-1=2, 0) = 2' },
-    { dir: '.claude/rules', floor: 3, was: 1, why: 'observed 3, location-semantic term: max(floor(3*0.6)=1, 3-1=2, 3) = 3' },
+    { dir: '.claude/rules', floor: 6, was: 1, why: 'observed 6, location-semantic term: max(floor(6*0.6)=3, 0, 6) = 6' },
     { dir: '.claude/agents', floor: 11, was: 6, why: 'observed 11, location-semantic term: max(floor(11*0.6)=6, 0, 11) = 11' },
   ];
   for (const { dir, floor, was, why } of t540RaisedFloors) {
@@ -2761,7 +2761,7 @@ const T533_EXPECTED_ERROR_LINE_ONE =
       );
     }
 
-    console.log(`Test 39 passed: criterion 2 — nine enforcement files (2 of 3 rules, 5 of ${agentsCount} agent specs, 2 of 3 top-level bucket files) still pass every per-run tier at exit 0 with no ledger (T-541 round 3: loud stand-down against the real full clone anchor, never silent), and are refused by the raised floors with all three directories reporting their own DERIVED (live count minus fixed drop) violation line and a growth guard; the untouched ship set passes with the agents bucket at count >= floor === ${T533_REAL_FLOORS['.claude/agents']} (observed ${agentsCount})`);
+    console.log(`Test 39 passed: criterion 2 — nine enforcement files (2 of ${directChildrenOf('.claude/rules').length} rules, 5 of ${agentsCount} agent specs, 2 of 3 top-level bucket files) still pass every per-run tier at exit 0 with no ledger (T-541 round 3: loud stand-down against the real full clone anchor, never silent), and are refused by the raised floors with all three directories reporting their own DERIVED (live count minus fixed drop) violation line and a growth guard; the untouched ship set passes with the agents bucket at count >= floor === ${T533_REAL_FLOORS['.claude/agents']} (observed ${agentsCount})`);
   }
 }
 
@@ -2956,7 +2956,7 @@ const T533_EXPECTED_ERROR_LINE_ONE =
   const realFloorRelaxations = T533_REAL_CONTRACT.floor_relaxations || {};
 
   // THE INVARIANT: fold(recompute, floor_relaxations) deep-equals the
-  // committed floor map for ALL 18 keys — which gives key-set equality for
+  // committed floor map for ALL 19 keys — which gives key-set equality for
   // free, since deepStrictEqual fails outright on an extra or missing key on
   // either side. The real committed ledger declares no relaxations today, so
   // fold is the identity here and this is the pinned control: unchanged
@@ -2966,12 +2966,12 @@ const T533_EXPECTED_ERROR_LINE_ONE =
     folded, T533_REAL_FLOORS,
     "Test 41 FAIL: recomputing the ledger's own codified floor_rule over the RECORDED observed counts and " +
     'the recorded fraction, folded with any declared floor_relaxations, must deep-equal the committed floor ' +
-    'map for all 18 keys — a mismatch means the committed floors have drifted from the algorithm that is ' +
+    'map for all 19 keys — a mismatch means the committed floors have drifted from the algorithm that is ' +
     'supposed to have produced them (or from a declared relaxation)'
   );
   assert.strictEqual(
-    Object.keys(T533_REAL_FLOORS).length, 18,
-    'Test 41 FAIL: the committed floor map must declare exactly 18 keys for this invariant to mean anything'
+    Object.keys(T533_REAL_FLOORS).length, 19,
+    'Test 41 FAIL: the committed floor map must declare exactly 19 keys for this invariant to mean anything'
   );
   assert.deepStrictEqual(
     validateFloorRelaxations(realFloorRelaxations, T533_REAL_FLOORS, recomputed), [],
@@ -3161,7 +3161,7 @@ const T533_EXPECTED_ERROR_LINE_ONE =
     "Test 41 passed: DRIFT INVARIANT (T-541 round 2 rescope) — recomputing the ledger's own codified " +
     "floor_rule (base fraction, small-directory term, location-semantic term via the overlay's own exported " +
     'isLocationSemantic(), max, clamp to 1) over the RECORDED observed counts and the recorded fraction, ' +
-    'FOLDED WITH ANY DECLARED floor_relaxations (T-545), deep-equals the committed floor map for all 18 keys ' +
+    'FOLDED WITH ANY DECLARED floor_relaxations (T-545), deep-equals the committed floor map for all 19 keys ' +
     '(key-set equality included for free); changing the fraction, perturbing any single floor by one, and ' +
     'adding or removing any key each break the deep-equal — this catches a SLOPPY re-seed, never a coherent ' +
     'forgery that edits observed counts and floors together (Test 42 owns that); ' +
@@ -4162,14 +4162,14 @@ const t541DatedNoteOf = (stderr) =>
   }
 
   // CASE C — the REAL committed ledger satisfies COHERENT today: every
-  // declared floor key has a matching observed key (18 keys = 18 keys).
+  // declared floor key has a matching observed key (19 keys = 19 keys).
   {
     const incoherent = t549FindIncoherentFloorKeys(T533_REAL_FLOORS, T533_REAL_CONTRACT.derivation.observed_direct_file_counts_at_seeding);
     assert.deepStrictEqual(incoherent, [], `Test 49 FAIL (case C): the real committed ledger must be COHERENT (no floor without a matching observed key), got: ${JSON.stringify(incoherent)}`);
-    assert.strictEqual(Object.keys(T533_REAL_FLOORS).length, 18, 'Test 49 FAIL (case C): expected 18 declared floor keys');
+    assert.strictEqual(Object.keys(T533_REAL_FLOORS).length, 19, 'Test 49 FAIL (case C): expected 19 declared floor keys');
     assert.strictEqual(
-      Object.keys(T533_REAL_CONTRACT.derivation.observed_direct_file_counts_at_seeding).length, 18,
-      'Test 49 FAIL (case C): expected 18 declared observed keys'
+      Object.keys(T533_REAL_CONTRACT.derivation.observed_direct_file_counts_at_seeding).length, 19,
+      'Test 49 FAIL (case C): expected 19 declared observed keys'
     );
   }
 
@@ -4178,7 +4178,7 @@ const t541DatedNoteOf = (stderr) =>
     'key deleted, floor kept lowered, live tree drained below the previously published floor) refuses before any ' +
     'write even though the ordinary floor check passes, naming the incoherent directory; whole-directory retirement ' +
     '(floor AND observation removed together) still passes loudly with both the removal and weakening lines; the ' +
-    'real committed ledger satisfies COHERENT today (18 keys = 18 keys)'
+    'real committed ledger satisfies COHERENT today (19 keys = 19 keys)'
   );
 }
 

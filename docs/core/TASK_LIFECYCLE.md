@@ -48,9 +48,22 @@ planned → in_progress → dev_done → ux_review → ux_passed → ready_for_q
                                    ↑                                                          │
                                    └──── ux_review (again, when a fix changed the surface) ←─┘
                                                                               (needs_fix → ux_review)
+          ux_passed → [operator screen pass, if needed] → [final verification pass] → ready_for_qa
 ```
 
 On a `requires_ux` task, every fix round that changes the visible surface — after `ux_needs_fix`, after `needs_fix`, or after an operator finding — re-enters `ux_review` on a regenerated frame set before `ready_for_qa`. No mechanical check enforces this: status history is not recorded in the artifacts, so the validator cannot tell that a `needs_fix` round happened between `ux_passed` and `ready_for_qa`. The rule rests on the Main Agent's routing.
+
+**Verification timing on a requires_ux task.** UX rounds are reviewed on frames. The full verification runs once, at the end.
+
+- A round is: edit, checkpoint commit, regenerated frame set, `ux_review`. During rounds there is no full runner, no red run or mutant, no plugin or end-to-end runner, no Main Agent baseline or control run and no QA spawn.
+- The per-round floor: every round runs the check that lets the surface render. The frame set with its layout-check result is the round's executed check.
+- A round whose diff changes behaviour no frame executes additionally gets one targeted run of the tests covering that logic, with no red run. Examples: input validation, persistence, permissions, data transformation, anything on the frame set's declared not-shown list. State the reason: frames over never-executed logic can be frames of the wrong state, and a late logic fix that changes the surface costs a further UX round.
+- The final verification pass happens once, after `ux_passed` and after the operator's screen pass where the task needs one, on the final commit. Order: the developer's complete evidence (full targeted scope, one red run per new or modified test with its green run taken in the same pass, every runner the criteria name), then integration, then QA per verification type.
+- The task stays `ux_passed` during the developer's part of the final pass. It moves to `ready_for_qa` only when that evidence exists on the final commit.
+- Finality: the Main Agent records `verified_at: <hash>` when booking `qa_passed`. Any later commit to the task's non-state files voids the pass. The pass is then repeated in full on the new final commit. A commit that changes the visible surface re-enters `ux_review` first.
+- The brief marker: a surface-round developer brief carries the literal `Test scope: deferred (surface round)`. The final-pass brief carries an ordinary Test scope seed and names the final verification pass in Goal. Without the marker nothing is deferred.
+- Scope: `requires_ux` tasks only. Every other task follows the lifecycle unchanged.
+- No mechanical check enforces the round rules. They rest on the Main Agent's routing and on the brief marker.
 
 ## Flow with security review (requires_security_review: true)
 
@@ -89,7 +102,7 @@ Security-reviewer sub-agent found issues. Task returns to developer with a concr
 Security-reviewer sub-agent reviewed the slice and found no issues. Transitions to `ready_for_qa` — security-reviewer does not accept its own work into `merged`.
 
 ### ready_for_qa
-Orchestrator (and UX if applicable) reviewed the slice and considers it coherent enough for QA.
+Orchestrator (and UX if applicable) reviewed the slice and considers it coherent enough for QA. On a `requires_ux` task this status is entered only after the final verification pass: the developer's complete evidence exists on the final commit (see "Flow with UX review").
 
 > **QA is a stage on the implementation task, not a separate backlog task.**
 > Anti-pattern: creating a standalone QA task (e.g. "T-155 — QA for T-153 and T-154") that validates sibling implementation tasks. This leaves the implementation tasks stuck at `dev_done` indefinitely, creating false "unresolved QA" signal in the backlog.
@@ -232,7 +245,7 @@ Each task in BACKLOG.md must declare a `verification_type`:
 
 **Visual QA rule:** a task with `verification_type: visual` must not receive `qa_passed` based on build success alone. The user must explicitly confirm: "I reviewed T-XXX — looks correct." Record this confirmation as evidence in TASK_STATUS.md before setting `qa_passed`.
 
-**Visual QA order:** on a `requires_ux` task, operator confirmation comes after `ux_passed` on the final frames and after `qa_passed`, never before either. An operator finding about a screen is handed to the ux role, which classifies it and sweeps the screen for the same class of defect; the orchestrator never authors the fix pack itself.
+**Visual QA order:** on a `requires_ux` task, operator confirmation comes after `ux_passed` on the final frames and before the final verification pass, never before `ux_passed`. It stands only while no later commit changes the visible surface; a surface-changing commit after it returns the task to `ux_review` and to the operator. On a `visual` task that confirmation remains what permits `qa_passed`, which is booked only after the final verification pass. An operator finding about a screen is handed to the ux role, which classifies it and sweeps the screen for the same class of defect; the orchestrator never authors the fix pack itself.
 
 **Runtime QA rule — behavioral assertion required:** acceptance criteria for a `verification_type: runtime` task MUST state a behavioral assertion: a known input and the expected observable output that input must produce. "Script executes without error" or "exit code 0" alone is a structural check and is not sufficient.
 
@@ -244,7 +257,7 @@ Each task in BACKLOG.md must declare a `verification_type`:
 - A task should not silently jump from development to merge if it entered QA. The QA path should remain visible in project artifacts.
 - UX review is skipped unless the task explicitly has `requires_ux: true` in the backlog.
 - UX sub-agent does not accept its own work — `ux_passed` transitions to `ready_for_qa`, not `merged`.
-- On a `requires_ux: true` task, a fix round that changes the visible surface (after `ux_needs_fix`, `needs_fix` or an operator finding) returns to `ux_review` on a regenerated frame set before `ready_for_qa`. Not mechanically enforced — status history is not recorded in the artifacts.
+- On a `requires_ux: true` task, a fix round that changes the visible surface (after `ux_needs_fix`, `needs_fix` or an operator finding) returns to `ux_review` on a regenerated frame set before `ready_for_qa`, and `ready_for_qa` is entered only after the final verification pass on the final commit (see "Flow with UX review"). Not mechanically enforced — status history is not recorded in the artifacts.
 - Security review is skipped unless the task explicitly has `requires_security_review: true` in the backlog.
 - Security-reviewer sub-agent does not accept its own work — `security_passed` transitions to `ready_for_qa`, not `merged`.
 - Sub-agents do not self-approve QA — `qa_passed` is set by the Main Agent after reviewing evidence.
@@ -260,6 +273,7 @@ Optional fields:
 - `branch: <branch-name>` — branch merged (e.g. `main`, `develop`)
 - `manual_changes: <description>` — any operations performed outside version control
 - `ux: <pass|needs_fix> [frames: <id>] [viewed: <n img>/<m txt>/<k unopened>]` — the ux review verdict, the frame set it was taken from, and how many frames the reviewer opened as image, read as text only, or left unopened. The validator's `ux_evidence_missing` warning fires when a requires-ux task at `ux_passed` or later has no `ux:` line; it judges the BACKLOG.md Active Wave only (archived waves are never judged) and never blocks.
+- `verified_at: <hash>` — the shared checkout's HEAD at which the final verification pass's last acceptance check ran (QA's run, or the Main Agent's own check on a task with no QA stage). Written by the Main Agent when booking `qa_passed`. Optional on any task, owed on a `requires_ux` task. Never written behind the `commit` key. The validator warns with `evidence_not_on_final_commit` when a `qa_passed` or terminal task's own commit is not contained in the verified hash (and differs from it in more than the live-state files), for Active tasks records only, and never blocks: the warning leaves the exit code at 1 at worst, and an unresolvable hash is info only.
 
 For cross-repo tasks (declared with `- **Repos:** repo-a, repo-b`):
 - One evidence line per repo: `commit: <hash-a> (repo-a)` and `commit: <hash-b> (repo-b)` (the first token inside the parentheses is the repo name; further tokens such as a branch may follow, e.g. `(repo-b main)`)

@@ -27,6 +27,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
 const {
   computeDueRechecks,
   recheckRef,
@@ -58,6 +59,7 @@ const {
   parseModuleRegistry,
   parseModuleRegistryFromText,
   readFileAtRevision,
+  MUST_READ_EXCLUDED_PATHS,
 } = require('./mavp-operator-lib');
 
 /**
@@ -410,6 +412,7 @@ function getSeverityForCheck(checkName) {
     blocked_by_open: 'failure',
     blocked_by_unresolvable: 'info',
     commit_unreachable: 'warning',
+    evidence_not_on_final_commit: 'warning',
     cross_section_terminal_status_disagreement: 'failure',
     non_terminal_status_in_completed_section: 'warning',
     missing_task_status_record_anywhere: 'warning',
@@ -2303,6 +2306,180 @@ function checkCommitReachable({ activeRecords, recentlyCompletedRecords, root, r
 }
 
 /**
+ * (T-882) Read every `verified_at: <hash>` token from an Evidence field. The
+ * key is matched anywhere in the field text (whole field, any position),
+ * case-insensitively, and only when not preceded by a word character, so
+ * `stale_verified: true` can never match. The hash must be 7 to 40 hex
+ * characters ending on a word boundary. Returns lowercased hashes in order of
+ * appearance; [] for null/empty evidence. Pure — no I/O.
+ */
+function extractVerifiedAtHashes(evidence) {
+  if (!evidence) return [];
+  const TOKEN_PATTERN = /(?<![A-Za-z0-9_])verified_at:\s*([0-9a-f]{7,40})\b/gi;
+  const hashes = [];
+  let match;
+  while ((match = TOKEN_PATTERN.exec(evidence)) !== null) {
+    hashes.push(match[1].toLowerCase());
+  }
+  return hashes;
+}
+
+// (T-882) Run one git command in `root` without a shell. Returns
+// { status, stdout } where status is the process exit code (0 on success),
+// or null when git could not be spawned at all.
+function runGit(root, args) {
+  try {
+    const stdout = cp.execFileSync('git', args, {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return { status: 0, stdout };
+  } catch (error) {
+    return { status: typeof error.status === 'number' ? error.status : null, stdout: '' };
+  }
+}
+
+/**
+ * evidence_not_on_final_commit (T-882): warning when a task's own evidence
+ * commit landed AFTER its final verification pass. The Main Agent records the
+ * optional `verified_at: <hash>` token (the shared checkout's HEAD at which the
+ * final pass's last acceptance check ran) when booking qa_passed — see
+ * docs/core/TASK_LIFECYCLE.md "Evidence format". A later content commit to the
+ * task voids that pass.
+ *
+ * Containment, not equality: integration is by cherry-pick, so a worktree hash
+ * never equals the on-branch hash, and in a parallel wave QA runs at a later
+ * HEAD than the task's own commit. For each local evidence commit C there is no
+ * finding when some verified hash V equals C or has C as an ancestor
+ * (`git merge-base --is-ancestor C V`), or when the trees at V and C differ
+ * only in the live-state files of MUST_READ_EXCLUDED_PATHS (a state-only
+ * booking commit never voids a pass). Otherwise one warning-severity finding
+ * names the task, C and V.
+ *
+ * Scope: fed TASK_STATUS.md Active tasks records only; judged only at status
+ * qa_passed or a TERMINAL_TASK_STATUSES member, with at least one verified_at
+ * token and at least one local commit entry. Same repo skips as
+ * checkCommitReachable() (a record whose effective repo excludes the self repo,
+ * and an entry annotated with a known other repo, are skipped). A V that git
+ * cannot resolve yields an info-severity finding (exit code unchanged); a
+ * shallow clone or unavailable git yields no finding; absence of the token is
+ * never a finding. Never blocks.
+ *
+ * @param {object} options
+ * @param {Array} options.activeRecords - TASK_STATUS.md "## Active tasks" records.
+ * @param {string} options.root - Absolute path to the git working tree.
+ * @param {Object} [options.repoMap] - Pre-parsed repo map (test injection); defaults to parseRepoMap(root).
+ * @param {Map} [options.backlogAnySectionIndex] - see checkCommitReachable().
+ * @returns {Array} findings
+ */
+function checkEvidenceNotOnFinalCommit({ activeRecords, root, repoMap, backlogAnySectionIndex }) {
+  const resolvedRepoMap = repoMap || parseRepoMap(root);
+  const selfRepoId = resolveSelfRepoId(root, resolvedRepoMap);
+  const repoMapIdByLowerId = new Map(Object.keys(resolvedRepoMap || {}).map((id) => [id.toLowerCase(), id]));
+
+  // Collect candidates first so a repo with nothing to judge runs no git at all.
+  const candidates = [];
+  for (const record of activeRecords || []) {
+    if (record.status !== 'qa_passed' && !TERMINAL_TASK_STATUSES.has(record.status)) continue;
+
+    const effectiveRepo = resolveTaskStatusRecordRepo(record, backlogAnySectionIndex);
+    if (selfRepoId && effectiveRepo) {
+      const repoIds = effectiveRepo.split(',').map((r) => r.trim().toLowerCase()).filter(Boolean);
+      if (repoIds.length > 0 && !repoIds.includes(selfRepoId.toLowerCase())) continue; // cross-repo — skip
+    }
+
+    const evidence = getFieldMultiline(record.rawBlock, 'Evidence');
+    const verifiedHashes = [...new Set(extractVerifiedAtHashes(evidence))];
+    if (verifiedHashes.length === 0) continue;
+
+    const commitHashes = [];
+    for (const { hash, repoAnnotation } of extractCommitEntriesFromEvidence(evidence)) {
+      if (repoAnnotation) {
+        const resolvedId = resolveAnnotationRepoId(repoAnnotation, repoMapIdByLowerId);
+        if (resolvedId && (!selfRepoId || resolvedId.toLowerCase() !== selfRepoId.toLowerCase())) continue; // known other repo
+      }
+      if (!commitHashes.includes(hash)) commitHashes.push(hash);
+    }
+    if (commitHashes.length === 0) continue;
+
+    candidates.push({ record, verifiedHashes, commitHashes });
+  }
+  if (candidates.length === 0) return [];
+
+  // git unavailable (or not a work tree) — degrade silently.
+  const inside = runGit(root, ['rev-parse', '--is-inside-work-tree']);
+  if (inside.status !== 0 || inside.stdout.trim() !== 'true') return [];
+  // Shallow clone — history outside the fetched window is unknowable, so
+  // containment cannot be judged soundly; stand down with no finding.
+  if (isShallowRepository(root)) return [];
+
+  const resolveCommit = (hash) => {
+    const result = runGit(root, ['rev-parse', '--verify', '--quiet', `${hash}^{commit}`]);
+    return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : null;
+  };
+
+  const stateOnlyPaths = new Set(MUST_READ_EXCLUDED_PATHS);
+  const differsOnlyInStateFiles = (a, b) => {
+    const diff = runGit(root, ['diff', '--name-only', '-z', a, b]);
+    if (diff.status !== 0) return false;
+    const names = diff.stdout.split('\0').filter(Boolean);
+    return names.every((name) => stateOnlyPaths.has(name));
+  };
+
+  const findings = [];
+  for (const { record, verifiedHashes, commitHashes } of candidates) {
+    const resolvedVerified = [];
+    for (const verified of verifiedHashes) {
+      const full = resolveCommit(verified);
+      if (full) {
+        resolvedVerified.push({ token: verified, full });
+      } else {
+        findings.push(
+          createFinding({
+            checkName: 'evidence_not_on_final_commit',
+            severity: 'info',
+            taskId: record.taskId,
+            message: `${record.taskId} is ${record.status} with verified_at: ${verified} but git cannot resolve that hash in this repository — the final-verification pass cannot be compared with the task's commit`,
+            repairTarget: 'TASK_STATUS.md',
+            suggestedAction: 'Check the verified_at hash for a typo, or confirm it is a commit of this repository; a hash that lives in another repository\'s history cannot be judged here. Informational only — never changes the exit code.',
+          })
+        );
+      }
+    }
+    if (resolvedVerified.length === 0) continue;
+
+    for (const commit of commitHashes) {
+      const fullCommit = resolveCommit(commit);
+      if (!fullCommit) continue; // an unresolvable commit entry is commit_unreachable's business
+
+      const contained = resolvedVerified.some(({ full }) => {
+        const ancestry = runGit(root, ['merge-base', '--is-ancestor', fullCommit, full]);
+        if (ancestry.status === 0) return true; // C equals V or is an ancestor of V
+        if (ancestry.status !== 1) return true; // git error — stand down rather than guess
+        return differsOnlyInStateFiles(full, fullCommit);
+      });
+      if (contained) continue;
+
+      const verifiedList = resolvedVerified.map(({ token }) => token).join(', ');
+      findings.push(
+        createFinding({
+          checkName: 'evidence_not_on_final_commit',
+          severity: 'warning',
+          taskId: record.taskId,
+          message: `${record.taskId} is ${record.status} with evidence commit: ${commit} that is not contained in the final verification pass (verified_at: ${verifiedList}) — a later commit may have voided the pass`,
+          repairTarget: 'TASK_STATUS.md',
+          suggestedAction: 'Repeat the final verification pass on the final commit and update the verified_at token, or correct the commit entry if it names a later commit than the task\'s own.',
+        })
+      );
+    }
+  }
+
+  return findings;
+}
+
+/**
  * overdue_rechecks: overdue recheck advisory.
  * Reads rechecks[] from PROCESS_STATE.json and computes which entries are
  * overdue (due date is strictly before today). Emits one info-severity finding
@@ -3269,6 +3446,20 @@ const CHECKS = [
         backlogAnySectionIndex: createTaskRecordIndex(ctx.backlogAllTasksAnySection),
       }),
   },
+  // evidence_not_on_final_commit advisory (T-882): warning for an Active-tasks
+  // qa_passed/terminal record whose evidence commit is not contained in its
+  // verified_at: final-verification hash (and differs from it in more than the
+  // live-state files); info when the verified_at hash cannot be resolved.
+  // Degrades silently on a shallow clone or when git is unavailable.
+  {
+    name: 'evidence_not_on_final_commit',
+    run: (ctx) =>
+      checkEvidenceNotOnFinalCommit({
+        activeRecords: ctx.taskStatusRecords,
+        root: ctx.root,
+        backlogAnySectionIndex: createTaskRecordIndex(ctx.backlogAllTasksAnySection),
+      }),
+  },
   // cross-section terminal-status disagreement (T-543, failure): a BACKLOG
   // task terminal (merged/deployed_dev/deployed_prod) in ANY section whose
   // TASK_STATUS record in ANY section still carries a non-terminal status —
@@ -3575,6 +3766,7 @@ module.exports = {
   BLOCKED_BY_OPEN_CHECK: 'blocked_by_open',
   BLOCKED_BY_UNRESOLVABLE_CHECK: 'blocked_by_unresolvable',
   COMMIT_UNREACHABLE_CHECK: 'commit_unreachable',
+  EVIDENCE_NOT_ON_FINAL_COMMIT_CHECK: 'evidence_not_on_final_commit',
   DEFAULT_ARTIFACT_BUDGETS,
   checkContextSizeBudget,
   checkDocLimitRatchet,
@@ -3593,6 +3785,8 @@ module.exports = {
   applyHoldDowngrade,
   recomputeComparisonAggregates,
   checkCommitReachable,
+  checkEvidenceNotOnFinalCommit,
+  extractVerifiedAtHashes,
   resolveTaskStatusRecordRepo,
   extractCommitHashesFromEvidence,
   extractCommitEntriesFromEvidence,

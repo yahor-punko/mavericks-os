@@ -47,7 +47,10 @@ const assert = require('node:assert');
 const REPO_ROOT = path.join(__dirname, '..');
 const AGENTS_DIR = path.join(REPO_ROOT, '.claude', 'agents');
 const AGENT_SPEC_PATH = path.join(REPO_ROOT, 'docs', 'AGENT_SPEC.md');
-const CLAUDE_MD_PATH = path.join(REPO_ROOT, 'CLAUDE.md');
+// T-889: the brief template moved out of CLAUDE.md into the spawn-brief skill,
+// so the parity check reads the skill file. CLAUDE.md keeps only a stub.
+const SPAWN_BRIEF_SKILL_PATH = path.join(REPO_ROOT, '.claude', 'skills', 'spawn-brief', 'SKILL.md');
+const SPAWN_BRIEF_LABEL = '.claude/skills/spawn-brief/SKILL.md';
 
 const TEMPLATE_HEADING = '## Sub-agent brief template';
 const COMPLETION_TOKEN_MARKER = 'MAVP_REPORT';
@@ -57,8 +60,12 @@ const COMPLETION_TOKEN_MARKER = 'MAVP_REPORT';
 // its field-name set (line-initial "Name:" prefixes), and check its
 // "Before exiting" line references the completion-token marker.
 //
+// T-889: the "primary" copy is now .claude/skills/spawn-brief/SKILL.md (the
+// template left CLAUDE.md); the variable names below keep "claude" as a
+// historical prefix for that primary copy.
+//
 // T-623: docs/AGENT_SPEC.md's copy of the brief template had silently
-// drifted from CLAUDE.md's — missing five fields (Adjacent docs read, Read
+// drifted from the primary copy's — missing five fields (Adjacent docs read, Read
 // current main, Model, Effort, Turn budget) and a degraded "Before exiting"
 // line with no completion-token wording. Nothing previously asserted the two
 // templates stay in field-name parity; this guards that going forward.
@@ -102,7 +109,7 @@ function findBeforeExitingLine(fenceBlock) {
 function checkTemplateParity(claudeMdText, agentSpecText) {
   const failures = [];
 
-  const claudeFence = extractTemplateFence(claudeMdText, 'CLAUDE.md');
+  const claudeFence = extractTemplateFence(claudeMdText, SPAWN_BRIEF_LABEL);
   const specFence = extractTemplateFence(agentSpecText, 'docs/AGENT_SPEC.md');
 
   const claudeFields = new Set(extractTemplateFieldNames(claudeFence));
@@ -110,7 +117,7 @@ function checkTemplateParity(claudeMdText, agentSpecText) {
 
   assert.ok(
     claudeFields.size > 0,
-    'CLAUDE.md: parsed zero field names from the brief template fence'
+    `${SPAWN_BRIEF_LABEL}: parsed zero field names from the brief template fence`
   );
   assert.ok(
     specFields.size > 0,
@@ -122,14 +129,14 @@ function checkTemplateParity(claudeMdText, agentSpecText) {
 
   for (const field of missingFromSpec) {
     failures.push(
-      `[template-parity] field "${field}" is present in CLAUDE.md's brief ` +
+      `[template-parity] field "${field}" is present in ${SPAWN_BRIEF_LABEL}'s brief ` +
         `template but missing from docs/AGENT_SPEC.md's`
     );
   }
   for (const field of missingFromClaude) {
     failures.push(
       `[template-parity] field "${field}" is present in docs/AGENT_SPEC.md's ` +
-        `brief template but missing from CLAUDE.md's`
+        `brief template but missing from ${SPAWN_BRIEF_LABEL}'s`
     );
   }
 
@@ -138,7 +145,7 @@ function checkTemplateParity(claudeMdText, agentSpecText) {
 
   assert.ok(
     claudeBeforeExiting,
-    'CLAUDE.md: brief template has no "Before exiting:" line'
+    `${SPAWN_BRIEF_LABEL}: brief template has no "Before exiting:" line`
   );
   assert.ok(
     specBeforeExiting,
@@ -147,7 +154,7 @@ function checkTemplateParity(claudeMdText, agentSpecText) {
 
   if (!claudeBeforeExiting.includes(COMPLETION_TOKEN_MARKER)) {
     failures.push(
-      `[template-parity] CLAUDE.md's "Before exiting" line does not reference ` +
+      `[template-parity] ${SPAWN_BRIEF_LABEL}'s "Before exiting" line does not reference ` +
         `the completion-token marker ("${COMPLETION_TOKEN_MARKER}")`
     );
   }
@@ -400,8 +407,8 @@ function main() {
 
   const failures = [];
 
-  const claudeMdText = fs.readFileSync(CLAUDE_MD_PATH, 'utf8');
-  failures.push(...checkTemplateParity(claudeMdText, specText));
+  const spawnBriefText = fs.readFileSync(SPAWN_BRIEF_SKILL_PATH, 'utf8');
+  failures.push(...checkTemplateParity(spawnBriefText, specText));
 
   // T-753: no-frontmatter-hooks tripwire — runs across every agent spec.
   for (const spec of agentSpecs) {

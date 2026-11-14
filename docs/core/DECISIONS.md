@@ -668,3 +668,38 @@ Two adjacent conventions were tightened as part of closing this out. First, `CLA
 **Reopen trigger:** T-864 holds the deferred follow-ups: the blind-pass protocol, a `frames_command` that generates a frame set, and `ui_paths` that lets a check recognise a task reaching a rendered surface. Reopen this decision if a re-entry that should have happened is shown to have been skipped in more than one task, which would make the unenforced rule of adopted item 2 a candidate for a recorded signal.
 
 **Documented in:** `docs/core/DECISIONS.md` (this record); `docs/core/TASK_LIFECYCLE.md` — "Flow with UX review", "Transition rules", "Verification types" (Visual QA order) and "Evidence format"; `docs/ARCHITECT_OUTPUT.md` — the `requires_ux:` row; `.claude/agents/architect.md` — Rules; `docs/AGENT_SPEC.md` — the brief template and "Frame set"; `CLAUDE.md` — the brief template; `.claude/agents/ux.md` — "Product surfaces" (T-859); `CLAUDE.md` — the UX review convention (T-860).
+
+---
+
+## DR-021 — On a requires_ux task the UX rounds run on frames only and the full verification runs once on the final commit, after the operator's screen pass
+
+**Date:** 2026-11-14
+
+**Informed by:** adopter report wpadopter-015 (an orchestrator ran the full runner, mutants and control QA on every UX round of one visible-screen task, more than 17 full runs, none of the first round's evidence used at acceptance); DR-020 (the UX review on regenerated frames, the fix-round re-entry, and the Visual QA order this record amends).
+
+**Supersedes:** only the "and after `qa_passed`" clause of DR-020 adopted item 3. The rest of DR-020 stands unchanged.
+
+**Tasks:** T-881 (this record and the lifecycle, rule, role-spec and brief-template text), T-882, T-883, T-884.
+
+**Problem:** The framework text never said a UX round is reviewed on frames only. The developer spec owed the full evidence (runner, red runs with green restore) on every report, the lifecycle sent every surface-changing fix round through `dev_done` and `ux_review` again, and the Executed-check rule never stated that making no claim is compliant. An orchestrator therefore ran a baseline before every brief and a control run after every round. The Visual QA order also contradicted the Visual QA rule on a `visual` task: operator confirmation after `qa_passed` versus confirmation before it.
+
+**What was considered:**
+1. **Deferring all execution during rounds, including logic** — rejected. Frames over never-executed logic can be frames of the wrong state, and a late logic fix that changes the surface costs a further UX round. A round whose diff changes logic no frame executes gets one targeted run, with no red run.
+2. **A validator check that the verified commit equals the final commit (hash equality)** — rejected as the rule's enforcement. It is deferred to T-884 as a presence warning; the round rules themselves are not mechanically enforced.
+3. **A new lifecycle status for the final verification pass** — rejected. The task stays `ux_passed` during the developer's part and moves to `ready_for_qa` when the evidence exists on the final commit; no status is added.
+4. **Keeping the operator's screen pass after `qa_passed`** — rejected. A surface-changing fix after the operator pass would then reach `merged` verified against a surface the operator never saw. The operator pass moves before the final verification pass (operator decision, 2026-11-14).
+5. **A new brief field for the deferral** — rejected. The existing `Test scope:` line carries the literal marker `deferred (surface round)`; no field name is added or removed.
+
+**What was adopted:**
+1. A round is edit, checkpoint commit, regenerated frame set, `ux_review`. During rounds: no full runner, no red run or mutant, no plugin or end-to-end runner, no Main Agent baseline or control run, no QA spawn.
+2. The per-round floor: the check that lets the surface render, plus the frame set with its layout-check result; plus one targeted run for logic no frame executes.
+3. The final verification pass happens once, after `ux_passed` and after the operator's screen pass where the task needs one, on the final commit: the developer's complete evidence, then integration, then QA per verification type.
+4. The Main Agent records `verified_at: <hash>` when booking `qa_passed`; any later commit to the task's non-state files voids the pass, and a commit that changes the visible surface re-enters `ux_review` first.
+5. The operator's screen pass comes after `ux_passed` on the final frames and before the final verification pass; on a `visual` task it still permits `qa_passed`.
+6. The brief marker `Test scope: deferred (surface round)` on a surface-round developer brief; without it nothing is deferred. The Executed-check rule gains a paragraph stating that it constrains what is written, not when a runner runs.
+
+**Scope limit:** `requires_ux` tasks only; every other task follows the lifecycle unchanged. No new status, no new brief field, no script. No mechanical check enforces the round rules.
+
+**Reopen trigger:** T-884 holds the deferred presence-warning debt task. Reopen this decision if a task is shown to have been booked `qa_passed` on a commit that a later non-state commit had voided, in more than one task.
+
+**Documented in:** `docs/core/DECISIONS.md` (this record); `docs/core/TASK_LIFECYCLE.md` — "Flow with UX review", "ready_for_qa", "Verification types" (Visual QA order), "Transition rules" and "Evidence format"; `docs/core/ORCHESTRATION_RULES.md` — "Executed-check rule"; `.claude/agents/developer.md` — "Maximizing QA outcomes"; `docs/AGENT_SPEC.md` — the brief template's Test scope line.

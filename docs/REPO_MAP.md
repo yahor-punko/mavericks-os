@@ -27,7 +27,7 @@ Tasks may also declare `- **Blocked by:** <repo>/T-NNN` (comma-separated for mul
 validator's cross-repo blocked-by check resolves `<repo>` through this same registry — using
 the entry's `path` field to locate the blocker repo's working copy and read its
 `BACKLOG.md`/`TASK_STATUS.md` — then gates a `merged`/`qa_passed`/`ready_for_qa` task on the
-blocker task's status. See the **`Blocked by:` field** convention in `CLAUDE.md`.
+blocker task's status. See the **`Blocked by:` field** convention in `.claude/rules/backlog.md`.
 
 ---
 

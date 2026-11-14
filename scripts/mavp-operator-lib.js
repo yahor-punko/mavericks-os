@@ -6936,8 +6936,132 @@ function sanitizeForTerminal(text, max) {
   return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
 }
 
+/**
+ * T-888: render the operator-facing session brief from the `--agent` JSON object.
+ *
+ * Pure: no filesystem, clock, git or environment access, so the rules that used
+ * to live as prose in the session-start skill are unit-testable. Every line is
+ * emitted only when its source field is present. `firstRun` (true when the
+ * project's onboarding file is still present) enables the first-run goal prompt
+ * when `next_action` is null.
+ *
+ * @param {object} agentJson - the object `mavp-operator-agent.js` prints as JSON.
+ * @param {{firstRun?: boolean}} [opts]
+ * @returns {string} the brief text, newline-terminated.
+ */
+function renderSessionBrief(agentJson, opts) {
+  const a = agentJson && typeof agentJson === 'object' ? agentJson : {};
+  const firstRun = Boolean(opts && opts.firstRun);
+  const has = (v) => v !== undefined && v !== null && v !== '';
+  const nonEmptyArray = (v) => Array.isArray(v) && v.length > 0;
+  const out = [];
+
+  const session = has(a.wave_session) && Number(a.wave_session) !== 0 ? ` — Session ${a.wave_session}` : '';
+  out.push(`## Wave ${has(a.wave) ? a.wave : '(not recorded)'}${session}`);
+
+  if (has(a.permission_mode)) {
+    out.push(a.permission_mode_verified === true
+      ? `Permission mode: ${a.permission_mode} (verified this session)`
+      : `Permission mode: ${a.permission_mode} (declared — source: ${a.permission_mode_source}, not verified this session)`);
+  }
+  if (a.permission_mode_conflict && typeof a.permission_mode_conflict === 'object') {
+    out.push(`⚠ Permission mode conflict: project declares "${a.permission_mode_conflict.project}", user-global (~/.claude/settings.json) declares "${a.permission_mode_conflict.user_global}" — precedence between these is harness-owned; verify manually which one governed this session.`);
+  }
+  if (a.reporting_write_skipped && typeof a.reporting_write_skipped === 'object') {
+    const r = a.reporting_write_skipped;
+    out.push(`> [!NOTE] Reporting writes skipped: ${r.resolved_root} is a never-a-project root (${r.discriminator}) — PROCESS_STATE.md was not regenerated. Set MAVERICKS_ALLOW_NEVER_PROJECT_ROOT=1 only if that write is intended.`);
+  }
+  if (has(a.permission_mode) && a.permission_mode !== 'bypassPermissions') {
+    out.push('> [!TIP] Restore prompt-free operation');
+    out.push('> Set `permissions.defaultMode` to `bypassPermissions` in `.claude/settings.local.json` to remove interactive prompts.');
+  }
+  if (has(a.UPDATE_AVAILABLE)) {
+    out.push('> [!NOTE] Framework version');
+    out.push(`> ${a.UPDATE_AVAILABLE}`);
+  }
+
+  if (has(a.initiative)) out.push(`Initiative: ${a.initiative}`);
+  out.push(has(a.wave_goal)
+    ? `Wave goal: ${a.wave_goal}`
+    : 'Wave goal: not set — agree one with the operator and record it with --set-wave-goal');
+  if (has(a.wave_summary)) out.push(`Previous wave: ${a.wave_summary}`);
+  if (has(a.wave_strategy_note)) out.push(`Strategy note: ${a.wave_strategy_note}`);
+
+  if (has(a.blocker)) out.push(`⚠ Blocker: ${a.blocker} — stop and resolve it before other work`);
+  if (has(a.WARNING)) {
+    const d = a.WARNING_DETAIL && typeof a.WARNING_DETAIL === 'object'
+      ? ` (${a.WARNING_DETAIL.failures || 0} failure(s), ${a.WARNING_DETAIL.warnings || 0} warning(s) — per-task detail in ./scripts/mavp-operator --agent)`
+      : '';
+    out.push(`⚠ ${a.WARNING}${d}`);
+  }
+  if (has(a.deploy_warning)) out.push(`⚠ ${a.deploy_warning}`);
+
+  if (nonEmptyArray(a.due_rechecks)) {
+    out.push('> [!NOTE] Rechecks due');
+    for (const e of a.due_rechecks) {
+      const label = has(e.task)
+        ? `${e.task} — ${e.title}`
+        : (has(e.wave) && !/^Wave\s/.test(String(e.title || '')) ? `Wave ${e.wave} — ${e.title}` : `${e.title}`);
+      out.push(`> - ${label} (due: ${e.due})${e.overdue === true ? ' ⚠ OVERDUE' : ''}`);
+    }
+  }
+  if (has(a.intake_untriaged)) {
+    out.push(`> [!NOTE] Intake: ${a.intake_untriaged} untriaged adopter item(s) — run ./scripts/mavp-operator --intake`);
+  }
+  if (has(a.skill_proposals_unreviewed)) {
+    out.push(`> [!NOTE] Skill proposals: ${a.skill_proposals_unreviewed} awaiting a Decision in SKILL_PROPOSALS/ — review per docs/SKILL_OPTIMIZATION.md section 9`);
+  }
+  if (has(a.feedback_answers_unacked)) {
+    out.push(`Feedback answers: ${a.feedback_answers_unacked} — run ./scripts/mavp-operator --feedback --status`);
+  }
+
+  if (nonEmptyArray(a.must_read)) {
+    out.push('Must read:');
+    for (const p of a.must_read) out.push(`- ${p}`);
+  }
+  if (nonEmptyArray(a.must_read_oversized)) {
+    out.push('Oversized (search, do not read whole):');
+    for (const o of a.must_read_oversized) out.push(`- ${o.path} (${o.chars} chars)`);
+  }
+  if (nonEmptyArray(a.must_read_framework)) {
+    out.push('Framework-managed (changed by the last update, not yours to review):');
+    for (const p of a.must_read_framework) out.push(`- ${p}`);
+  }
+
+  if (firstRun && !has(a.next_action)) {
+    out.push('');
+    out.push('> What are you building? Tell me your goal and I can set it as this wave\'s goal, or just start describing the first thing you want built.');
+    return `${out.join('\n')}\n`;
+  }
+
+  const tasks = [
+    ...(Array.isArray(a.active_slices) ? a.active_slices : []),
+    ...(Array.isArray(a.planned_tasks) ? a.planned_tasks : []),
+  ];
+  // A blank line keeps the task list from reading as part of a preceding bullet list.
+  out.push('');
+  for (const t of tasks) out.push(`- ${t.id} (${t.status}) — ${t.title}`);
+  if (tasks.length > 0) out.push('');
+  if (has(a.next_action)) out.push(`Next action: ${a.next_action}`);
+  out.push('');
+
+  if (tasks.length > 0) {
+    out.push('> What would you like to do?');
+    out.push('> 1. Continue current wave — pick up next_action');
+    out.push('> 2. Park it and start new work');
+    out.push('> 3. Something else');
+  } else {
+    out.push('> Options:');
+    out.push('> 1. Register the next task — pick up next_action');
+    out.push(`> 2. Close wave ${has(a.wave) ? a.wave : '(current)'} — only on the operator's explicit statement this session; run --close-session first (it sweeps merged tasks out of Active tasks; --close-wave refuses while any remain), then --close-wave --operator-confirmed`);
+    out.push('> 3. Something else');
+  }
+  return `${out.join('\n')}\n`;
+}
+
 module.exports = {
   ROOT,
+  renderSessionBrief,
   computeShipsIn,
   countIntakeUntriaged,
   countUnreviewedSkillProposals,
