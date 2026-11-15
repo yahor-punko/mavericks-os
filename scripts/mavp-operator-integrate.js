@@ -37,6 +37,13 @@
  * `--task` is OPTIONAL — integrating a commit unrelated to any tracked task
  * never requires inventing a task id.
  *
+ * Every pick is made with `git cherry-pick -x` (T-899), so each landed commit
+ * carries one whole-line origin record, `(cherry picked from commit
+ * <full-hash>)`, naming the commit it came from. `--worktree-report` and
+ * `--prune-worktrees` read that record (classifyWorktrees() in
+ * mavp-operator-lib.js) to treat a worktree as integrated even when the pick's
+ * diff changed on the way in and patch-equivalence no longer matches it.
+ *
  * Writes NO state artifacts (BACKLOG.md / TASK_STATUS.md / PROCESS_STATE.*):
  * printing a suggested `--set-status` line (only when `--task` is given and
  * resolves to exactly one task block) is the entire extent of this command's
@@ -57,7 +64,8 @@
  * On conflict, exits non-zero and names the two recovery commands
  * (`git cherry-pick --abort` / `git cherry-pick --continue`) against the
  * resolved root — it never auto-aborts, leaving the conflicted state for a
- * human to resolve.
+ * human to resolve. It also says the origin record is already in the pending
+ * message and survives `--continue`; abort-and-reapply-by-hand loses it.
  */
 
 'use strict';
@@ -211,7 +219,16 @@ function main() {
   const landed = [];
   for (const commit of commits) {
     try {
-      runGit(['cherry-pick', commit], ROOT);
+      // -x appends the whole-line record `(cherry picked from commit <full-hash>)`
+      // to the landed commit's message. classifyWorktrees() reads that record
+      // to call a worktree integrated when the pick's diff changed on the way
+      // in (a resolved conflict, or drifted context) and `git cherry` can no
+      // longer match it by patch id. External invariant this relies on (git's
+      // behaviour, not ours): on a conflict git writes the origin line into the
+      // PENDING pick message before it stops, so `cherry-pick --continue` (and
+      // a plain `git commit --no-edit`) keeps it; `cherry-pick --abort` and
+      // re-applying by hand loses it.
+      runGit(['cherry-pick', '-x', commit], ROOT);
     } catch (err) {
       const stderr = (err.stderr || '').toString().trim();
       const stdout = (err.stdout || '').toString().trim();
@@ -222,6 +239,9 @@ function main() {
       console.error(`${YELLOW}Resolve the conflict, then run one of:${RESET}`);
       console.error(`  git -C "${ROOT}" cherry-pick --abort      # discard this pick`);
       console.error(`  git -C "${ROOT}" cherry-pick --continue   # after fixing conflicts and staging the result`);
+      console.error(
+        `${DIM}The origin record is already in the pending message and survives \`cherry-pick --continue\`; abort-and-reapply-by-hand loses it.${RESET}`
+      );
       if (landed.length > 0) {
         console.log('');
         console.log(`${GREEN}Landed before the conflict:${RESET}`);

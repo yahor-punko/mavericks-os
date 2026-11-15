@@ -982,4 +982,278 @@ function makeMasterDefaultWorktreeFixture() {
   cleanup(fx.tmp);
 }
 
-console.log('All T-559/T-633/T-710 assertions passed.');
+// ===========================================================================
+// T-899 — recorded-pick classification. `--integrate` lands each commit with
+// `cherry-pick -x`, so the landed commit carries a whole-line origin record;
+// classifyWorktrees() treats a clean worktree as integrated when EVERY commit
+// ahead of main that has no patch equivalent is named by such a record on a
+// commit reachable from main. Fixtures below never contain a literal hash:
+// every hash is produced at runtime. Fixture emails use a reserved domain and
+// every git init pins the branch.
+// ===========================================================================
+
+const INTEGRATE_SCRIPT = path.join(__dirname, 'mavp-operator-integrate.js');
+const ORIGIN_PREFIX = '(cherry picked from commit ';
+
+function runIntegrateCli(mainDir, argv) {
+  return spawnSync(process.execPath, [INTEGRATE_SCRIPT, ...argv], {
+    cwd: mainDir,
+    env: { ...process.env, MAVERICKS_PROJECT_ROOT: mainDir },
+    encoding: 'utf8',
+  });
+}
+
+/** A primary repo whose shared.txt has ten numbered lines; worktrees live as siblings under tmp. */
+function makePickFixture() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mavp-t899-fixture-'));
+  const mainDir = path.join(tmp, 'main');
+  fs.mkdirSync(mainDir);
+  git(['init', '-q', '-b', 'main'], mainDir);
+  git(['config', 'user.email', 'demo@example.invalid'], mainDir);
+  git(['config', 'user.name', 'Fixture User'], mainDir);
+  const lines = [];
+  for (let i = 1; i <= 10; i++) lines.push(`line ${i}`);
+  fs.writeFileSync(path.join(mainDir, 'shared.txt'), lines.join('\n') + '\n');
+  git(['add', 'shared.txt'], mainDir);
+  git(['commit', '-q', '-m', 'initial'], mainDir);
+  return { tmp, mainDir };
+}
+
+function addPickWorktree(fx, name) {
+  const dir = path.join(fx.tmp, name);
+  git(['worktree', 'add', '-q', '-b', `branch-${name}`, dir], fx.mainDir);
+  return { dir, branch: `branch-${name}` };
+}
+
+function editSharedLine(dir, lineNumber, text) {
+  const file = path.join(dir, 'shared.txt');
+  const lines = fs.readFileSync(file, 'utf8').split('\n');
+  lines[lineNumber - 1] = text;
+  fs.writeFileSync(file, lines.join('\n'));
+}
+
+function commitShared(dir, ...messages) {
+  const args = ['commit', '-q', '-a'];
+  for (const m of messages) args.push('-m', m);
+  git(args, dir);
+  return git(['rev-parse', 'HEAD'], dir).trim();
+}
+
+function entryFor(fx, branch, options) {
+  const entry = classifyWorktrees(fx.mainDir, { mainRef: 'main', ...options }).find((e) => e.branch === branch);
+  assert.ok(entry, `fixture error: no classified entry for ${branch}`);
+  return entry;
+}
+
+/** Worktree commit that conflicts with main, run through the real --integrate CLI, then resolved and concluded. */
+function buildConflictRecordedFixture() {
+  const fx = makePickFixture();
+  const wt = addPickWorktree(fx, 'conflict');
+  editSharedLine(wt.dir, 5, 'worktree five');
+  const wtHash = commitShared(wt.dir, 'work that will conflict');
+  editSharedLine(fx.mainDir, 5, 'main five');
+  commitShared(fx.mainDir, 'main edits the same line');
+
+  const pick = runIntegrateCli(fx.mainDir, [wtHash]);
+  assert.notStrictEqual(pick.status, 0, `fixture error: --integrate must exit non-zero on a conflict (stdout: ${pick.stdout})`);
+  editSharedLine(fx.mainDir, 5, 'main five and worktree five');
+  git(['add', 'shared.txt'], fx.mainDir);
+  execFileSync('git', ['cherry-pick', '--continue'], {
+    cwd: fx.mainDir,
+    env: { ...process.env, GIT_EDITOR: 'true' },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return { fx, wt, wtHash };
+}
+
+/** Worktree commit with a Co-Authored-By footer, picked cleanly after main edited a line two lines away. */
+function buildDriftedContextFixture(name) {
+  const fx = makePickFixture();
+  const wt = addPickWorktree(fx, name);
+  editSharedLine(wt.dir, 5, 'worktree five');
+  const wtHash = commitShared(wt.dir, 'work with a footer', 'Co-Authored-By: Fixture User <demo@example.invalid>');
+  editSharedLine(fx.mainDir, 3, 'main three');
+  commitShared(fx.mainDir, 'main edits a line two lines away');
+
+  const pick = runIntegrateCli(fx.mainDir, [wtHash]);
+  assert.strictEqual(pick.status, 0, `fixture error: --integrate must exit 0 (stdout: ${pick.stdout}\nstderr: ${pick.stderr})`);
+  return { fx, wt, wtHash };
+}
+
+/** The fixture invariant: git cherry cannot match the pick, yet the worktree reads recorded-pick. */
+function assertRecordedPickOnly(fx, wt, label) {
+  assert.strictEqual(
+    getPatchEquivalenceStatus(fx.mainDir, 'main', wt.branch),
+    'unintegrated',
+    `${label} FAIL: fixture invariant — patch-equivalence must NOT match this pick`
+  );
+  const entry = entryFor(fx, wt.branch);
+  assert.strictEqual(entry.classification, 'clean-and-integrated', `${label} FAIL: expected clean-and-integrated, got ${entry.classification}`);
+  assert.strictEqual(entry.integratedVia, 'recorded-pick', `${label} FAIL: expected integratedVia recorded-pick, got ${entry.integratedVia}`);
+  assert.strictEqual(entry.patchStatus, 'unintegrated', `${label} FAIL: patchStatus keeps its meaning (unintegrated)`);
+  return entry;
+}
+
+// Test 17 (T-899, criterion 5A) — conflict through --integrate, resolved and concluded.
+{
+  const { fx, wt } = buildConflictRecordedFixture();
+  const entry = assertRecordedPickOnly(fx, wt, 'Test 17');
+  assert.strictEqual(entry.prunable, false, 'Test 17 FAIL: a fresh directory is not prunable under the default window');
+  assert.strictEqual(
+    entryFor(fx, wt.branch, { mtimeThresholdMs: 0 }).prunable,
+    true,
+    'Test 17 FAIL: prunable with --mtime-threshold 0'
+  );
+
+  const report = runWorktreeReportCli(fx.mainDir, ['--mtime-threshold', '0']);
+  assert.strictEqual(report.status, 0, `Test 17 FAIL: --worktree-report exit (stderr: ${report.stderr})`);
+  assert.ok(/via=recorded-pick/.test(report.stdout), `Test 17 FAIL: expected a via=recorded-pick token (stdout: ${report.stdout})`);
+  assert.ok(
+    /patch-equivalence or recorded pick vs main/.test(report.stdout),
+    `Test 17 FAIL: report header must name both bases (stdout: ${report.stdout})`
+  );
+  const dry = runPruneCli(fx.mainDir, ['--mtime-threshold', '0']);
+  assert.ok(/patch-equivalence or recorded pick vs main/.test(dry.stdout), `Test 17 FAIL: prune header must name both bases (stdout: ${dry.stdout})`);
+  assert.ok(/DRY RUN — would remove 1 worktree/.test(dry.stdout), `Test 17 FAIL: dry run must list the recorded worktree (stdout: ${dry.stdout})`);
+  assert.strictEqual(
+    formatWorktreeHygieneAdvisory(classifyWorktrees(fx.mainDir, { mainRef: 'main' })),
+    'Worktree hygiene: 1 agent worktree(s) — 0 dirty, 0 unintegrated, 1 clean-and-integrated (0 prunable)',
+    'Test 17 FAIL: the advisory line keeps its exact format'
+  );
+
+  console.log('Test 17 passed: a conflict resolved via --integrate + cherry-pick --continue is clean-and-integrated via recorded-pick while patch-equivalence says unintegrated.');
+  cleanup(fx.tmp);
+}
+
+// Test 18 (T-899, criterion 5B) — Co-Authored-By footer, drifted context, clean pick.
+{
+  const { fx, wt } = buildDriftedContextFixture('footer');
+  const landed = git(['log', '-1', '--format=%B', 'main'], fx.mainDir).split('\n');
+  const footerIndex = landed.findIndex((l) => l.startsWith('Co-Authored-By: '));
+  assert.ok(footerIndex >= 0, 'Test 18 FAIL: fixture error — landed message must keep the footer');
+  assert.ok(landed.slice(footerIndex + 1).some((l) => l.startsWith(ORIGIN_PREFIX)), 'Test 18 FAIL: origin line must sit below the footer');
+  assertRecordedPickOnly(fx, wt, 'Test 18');
+
+  console.log('Test 18 passed: a footered commit picked cleanly onto drifted context is clean-and-integrated via recorded-pick.');
+  cleanup(fx.tmp);
+}
+
+// Test 19 (T-899, criterion 5C) — one more commit makes the worktree unintegrated; a real prune leaves it.
+{
+  const { fx, wt } = buildConflictRecordedFixture();
+  assertRecordedPickOnly(fx, wt, 'Test 19');
+
+  fs.writeFileSync(path.join(wt.dir, 'extra.txt'), 'later work\n');
+  git(['add', 'extra.txt'], wt.dir);
+  git(['commit', '-q', '-m', 'later work, never integrated'], wt.dir);
+
+  const entry = entryFor(fx, wt.branch, { mtimeThresholdMs: 0 });
+  assert.strictEqual(entry.classification, 'unintegrated', `Test 19 FAIL: expected unintegrated, got ${entry.classification}`);
+  assert.strictEqual(entry.integratedVia, null, 'Test 19 FAIL: integratedVia must be null for unintegrated');
+  assert.strictEqual(entry.prunable, false, 'Test 19 FAIL: must not be prunable');
+
+  const prune = runPruneCli(fx.mainDir, ['--yes', '--mtime-threshold', '0']);
+  assert.strictEqual(prune.status, 0, `Test 19 FAIL: prune exit (stdout: ${prune.stdout}\nstderr: ${prune.stderr})`);
+  assert.ok(fs.existsSync(wt.dir), 'Test 19 FAIL: a real prune must leave the worktree directory in place');
+  assert.ok(
+    git(['branch', '--list', wt.branch], fx.mainDir).trim().length > 0,
+    'Test 19 FAIL: a real prune must leave the branch in place'
+  );
+
+  console.log('Test 19 passed: a further unrecorded commit makes the worktree unintegrated, and --prune-worktrees --yes leaves its directory and branch.');
+  cleanup(fx.tmp);
+}
+
+// Test 20 (T-899, criterion 5D) — dirty keeps precedence over the recorded check.
+{
+  const { fx, wt } = buildDriftedContextFixture('dirty');
+  assertRecordedPickOnly(fx, wt, 'Test 20');
+
+  fs.appendFileSync(path.join(wt.dir, 'shared.txt'), 'uncommitted tracked change\n');
+  let entry = entryFor(fx, wt.branch, { mtimeThresholdMs: 0 });
+  assert.strictEqual(entry.classification, 'dirty', `Test 20 FAIL: modified tracked file must be dirty, got ${entry.classification}`);
+  assert.strictEqual(entry.integratedVia, null, 'Test 20 FAIL: dirty has no integratedVia');
+  assert.strictEqual(entry.prunable, false, 'Test 20 FAIL: dirty is never prunable');
+
+  git(['checkout', '--', 'shared.txt'], wt.dir);
+  assertRecordedPickOnly(fx, wt, 'Test 20 (restored)');
+
+  fs.writeFileSync(path.join(wt.dir, 'untracked.txt'), 'untracked\n');
+  entry = entryFor(fx, wt.branch, { mtimeThresholdMs: 0 });
+  assert.strictEqual(entry.classification, 'dirty', `Test 20 FAIL: untracked file must be dirty, got ${entry.classification}`);
+  assert.strictEqual(entry.integratedVia, null, 'Test 20 FAIL: dirty has no integratedVia');
+  assert.strictEqual(entry.prunable, false, 'Test 20 FAIL: dirty is never prunable');
+
+  console.log('Test 20 passed: an all-recorded worktree with a modified tracked file, or an untracked file, is dirty and never prunable.');
+  cleanup(fx.tmp);
+}
+
+// Test 21 (T-899, criterion 5E) — an origin line only on a branch unreachable from mainRef does not count.
+{
+  const fx = makePickFixture();
+  const wt = addPickWorktree(fx, 'offmain');
+  editSharedLine(wt.dir, 5, 'worktree five');
+  const wtHash = commitShared(wt.dir, 'never picked onto main');
+
+  const sideTip = git(
+    ['commit-tree', 'main^{tree}', '-p', 'main', '-m', 'side branch note', '-m', `${ORIGIN_PREFIX}${wtHash})`],
+    fx.mainDir
+  ).trim();
+  git(['branch', 'side-branch', sideTip], fx.mainDir);
+
+  let entry = entryFor(fx, wt.branch);
+  assert.strictEqual(entry.classification, 'unintegrated', `Test 21 FAIL: an origin line off mainRef must not count, got ${entry.classification}`);
+  assert.strictEqual(entry.integratedVia, null, 'Test 21 FAIL: integratedVia must be null');
+
+  // Control: the same whole line on a commit reachable from main does count.
+  git(['commit', '-q', '--allow-empty', '-m', 'recorded on main', '-m', `${ORIGIN_PREFIX}${wtHash})`], fx.mainDir);
+  entry = entryFor(fx, wt.branch);
+  assert.strictEqual(entry.integratedVia, 'recorded-pick', 'Test 21 FAIL: control — the same line on mainRef must count');
+
+  console.log('Test 21 passed: an origin line that exists only on a branch not reachable from mainRef leaves the worktree unintegrated.');
+  cleanup(fx.tmp);
+}
+
+// Test 22 (T-899, criterion 5F) — the phrase mid-line in prose, or an abbreviated hash, is not a record.
+{
+  const fx = makePickFixture();
+  const prose = addPickWorktree(fx, 'prose');
+  editSharedLine(prose.dir, 5, 'prose five');
+  const proseHash = commitShared(prose.dir, 'work named in prose');
+  const abbrev = addPickWorktree(fx, 'abbrev');
+  fs.writeFileSync(path.join(abbrev.dir, 'abbrev.txt'), 'abbrev work\n');
+  git(['add', 'abbrev.txt'], abbrev.dir);
+  git(['commit', '-q', '-m', 'work named by an abbreviation'], abbrev.dir);
+  const abbrevHash = git(['rev-parse', 'HEAD'], abbrev.dir).trim();
+
+  git(['commit', '-q', '--allow-empty', '-m', 'notes', '-m', `reviewed ${ORIGIN_PREFIX}${proseHash}) earlier today`], fx.mainDir);
+  git(['commit', '-q', '--allow-empty', '-m', 'notes two', '-m', `${ORIGIN_PREFIX}${abbrevHash.slice(0, 12)})`], fx.mainDir);
+
+  for (const [wt, label] of [[prose, 'mid-line prose'], [abbrev, 'abbreviated hash']]) {
+    const entry = entryFor(fx, wt.branch);
+    assert.strictEqual(entry.classification, 'unintegrated', `Test 22 FAIL: ${label} must not count, got ${entry.classification}`);
+    assert.strictEqual(entry.integratedVia, null, `Test 22 FAIL: ${label} must leave integratedVia null`);
+  }
+
+  console.log('Test 22 passed: a mid-line phrase and an abbreviated hash leave the worktree unintegrated.');
+  cleanup(fx.tmp);
+}
+
+// Test 23 (T-899, criterion 4) — integratedVia on the patch-equivalence fixtures: patch-equivalence for the
+// integrated worktree and for a worktree with no commits ahead, null for dirty and unintegrated.
+{
+  const fx = makeWorktreeFixture();
+  const empty = path.join(fx.tmp, 'agent-no-commits');
+  git(['worktree', 'add', '-q', '-b', 'worktree-agent-no-commits', empty], fx.mainDir);
+  const byBranch = new Map(classifyWorktrees(fx.mainDir, { mainRef: 'main' }).map((e) => [e.branch, e]));
+  assert.strictEqual(byBranch.get('worktree-agent-integrated').integratedVia, 'patch-equivalence', 'Test 23 FAIL: patch-equivalent pick');
+  assert.strictEqual(byBranch.get('worktree-agent-no-commits').integratedVia, 'patch-equivalence', 'Test 23 FAIL: no commits ahead counts as patch-equivalence');
+  assert.strictEqual(byBranch.get('worktree-agent-dirty').integratedVia, null, 'Test 23 FAIL: dirty is null');
+  assert.strictEqual(byBranch.get('worktree-agent-unintegrated').integratedVia, null, 'Test 23 FAIL: unintegrated is null');
+
+  console.log('Test 23 passed: integratedVia is patch-equivalence for patch-equivalent and no-commit worktrees, null for dirty and unintegrated.');
+  cleanup(fx.tmp);
+}
+
+console.log('All T-559/T-633/T-710/T-899 assertions passed.');

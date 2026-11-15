@@ -9,12 +9,20 @@
  *   - unintegrated           — clean, but carries commits with no
  *                              patch-equivalent commit reachable from main
  *   - clean-and-integrated   — clean, and every commit ahead of main (if any)
- *                              is patch-equivalent to a commit already in main
+ *                              is integrated on one of two bases (T-899):
+ *                              patch-equivalent to a commit already in main
+ *                              (`git cherry`), or named by a whole-line
+ *                              `(cherry picked from commit <full-hash>)` record
+ *                              on a commit reachable from main (the origin line
+ *                              `--integrate` writes with `cherry-pick -x`), the
+ *                              basis for a pick whose diff changed on the way in
  *
- * Classification uses PATCH-EQUIVALENCE (`git cherry`), never raw
- * reachability (`merge-base --is-ancestor` / `branch --merged`) — this
- * project integrates by cherry-pick, so a worktree tip is unreachable from
- * main by construction even after its work is fully integrated. See
+ * Classification uses PATCH-EQUIVALENCE (`git cherry`) plus the recorded pick
+ * origin, never raw reachability (`merge-base --is-ancestor` / `branch
+ * --merged`) — this project integrates by cherry-pick, so a worktree tip is
+ * unreachable from main by construction even after its work is fully
+ * integrated. Each entry prints a `via=` token naming its basis
+ * (`patch-equivalence`, `recorded-pick`, or `none`). See
  * classifyWorktrees()'s doc comment in mavp-operator-lib.js for the full
  * rationale; that single implementation is also what feeds the
  * `--close-session` worktree-hygiene advisory, so both surfaces can never
@@ -95,7 +103,7 @@ function main() {
   }
 
   printRepoIdentityHeader(ROOT);
-  console.log(`\n${BOLD}Worktree report${RESET} ${DIM}(patch-equivalence vs ${args.mainRef})${RESET}\n`);
+  console.log(`\n${BOLD}Worktree report${RESET} ${DIM}(patch-equivalence or recorded pick vs ${args.mainRef})${RESET}\n`);
 
   if (entries.length === 0) {
     console.log(`${DIM}No linked agent worktrees found.${RESET}`);
@@ -108,7 +116,7 @@ function main() {
     const age = e.ageMs != null ? relativeTime(new Date(Date.now() - e.ageMs).toISOString()) : 'unknown';
     console.log(`  ${color}${e.classification.padEnd(20)}${RESET} ${rel}  ${DIM}[${e.branch || e.head || '(detached)'}]${RESET}`);
     console.log(
-      `      ${DIM}dirty=${e.dirty} patch=${e.patchStatus} mtime-age=${age} prunable=${e.prunable}${RESET}`
+      `      ${DIM}dirty=${e.dirty} patch=${e.patchStatus} via=${e.integratedVia || 'none'} mtime-age=${age} prunable=${e.prunable}${RESET}`
     );
   }
 

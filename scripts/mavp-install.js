@@ -131,6 +131,7 @@ const { MAVERICKS_VERSION } = require('./mavp-version.js');
 const {
   HOOK_NAMES, CLAUDE_DIRS, SYNC_SCRIPTS, PROJECT_FILES, BASH_FILE,
   computeRetirableWorkarounds, listIntakeItems, resolveIntakeDir,
+  findClaudeMdOnDemandDuplicates,
 } = require('./mavp-operator-lib.js');
 
 const RESET = '\x1b[0m';
@@ -253,6 +254,61 @@ function countRetirableWorkarounds(targetDir) {
     return computeRetirableWorkarounds(items, MAVERICKS_VERSION).filter((c) => c.status === 'retire').length;
   } catch {
     return 0;
+  }
+}
+
+/**
+ * The single CLAUDE.md measurement of an --update (T-895, T-902): runs
+ * findClaudeMdOnDemandDuplicates() against the installer's own source root and
+ * returns its result, or null when there is nothing to report on (no CLAUDE.md, a
+ * framework source tree, a missing framework root, or any unexpected error). Both
+ * closing lines of the --update branch are formatted from this one result, so an
+ * update measures once. Read-only; CLAUDE.md is never edited.
+ */
+function measureClaudeMd(targetDir) {
+  try {
+    const dup = findClaudeMdOnDemandDuplicates(targetDir, { frameworkRoot: path.join(FRAMEWORK_DIR, '..') });
+    if (!dup || dup.skipped) return null;
+    return dup;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The one-line CLAUDE.md duplicate pointer (T-895), formatted from a measureClaudeMd()
+ * result: the line to print, or null when nothing is removable now. Returns a
+ * measurement-based line only — no CLAUDE.md text.
+ */
+function claudeMdDuplicatePointer(dup) {
+  if (!dup || !(dup.removable_now_chars > 0)) return null;
+  return `CLAUDE.md duplicates: ${dup.removable_now_chars} chars of CLAUDE.md already load on demand from the framework — run ./scripts/mavp-operator --check-sync`;
+}
+
+/**
+ * The one-line always-loaded context size (T-902), formatted from a measureClaudeMd()
+ * result: the target's always-loaded character count N (CLAUDE.md, recursive @ imports
+ * and unscoped rules) against the project's resolved validator budget B, read through
+ * the validator's own resolveArtifactBudgets() on the target's PROCESS_STATE.json. The
+ * line discloses a budget above the framework default (read from the validator's
+ * DEFAULT_ARTIFACT_BUDGETS, never restated here) and marks N above B. Numbers and fixed
+ * words only — no project text, no project file name. Null when there is no measurement.
+ */
+function layer0SizeLine(dup, targetDir) {
+  try {
+    if (!dup) return null;
+    // Lazy require: the validator is only needed for this one advisory line.
+    const { resolveArtifactBudgets, DEFAULT_ARTIFACT_BUDGETS } = require('./mavp-validator.js');
+    const frameworkDefault = DEFAULT_ARTIFACT_BUDGETS.always_loaded_max_chars;
+    const n = dup.always_loaded_chars;
+    let b = Number(resolveArtifactBudgets(path.join(targetDir, 'PROCESS_STATE.json')).always_loaded_max_chars);
+    if (!Number.isFinite(b)) b = frameworkDefault;
+    let line = `always-loaded context: ${n} chars against a budget of ${b}`;
+    if (b > frameworkDefault) line += ` (budget raised above the framework default of ${frameworkDefault})`;
+    if (n > b) line += ' — over budget, run ./scripts/mavp-operator --validate';
+    return line;
+  } catch {
+    return null;
   }
 }
 
@@ -1803,6 +1859,20 @@ async function main() {
     const retirableCount = countRetirableWorkarounds(targetDir);
     if (retirableCount > 0) {
       console.log(`workaround retirement: ${retirableCount} tagged workaround(s) now fixed in the installed version — run ./scripts/mavp-operator --migrate`);
+    }
+    // CLAUDE.md duplicate pointer (T-895): never on self-install; silent unless the
+    // count of chars removable now is above 0. Read-only — CLAUDE.md is never edited.
+    const claudeMeasurement = selfInstall ? null : measureClaudeMd(targetDir);
+    const claudeDupLine = claudeMdDuplicatePointer(claudeMeasurement);
+    if (claudeDupLine) {
+      console.log(claudeDupLine);
+    }
+    // Always-loaded context size (T-902): one line on every update of a project with a
+    // CLAUDE.md, formatted from the same single measurement; silent on self-install, a
+    // framework source tree and a project without CLAUDE.md. Read-only.
+    const layer0Line = layer0SizeLine(claudeMeasurement, targetDir);
+    if (layer0Line) {
+      console.log(layer0Line);
     }
     return;
   }

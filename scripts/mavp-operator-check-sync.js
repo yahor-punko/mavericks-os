@@ -6,6 +6,12 @@
  * Compares key mavericks files (agent specs, skills) in known bootstrapped
  * projects against the mavericks source installation.
  *
+ * Framework root (T-894): the checkout this script lives in, unless
+ * MAVERICKS_PROJECT_ROOT names a framework source tree (one holding
+ * scripts/mavp-operator-lib.js). An adopter wrapper exports that variable as
+ * the ADOPTER project root, so a root without the lib file is treated as a
+ * project to check (listed first), never as the framework.
+ *
  * Project discovery order:
  *   1. MAVERICKS_PROJECTS env var — colon-separated absolute paths
  *   2. A projects list file at $MAVERICKS_PROJECT_ROOT/PROJECTS (one path per line)
@@ -23,8 +29,25 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 
 const { composePostToolUseHookCommand, isManagedPostToolUseCommand } = require('./mavp-install.js');
+const { findClaudeMdOnDemandDuplicates, isFrameworkSourceTree } = require('./mavp-operator-lib.js');
 
-const MAVERICKS_ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
+/**
+ * Resolve the framework root --check-sync compares against (T-894).
+ * `envRoot` is MAVERICKS_PROJECT_ROOT as the caller found it; it names the
+ * framework only when it is a framework source tree. Otherwise it is an adopter
+ * project root and the framework is the checkout this script lives in.
+ * Returns { frameworkRoot, adopterRoot } with adopterRoot null when envRoot is
+ * unset or is the framework itself.
+ */
+function resolveFrameworkRoot(envRoot, scriptRoot) {
+  if (!envRoot) return { frameworkRoot: scriptRoot, adopterRoot: null };
+  const resolved = path.resolve(envRoot);
+  if (isFrameworkSourceTree(resolved)) return { frameworkRoot: resolved, adopterRoot: null };
+  return { frameworkRoot: scriptRoot, adopterRoot: resolved === scriptRoot ? null : resolved };
+}
+
+const ROOTS = resolveFrameworkRoot(process.env.MAVERICKS_PROJECT_ROOT, path.resolve(__dirname, '..'));
+const MAVERICKS_ROOT = ROOTS.frameworkRoot;
 
 // Files to compare between mavericks source and each project
 // Paths are relative to the project/mavericks root
@@ -300,6 +323,58 @@ function checkHookDrift(projectPath) {
   return { stale: true, current: managedCommand, expected };
 }
 
+/** Compress sorted line numbers into "3-5, 9" style ranges. */
+function formatLineRanges(lines) {
+  const out = [];
+  let start = null;
+  let prev = null;
+  for (const n of lines) {
+    if (start === null) {
+      start = n;
+    } else if (n !== prev + 1) {
+      out.push(start === prev ? String(start) : `${start}-${prev}`);
+      start = n;
+    }
+    prev = n;
+  }
+  if (start !== null) out.push(start === prev ? String(start) : `${start}-${prev}`);
+  return out.join(', ');
+}
+
+/**
+ * Render the CLAUDE.md on-demand-duplicate advisory (T-894) as plain output
+ * lines (no colour). Reads only the result of findClaudeMdOnDemandDuplicates():
+ * line numbers, character counts and framework file paths. It never prints
+ * project text, and the advisory is informational only: it edits nothing and
+ * never changes the exit code or the in-sync summary.
+ */
+function renderClaudeMdDuplicateLines(result) {
+  if (!result) return [];
+  if (result.skipped) return [`CLAUDE.md check skipped (${result.skipped})`];
+  if (result.matches.length === 0) {
+    return [`CLAUDE.md: no duplicated on-demand text (${result.claude_md_chars} chars, ${result.always_loaded_chars} always loaded)`];
+  }
+  const lines = [
+    `CLAUDE.md: ${result.claude_md_chars} chars (${result.always_loaded_chars} always loaded); ` +
+    `removable now ${result.removable_now_chars} chars, after update ${result.removable_after_update_chars} chars`,
+  ];
+  const groups = new Map();
+  for (const m of result.matches) {
+    const key = `${m.home}\u0000${m.state}`;
+    if (!groups.has(key)) groups.set(key, { home: m.home, state: m.state, lines: [] });
+    groups.get(key).lines.push(m.line);
+  }
+  for (const g of groups.values()) {
+    const word = g.lines.length === 1 ? 'line' : 'lines';
+    lines.push(`  ${g.home} — ${g.state} — CLAUDE.md ${word} ${formatLineRanges(g.lines)}`);
+  }
+  lines.push(
+    '  Nothing is edited here. Judge a removal with --check-archive: it counts a removed CLAUDE.md line as missing ' +
+    'unless that line is archived verbatim under docs/archive/ in the same commit.'
+  );
+  return lines;
+}
+
 function checkProject(projectPath) {
   const drifted = [];
   for (const target of SYNC_TARGETS) {
@@ -324,6 +399,13 @@ function main() {
   }
 
   const projects = discoverProjects();
+  // An adopter-run invocation (MAVERICKS_PROJECT_ROOT names a project, not the framework): that
+  // project is the one being checked, so it is listed first.
+  if (ROOTS.adopterRoot) {
+    const rest = projects.filter(p => path.resolve(p) !== ROOTS.adopterRoot);
+    projects.length = 0;
+    projects.push(ROOTS.adopterRoot, ...rest);
+  }
 
   if (projects.length === 0) {
     console.log(`${YELLOW}No bootstrapped projects found.${RESET}`);
@@ -364,6 +446,12 @@ function main() {
     } else if (hookDrift && !hookDrift.stale) {
       console.log(`  ${GREEN}✓ hook in sync${RESET}`);
     }
+
+    // CLAUDE.md text already carried by an on-demand framework file (T-894). Advisory only:
+    // prints counts, file paths and line numbers, never the text, and never sets anyDrift.
+    for (const out of renderClaudeMdDuplicateLines(findClaudeMdOnDemandDuplicates(projectPath, { frameworkRoot: MAVERICKS_ROOT }))) {
+      console.log(`  ${DIM}${out}${RESET}`);
+    }
   }
 
   console.log('');
@@ -380,6 +468,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  resolveFrameworkRoot,
+  renderClaudeMdDuplicateLines,
   readMaverticksVersion,
   checkHomeMavericksDrift,
   checkHookDrift,

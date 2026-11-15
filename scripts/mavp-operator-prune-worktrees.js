@@ -9,10 +9,15 @@
  * 'dirty' or 'unintegrated' worktree, and never a worktree whose directory
  * was touched more recently than the threshold, so a just-spawned live
  * agent's still-clean worktree is never removed. Classification is by
- * PATCH-EQUIVALENCE (`git cherry`), not raw reachability — see
- * classifyWorktrees()'s doc comment in mavp-operator-lib.js for why: this
- * project integrates by cherry-pick, so a worktree tip is unreachable from
- * main by construction even after its work is fully, correctly integrated.
+ * PATCH-EQUIVALENCE (`git cherry`) or a recorded pick origin (T-899: a
+ * whole-line `(cherry picked from commit <full-hash>)` record, written by
+ * `--integrate`, on a commit reachable from main, for every commit that has no
+ * patch equivalent), not raw reachability — see classifyWorktrees()'s doc
+ * comment in mavp-operator-lib.js for why: this project integrates by
+ * cherry-pick, so a worktree tip is unreachable from main by construction even
+ * after its work is fully, correctly integrated. Integrated does not mean the
+ * task is finished: run the real (--yes) prune only with zero live sub-agents
+ * and no task awaiting a fix round.
  *
  * DEFAULTS TO DRY-RUN — chosen deliberately, mirroring --strip's two-stage
  * confirm for the same reason: pruning removes a worktree's directory AND
@@ -95,7 +100,7 @@ function main() {
   const prunable = entries.filter((e) => e.prunable);
 
   printRepoIdentityHeader(ROOT);
-  console.log(`\n${BOLD}Worktree prune${RESET} ${DIM}(patch-equivalence vs ${args.mainRef})${RESET}\n`);
+  console.log(`\n${BOLD}Worktree prune${RESET} ${DIM}(patch-equivalence or recorded pick vs ${args.mainRef})${RESET}\n`);
   console.log(`${DIM}${formatWorktreeHygieneAdvisory(entries)}${RESET}\n`);
 
   if (prunable.length === 0) {

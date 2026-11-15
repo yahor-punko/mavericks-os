@@ -11,7 +11,7 @@ Skill reflection loop contract for Mavericks — defines the SkillOpt-inspired s
 The skill reflection loop automatically improves `.claude/agents/<role>.md` spec files based on real project history. It does **not** fine-tune model weights. It produces a human-readable proposal document; no changes are applied without explicit human review and approval.
 
 **What it does:**
-- Mines completed task slices from `TASK_STATUS.md`, `BACKLOG.md`, and `EXECUTION_LOG.md` as trajectories.
+- Mines completed task slices from `TASK_STATUS.md` and `BACKLOG.md` as trajectories (`EXECUTION_LOG.md` is not read).
 - Scores each trajectory using a multi-signal rubric (QA outcome, validator exit code, scope deviation).
 - Passes success and failure minibatches to an optimizer model (opus-class) to identify improvable patterns.
 - Proposes a bounded set of add/delete/replace edits to the role spec under a configurable "textual learning rate" budget.
@@ -33,9 +33,12 @@ The skill reflection loop automatically improves `.claude/agents/<role>.md` spec
 Trajectories are collected from real project history, not synthetic benchmark runs. The script reads:
 - `TASK_STATUS.md` — QA outcomes, evidence flags, validator exit codes per task.
 - `BACKLOG.md` — role assignment, task type, acceptance criteria.
-- `EXECUTION_LOG.md` — sub-agent spawning events and key decisions.
 
-Each completed task-role pair produces one trajectory record (see Section 3). Tasks that are `planned` or `in_progress` are excluded. Only tasks with a declared `Owner role:` matching the target role are included. Terminal-success states `deployed_dev` and `deployed_prod` are treated equivalently to `merged` — tasks at those statuses are included in extraction and their actual status string is preserved in the trajectory record.
+`EXECUTION_LOG.md` is not read: no code path in extraction consults it, so sub-agent spawning events and key decisions recorded there never reach a trajectory.
+
+Each completed task-role pair produces one trajectory record (see Section 3). Tasks that are `planned` or `in_progress` are excluded. Only tasks with a declared `Owner role:` matching the target role are included.
+
+**Attribution is by the Owner role field.** A task is attributed to the role named in its `Owner role:` field in `TASK_STATUS.md`, falling back to the `Owner:` field, and then to the `Owner role:` in the matching `BACKLOG.md` block when `TASK_STATUS.md` declares neither — never by which agent actually executed the task. Two consequences follow. First, a role that only takes part in another role's task (an architect gate, a ux, qa or security pass) gets no trajectory from it: the task belongs to its Owner role alone. Second, a project whose executing agent differs from the declared Owner role receives proposals addressed to a spec that did not do the work. Terminal-success states `deployed_dev` and `deployed_prod` are treated equivalently to `merged` — tasks at those statuses are included in extraction and their actual status string is preserved in the trajectory record.
 
 ### Phase 2 — Reflect
 
@@ -94,8 +97,8 @@ One record per completed task-role-stage. Stored as newline-delimited JSON (JSON
 | `status` | string | Final task status at time of mining, e.g. `"merged"`. May also be `"deployed_dev"` or `"deployed_prod"` — these are treated as terminal-success states and are included in extraction alongside `merged`. |
 | `needsFixCount` | integer | Number of `qa_needs_fix` / `ux_needs_fix` / `security_needs_fix` round-trips the task went through. **Preferred source:** the explicit `needs_fix_rounds:` field in the task's `TASK_STATUS.md` evidence block. Fallback: keyword heuristics (counting `needs_fix` status transitions in the evidence text). When the explicit field is present it always takes priority. |
 | `validatorExitCode` | integer | Worst validator exit code observed during the task's lifecycle. `0` = healthy, `1` = drifting, `2` = repair required. **Preferred source:** the explicit `validator_blocked:` field in the task's `TASK_STATUS.md` evidence block (`true` maps to exit code `2`). Fallback: keyword heuristics when the field is absent. |
-| `qaOutcome` | string | One of: `"passed"`, `"passed_after_needs_fix"`, `"failed"`. |
-| `evidenceFlags` | string[] | List of scope-deviation flags found in task evidence, e.g. `["edited_files_outside_scope", "skipped_commit"]`. Empty array when clean. |
+| `qaOutcome` | string | One of: `"passed"`, `"passed_after_needs_fix"`, `"failed"`, `"skipped"`. `extractTrajectories()` emits only `"passed"` and `"skipped"`: `"passed_after_needs_fix"` is not emitted (see Section 4), and `"failed"` is not emitted for terminal-success tasks — every extracted task is `merged`, `deployed_dev` or `deployed_prod`, so a QA failure is never recorded. |
+| `evidenceFlags` | string[] | List of flags found in task evidence. The code emits exactly three: `"scope_deviation"` (the words `outside scope`), `"skipped_commit"` (the words `skipped commit`) and `"missing_commit"` (the words `missing commit`). Empty array when clean. There is no flag for the word `error` — a merged task that quotes an error count or a failing mutant run is not penalised for it. |
 | `toolUses` | integer (optional) | Number of tool calls the sub-agent used to complete the task, sourced from the explicit `tool_uses:` field in the task's `TASK_STATUS.md` evidence block. Additive/optional: when the evidence block has no `tool_uses:` line, this field is omitted from the record entirely — no default value is injected and extraction does not error. **Main-Agent recording convention:** at task completion, the Main Agent reads the `tool_uses` count reported in the task-completion notification and records it as `tool_uses: <N>` in the task's `TASK_STATUS.md` evidence block (e.g. `tool_uses: 41`), alongside `commit:` and other evidence fields. This gives future `maxTurns` / turn-budget calibration a data-grounded signal instead of anecdotal estimates. |
 
 ---
@@ -111,9 +114,13 @@ Scores are in the range [0.0, 1.0]. Score is computed per trajectory and clamped
 | `"passed"` | 1.0 |
 | `"skipped"` | 0.8 |
 | `"passed_after_needs_fix"` | **superseded — no base score** |
-| `"failed"` | 0.0 |
+| `"failed"` | 0.0 — **not emitted for terminal-success tasks** |
 
-`"skipped"` covers `artifact`/`unit`-verification tasks that skip the QA agent pass (see the **Verification types** convention in `CLAUDE.md`) — the shipped rubric scores these lower than a full QA pass but well above a failure.
+`"skipped"` covers `artifact`-verification tasks and every other task whose evidence does not carry the pass label (see the **Verification types** convention in `CLAUDE.md`) — the shipped rubric scores these lower than a full QA pass but well above a failure.
+
+The pass label keys on the tokens `qa_passed` and `passed`: `extractTrajectories()` gives `"passed"` to a non-`artifact` task whose evidence text contains either token (case-insensitive substring match anywhere in the evidence). Without one of them the task is `"skipped"`. Evidence wording such as `failed`, `qa_failed` or `error` does not change the outcome.
+
+`"failed"` keeps its 0.0 base in `scoreTrajectory()` only for records that arrive with that value; `extractTrajectories()` does not emit it for terminal-success tasks, because every task it extracts has already reached `merged`, `deployed_dev` or `deployed_prod`. Earlier versions labelled a task `"failed"` whenever its evidence contained the word `failed` and no pass token, which scored mutant red runs and log fields as QA failures; that label and the `evidence_error` flag are gone. Treat this note as the live statement of which values are scored for extracted tasks.
 
 `"passed_after_needs_fix"` no longer has a base score of its own. `extractTrajectories()` (`scripts/mavp-operator-lib.js`) does not emit this value — a task that passed after one or more `needs_fix` round-trips is recorded with `qaOutcome: "passed"` (base 1.0), and the round-trip cost is captured entirely by the `needsFixCount` penalty below, not by a separate base score. Section 3's schema table still lists `"passed_after_needs_fix"` as an enum value for historical reasons; treat this note as the live statement of which values `scoreTrajectory()` actually scores.
 
@@ -305,10 +312,11 @@ The optimizer that generated this proposal was not shown this project's own oper
 2. Review each proposed edit against the rationale and the pattern it addresses.
 3. Fill in "Reviewer notes" with any observations.
 4. **Conflict check (T-703):** the optimizer that drafted this proposal was never shown this project's own operating rules (`.claude/rules/*.md`, `CLAUDE.md`) or the framework's `docs/core/ORCHESTRATION_RULES.md` — its prompt explicitly discloses this and prohibits it from proposing edits that mandate process-level behavior (test-execution scope, git operations, push/commit rituals, task registration or status, permissions), but it can still miss a subtler conflict. Before marking Decision, check each proposed edit against all three corpora and tick the checklist boxes in the "Conflict check" section. This step exists precisely because a proposal has, in a live run, recommended an edit that re-mandated behavior those corpora already categorically prohibit — the "run the full existing test suite" example is exactly the incident `docs/core/ORCHESTRATION_RULES.md` — "Test-execution scope (worktree developers)" was written to close.
-5. Mark the "Decision" checkbox.
-6. Manually apply accepted edits to `.claude/agents/<role>.md`. Do not use automated apply in v1 — edit the file directly.
-7. Run the validator: `./scripts/mavp-operator --validate`. Confirm exit code 0.
-8. Commit both `.claude/agents/<role>.md` and the proposal file with a message referencing the wave and role.
+5. **Attribution check:** confirm the role the proposal addresses is the one that actually did the work. Trajectories are attributed by each task's `Owner role:` field, not by who executed the task (Phase 1), so if this project's executing agent differs from the declared Owner role, the proposal is addressed to a spec that did not do the work — reject it, or re-address it to the spec that did, before applying anything.
+6. Mark the "Decision" checkbox.
+7. Manually apply accepted edits to `.claude/agents/<role>.md`. Do not use automated apply in v1 — edit the file directly.
+8. Run the validator: `./scripts/mavp-operator --validate`. Confirm exit code 0.
+9. Commit both `.claude/agents/<role>.md` and the proposal file with a message referencing the wave and role.
 
 **How to reject edits:**
 1. Mark the "Reject" checkbox in the proposal file.
@@ -323,7 +331,7 @@ The optimizer that generated this proposal was not shown this project's own oper
 feat(skill-opt): apply <role> spec edits from wave <N> reflect run
 ```
 
-**Session-start surfacing (T-865):** `--agent` reports the additive field `skill_proposals_unreviewed` — the number of `SKILL_PROPOSALS/*.md` files that still have no Decision ticked — and the session-start skill renders it as a callout, present only when the count is above zero. The rule is deterministic and read-only (`countUnreviewedSkillProposals()` in `scripts/mavp-operator-lib.js`): a file counts when it has no `## Decision` section, or its `## Decision` section (bounded to the next `## ` heading) contains no checked box line (`- [x]`, case-insensitive); a box ticked under any other section, such as "Reviewer notes" or "Conflict check", never decides a file. A proposal that was applied to the role spec but whose Decision box was never ticked counts by design — the count reads the artifact, not the role spec — and the remedy is step 5 above: tick the box.
+**Session-start surfacing (T-865):** `--agent` reports the additive field `skill_proposals_unreviewed` — the number of `SKILL_PROPOSALS/*.md` files that still have no Decision ticked — and the session-start skill renders it as a callout, present only when the count is above zero. The rule is deterministic and read-only (`countUnreviewedSkillProposals()` in `scripts/mavp-operator-lib.js`): a file counts when it has no `## Decision` section, or its `## Decision` section (bounded to the next `## ` heading) contains no checked box line (`- [x]`, case-insensitive); a box ticked under any other section, such as "Reviewer notes" or "Conflict check", never decides a file. A proposal that was applied to the role spec but whose Decision box was never ticked counts by design — the count reads the artifact, not the role spec — and the remedy is step 6 above: tick the box.
 
 ---
 
@@ -339,7 +347,7 @@ feat(skill-opt): apply <role> spec edits from wave <N> reflect run
 
 **Code-vs-data loading contract:** `mavp-skill-reflect.js` always loads `mavp-operator-lib.js` from its own install directory (via `require('./mavp-operator-lib')`), never from `MAVERICKS_PROJECT_ROOT`. All data paths — the trajectory store, proposal output, role spec, and the `TASK_STATUS.md` / `BACKLOG.md` files the script mines — resolve under `MAVERICKS_PROJECT_ROOT` (the target project). Under the direct-reference model, bootstrapped projects run the mavericks-installed binary but supply their own data; do not change the lib `require` path to point at the project or the script will fail when the project has no local copy of the library.
 
-**Trajectory store format:** newline-delimited JSON (JSONL). Each line is one trajectory record (Section 3). **Rewrite, not append:** `writeTrajectories()` (`scripts/mavp-operator-lib.js`) overwrites `.mavp/trajectories/<role>.jsonl` on every `--reflect-skill <role>` run with a canonical snapshot — its own doc comment states the rewrite is intentional, "each run produces a canonical snapshot." Records are deduplicated by `taskId` (last-wins: the most recently extracted record for a given task replaces any prior one); records without a `taskId` pass through unchanged rather than being dropped. A trajectory reaches the file because each run re-extracts the full history from `TASK_STATUS.md`/`BACKLOG.md`/`EXECUTION_LOG.md` and writes the whole set back out — not because a new line is appended onto an untouched prior file.
+**Trajectory store format:** newline-delimited JSON (JSONL). Each line is one trajectory record (Section 3). **Rewrite, not append:** `writeTrajectories()` (`scripts/mavp-operator-lib.js`) overwrites `.mavp/trajectories/<role>.jsonl` on every `--reflect-skill <role>` run with a canonical snapshot — its own doc comment states the rewrite is intentional, "each run produces a canonical snapshot." Records are deduplicated by `taskId` (last-wins: the most recently extracted record for a given task replaces any prior one); records without a `taskId` pass through unchanged rather than being dropped. A trajectory reaches the file because each run re-extracts the full history from `TASK_STATUS.md`/`BACKLOG.md` and writes the whole set back out — not because a new line is appended onto an untouched prior file.
 
 ---
 

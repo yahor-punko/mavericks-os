@@ -2499,8 +2499,16 @@ function parseAllTaskBlocks(markdown) {
 /**
  * Extract trajectory records for a given role from TASK_STATUS.md and BACKLOG.md.
  *
- * Reads all merged tasks where the Owner role matches the given role, and emits
- * one trajectory record per matching task using evidence text heuristics.
+ * Reads all terminal-success tasks (merged, deployed_dev, deployed_prod) whose
+ * Owner role field (or the Owner fallback field) matches the given role, and
+ * emits one trajectory record per matching task using evidence text heuristics.
+ * Attribution is by that declared field, not by which agent executed the task.
+ * Only TASK_STATUS.md and BACKLOG.md are read.
+ *
+ * qaOutcome is "passed" (evidence holds qa_passed or passed) or "skipped"
+ * (artifact tasks and anything else); "failed" is never emitted because every
+ * emitted task already reached a terminal-success status. evidenceFlags holds
+ * scope_deviation, skipped_commit and missing_commit only.
  *
  * @param {string} role - Role name to filter by (e.g. "developer")
  * @param {object} [options]
@@ -2603,9 +2611,10 @@ function extractTrajectories(role, options = {}) {
       qaOutcome = 'skipped';
     } else if (/qa_passed|passed/.test(evidenceLower)) {
       qaOutcome = 'passed';
-    } else if (/failed|qa_failed/.test(evidenceLower)) {
-      qaOutcome = 'failed';
     } else {
+      // Only terminal-success tasks reach this point, so a task is never a QA
+      // failure here: the words failed / qa_failed in its evidence quote a
+      // mutant red run or a log field far more often than a QA verdict.
       qaOutcome = 'skipped';
     }
 
@@ -2621,7 +2630,6 @@ function extractTrajectories(role, options = {}) {
     if (/outside scope/.test(evidenceLower)) evidenceFlags.push('scope_deviation');
     if (/skipped commit/.test(evidenceLower)) evidenceFlags.push('skipped_commit');
     if (/missing commit/.test(evidenceLower)) evidenceFlags.push('missing_commit');
-    if (/error/.test(evidenceText)) evidenceFlags.push('evidence_error');
 
     // --- toolUses: optional explicit field, additive (no fallback heuristic) ---
     // Recorded by the Main Agent at task completion as `tool_uses: <N>` in the
@@ -5462,6 +5470,33 @@ function isWorktreeDirty(worktreePath) {
 }
 
 /**
+ * Raw `git cherry <mainRef> <ref>` output as trimmed, non-empty lines (T-899),
+ * or `null` when the check itself fails (missing ref, git failure). Shared by
+ * getPatchEquivalenceStatus() and classifyWorktrees() so the two never run the
+ * comparison differently; each line is `- <full-hash>` (an equivalent patch is
+ * already reachable from mainRef) or `+ <full-hash>` (none is).
+ */
+function readCherryLines(root, mainRef, ref) {
+  try {
+    const output = cp.execFileSync('git', ['cherry', mainRef, ref], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return output.split('\n').map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+/** Fold `readCherryLines()` output into the getPatchEquivalenceStatus() value domain. */
+function patchStatusFromCherryLines(lines) {
+  if (lines === null) return 'unknown';
+  if (lines.length === 0) return 'integrated';
+  return lines.some((l) => l.startsWith('+')) ? 'unintegrated' : 'integrated';
+}
+
+/**
  * Classify a ref's commits-ahead-of-mainRef by PATCH equivalence (`git
  * cherry`), not raw reachability. `git cherry <mainRef> <ref>` compares by
  * patch id: a line prefixed `-` means an equivalent patch is already
@@ -5472,6 +5507,14 @@ function isWorktreeDirty(worktreePath) {
  * from mainRef by construction even when its work is fully, correctly
  * integrated.
  *
+ * T-899: this function answers the patch-equivalence question ONLY. A pick
+ * whose diff changed on the way in (a resolved conflict, or a clean pick whose
+ * context had drifted on main) has a different patch id, so it reads
+ * 'unintegrated' here even though `--integrate` landed it; that case is
+ * recognised separately, by the recorded pick origin, inside
+ * classifyWorktrees() (see its doc comment). This function's contract and
+ * value domain are unchanged.
+ *
  * @returns {'integrated'|'unintegrated'|'unknown'} 'integrated' when there are
  *   no commits ahead of mainRef at all, or every commit ahead has a patch
  *   equivalent already in mainRef; 'unintegrated' when at least one commit
@@ -5480,18 +5523,43 @@ function isWorktreeDirty(worktreePath) {
  *   (never as "integrated").
  */
 function getPatchEquivalenceStatus(root, mainRef, ref) {
+  return patchStatusFromCherryLines(readCherryLines(root, mainRef, ref));
+}
+
+/**
+ * Whole-line pick-origin record written by `git cherry-pick -x` (T-899):
+ * `(cherry picked from commit <full-hash>)` with a full 40-to-64-character
+ * lowercase hex hash, anchored at both ends of the line. A phrase mid-line in
+ * prose, or an abbreviated hash, is deliberately not a record.
+ */
+const PICK_ORIGIN_LINE = /^\(cherry picked from commit ([0-9a-f]{40,64})\)$/;
+
+/**
+ * Harvest the set of pick-origin hashes recorded on commits reachable from
+ * `mainRef` ONLY (T-899) — one history walk, never other refs, so an origin
+ * line that exists only on an unmerged branch cannot count. The grep merely
+ * narrows the walk; every candidate line is re-matched whole-line by
+ * PICK_ORIGIN_LINE. A failed walk is an empty set (never an exception, never
+ * a guess): the caller then falls back to the patch-equivalence verdict.
+ *
+ * @returns {Set<string>} full hashes named by a recorded origin line.
+ */
+function harvestRecordedPickOrigins(root, mainRef) {
+  const origins = new Set();
   try {
-    const output = cp.execFileSync('git', ['cherry', mainRef, ref], {
-      cwd: root,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    const lines = output.split('\n').map((l) => l.trim()).filter(Boolean);
-    if (lines.length === 0) return 'integrated';
-    return lines.some((l) => l.startsWith('+')) ? 'unintegrated' : 'integrated';
+    const output = cp.execFileSync(
+      'git',
+      ['log', '--format=%B', '-F', '--grep=(cherry picked from commit ', mainRef, '--'],
+      { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 }
+    );
+    for (const line of output.split('\n')) {
+      const m = PICK_ORIGIN_LINE.exec(line);
+      if (m) origins.add(m[1]);
+    }
   } catch {
-    return 'unknown';
+    return new Set();
   }
+  return origins;
 }
 
 /**
@@ -5557,8 +5625,24 @@ function refResolvesToCommit(root, ref) {
  *     determined (broken worktree, missing object) — that per-entry fallback
  *     is intentionally preserved and must never be confused with the
  *     caller-level precondition failure below.
- *   - 'clean-and-integrated' — clean, and every commit ahead of mainRef (if
- *     any) is patch-equivalent to a commit already in mainRef.
+ *   - 'clean-and-integrated' — clean, and either (a) every commit ahead of
+ *     mainRef (if any) is patch-equivalent to a commit already in mainRef, or
+ *     (b) (T-899) every commit ahead that has NO patch equivalent is named by
+ *     a whole-line `(cherry picked from commit <full-hash>)` record on a commit
+ *     reachable from mainRef — the origin line `--integrate` writes via
+ *     `cherry-pick -x`. Basis (b) covers a pick whose diff changed on the way
+ *     in (a resolved conflict, or a clean pick whose context had drifted on
+ *     main) and so never matches by patch id. It needs EVERY such commit
+ *     recorded, never some. The records are harvested from mainRef's history
+ *     only, in one walk per call; a harvest failure is an empty set. The
+ *     dirty check and the 'unknown' fallback keep precedence over both bases.
+ *     Residual cases that stay 'unintegrated': a hand-typed pick without -x,
+ *     abort-and-reapply by hand, an empty resolution, and picks made before
+ *     `--integrate` recorded the origin.
+ *
+ * Each entry also carries the additive `integratedVia` field: 'patch-equivalence'
+ * (basis (a), including the no-commits-ahead case), 'recorded-pick' (basis
+ * (b)), or null (dirty and unintegrated). `patchStatus` keeps its meaning.
  *
  * `prunable` is additionally gated on the mtime safety condition: a
  * clean-and-integrated worktree whose directory mtime is within
@@ -5581,7 +5665,7 @@ function refResolvesToCommit(root, ref) {
  * @param {string} [options.mainRef='main'] - Ref to compare patch equivalence against.
  * @param {number} [options.now=Date.now()] - Reference "now" timestamp (ms), for deterministic tests.
  * @param {number} [options.mtimeThresholdMs=WORKTREE_PRUNE_MTIME_THRESHOLD_MS] - mtime safety threshold (ms).
- * @returns {Array<{path:string, branch:string|null, head:string|null, classification:string, dirty:boolean|null, patchStatus:string, mtimeMs:number|null, ageMs:number|null, recentMtime:boolean, prunable:boolean}>}
+ * @returns {Array<{path:string, branch:string|null, head:string|null, classification:string, integratedVia:('patch-equivalence'|'recorded-pick'|null), dirty:boolean|null, patchStatus:string, mtimeMs:number|null, ageMs:number|null, recentMtime:boolean, prunable:boolean}>}
  * @throws {UnresolvableMainRefError} when `mainRef` does not resolve to a commit.
  */
 function classifyWorktrees(root, options = {}) {
@@ -5600,18 +5684,40 @@ function classifyWorktrees(root, options = {}) {
   const rootReal = safeRealpath(root);
   const linked = worktrees.filter((wt) => !wt.bare && safeRealpath(wt.path) !== rootReal);
 
+  // T-899: the recorded-origin set is harvested at most once per call, and only
+  // when a clean worktree actually has a commit with no patch equivalent.
+  let recordedOrigins = null;
+  const getRecordedOrigins = () => {
+    if (recordedOrigins === null) recordedOrigins = harvestRecordedPickOrigins(root, mainRef);
+    return recordedOrigins;
+  };
+
   return linked.map((wt) => {
     const ref = wt.branch || wt.head;
     const dirty = isWorktreeDirty(wt.path);
-    const patchStatus = ref ? getPatchEquivalenceStatus(root, mainRef, ref) : 'unknown';
+    const cherryLines = ref ? readCherryLines(root, mainRef, ref) : null;
+    const patchStatus = patchStatusFromCherryLines(cherryLines);
 
     let classification;
+    let integratedVia = null;
     if (dirty === true) {
       classification = 'dirty';
-    } else if (dirty === null || patchStatus === 'unintegrated' || patchStatus === 'unknown') {
+    } else if (dirty === null || patchStatus === 'unknown') {
       classification = 'unintegrated';
-    } else {
+    } else if (patchStatus === 'integrated') {
       classification = 'clean-and-integrated';
+      integratedVia = 'patch-equivalence';
+    } else {
+      // patchStatus === 'unintegrated': integrated only when EVERY commit with
+      // no patch equivalent is a recorded pick origin on mainRef's history.
+      const unmatched = cherryLines.filter((l) => l.startsWith('+')).map((l) => l.slice(1).trim());
+      const origins = getRecordedOrigins();
+      if (unmatched.length > 0 && unmatched.every((h) => origins.has(h))) {
+        classification = 'clean-and-integrated';
+        integratedVia = 'recorded-pick';
+      } else {
+        classification = 'unintegrated';
+      }
     }
 
     const mtimeMs = getWorktreeDirectoryMtimeMs(wt.path);
@@ -5627,6 +5733,7 @@ function classifyWorktrees(root, options = {}) {
       branch: wt.branch,
       head: wt.head,
       classification,
+      integratedVia,
       dirty,
       patchStatus,
       mtimeMs,
@@ -5881,6 +5988,162 @@ function collectAlwaysLoadedContext(root, opts = {}) {
     external,
     total_chars: files.reduce((sum, f) => sum + f.chars, 0),
   };
+}
+
+// ---------------------------------------------------------------------------
+// CLAUDE.md text duplicated in on-demand framework files (T-894).
+// ---------------------------------------------------------------------------
+
+/** T-894 — a CLAUDE.md line must be at least this long, trimmed, to count as verbatim duplicated text. */
+const CLAUDE_DUP_VERBATIM_FLOOR = 40;
+/** T-894 — a fenced operator command line must be at least this long, trimmed, to count as a command duplicate. */
+const CLAUDE_DUP_COMMAND_FLOOR = 120;
+/** T-894 — the framework doc whose `### --flag` headings hold each flag's full contract. */
+const CLAUDE_DUP_COMMANDS_DOC = 'docs/core/OPERATOR_COMMANDS.md';
+const CLAUDE_DUP_COMMAND_LINE = /^(?:\$\s*)?(?:\.\/)?scripts\/mavp-operator\s+(--[a-z0-9][a-z0-9-]*)/;
+
+/** Trimmed non-empty lines of `text` as a Set. */
+function trimmedLineSet(text) {
+  const out = new Set();
+  for (const raw of String(text).split('\n')) {
+    const t = raw.trim();
+    if (t) out.add(t);
+  }
+  return out;
+}
+
+/**
+ * T-894 — find CLAUDE.md lines whose text a framework file that loads on demand
+ * already carries, so the adopter can see which lines are safe to remove.
+ *
+ * Two tiers, both reporting only a line NUMBER, a length and a home path, never
+ * line text. `verbatim`: a CLAUDE.md line of at least 40 trimmed characters that
+ * equals a trimmed line of a framework rule, skill or agent file; state
+ * `in_project` when the project's own copy of that file holds the line too (so
+ * removing it loses nothing now), `after_update` when only the framework copy
+ * does (removable once `mavp-install.js --update` delivers it). `command`: a
+ * fenced `./scripts/mavp-operator --flag ...` line of at least 120 trimmed
+ * characters whose flag has a `### --flag` heading in the framework's
+ * docs/core/OPERATOR_COMMANDS.md; state `framework_doc`, removable now.
+ * `chars` per line is the raw line length plus one (the newline).
+ *
+ * Read-only and never throws. A project that is itself a framework source tree
+ * returns `skipped: 'framework_source_tree'`; no CLAUDE.md, `'no_claude_md'`; a
+ * missing framework root, `'no_framework_root'`; any unexpected error, `'error'`.
+ *
+ * @param {string} projectRoot
+ * @param {{frameworkRoot?: string}} [opts] frameworkRoot defaults to the checkout this lib lives in
+ * @returns {{skipped: (string|null), claude_md_chars: number, always_loaded_chars: number,
+ *   matches: Array<{line:number, chars:number, home:string, tier:string, state:string}>,
+ *   removable_now_chars: number, removable_after_update_chars: number}}
+ */
+function findClaudeMdOnDemandDuplicates(projectRoot, opts) {
+  const skip = (reason, extra) => Object.assign({
+    skipped: reason,
+    claude_md_chars: 0,
+    always_loaded_chars: 0,
+    matches: [],
+    removable_now_chars: 0,
+    removable_after_update_chars: 0,
+  }, extra || {});
+  try {
+    const absProject = path.resolve(String(projectRoot));
+    const frameworkRoot = path.resolve((opts && opts.frameworkRoot) || path.join(__dirname, '..'));
+    if (absProject === frameworkRoot || isFrameworkSourceTree(absProject)) return skip('framework_source_tree');
+    const claudeText = defaultReadFile(path.join(absProject, 'CLAUDE.md'));
+    if (typeof claudeText !== 'string') return skip('no_claude_md');
+    let frameworkIsDir = false;
+    try {
+      frameworkIsDir = fs.statSync(frameworkRoot).isDirectory();
+    } catch (_err) {
+      frameworkIsDir = false;
+    }
+    if (!frameworkIsDir) return skip('no_framework_root', { claude_md_chars: claudeText.length });
+
+    let alwaysLoaded = 0;
+    try {
+      alwaysLoaded = collectAlwaysLoadedContext(absProject).total_chars;
+    } catch (_err) {
+      alwaysLoaded = claudeText.length;
+    }
+
+    // Homes: every framework rule, skill and agent markdown file, as root-relative posix paths.
+    const homes = [];
+    for (const dir of CLAUDE_DIRS) {
+      const base = path.join(frameworkRoot, '.claude', dir);
+      for (const abs of defaultListMarkdown(base)) {
+        const rel = path.relative(frameworkRoot, abs).split(path.sep).join('/');
+        const body = defaultReadFile(abs);
+        if (typeof body === 'string') homes.push({ rel, lines: trimmedLineSet(body) });
+      }
+    }
+    homes.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+    const projectCopies = new Map();
+    const projectHas = (rel, line) => {
+      if (!projectCopies.has(rel)) {
+        const body = defaultReadFile(path.join(absProject, ...rel.split('/')));
+        projectCopies.set(rel, typeof body === 'string' ? trimmedLineSet(body) : new Set());
+      }
+      return projectCopies.get(rel).has(line);
+    };
+
+    const commandsDoc = defaultReadFile(path.join(frameworkRoot, ...CLAUDE_DUP_COMMANDS_DOC.split('/')));
+    const flagHeadings = new Set();
+    if (typeof commandsDoc === 'string') {
+      for (const l of commandsDoc.split('\n')) {
+        const h = l.match(/^###\s+(--[a-z0-9][a-z0-9-]*)\s*$/);
+        if (h) flagHeadings.add(h[1]);
+      }
+    }
+
+    const matches = [];
+    let fence = null;
+    const rawLines = claudeText.split('\n');
+    for (let i = 0; i < rawLines.length; i += 1) {
+      const raw = rawLines[i];
+      const trimmed = raw.trim();
+      const fenceMark = raw.match(/^\s*(```+|~~~+)/);
+      const inFence = fence !== null;
+      if (fenceMark) {
+        if (!fence) fence = fenceMark[1];
+        else if (fenceMark[1][0] === fence[0] && fenceMark[1].length >= fence.length) fence = null;
+        continue;
+      }
+      const chars = raw.length + 1;
+      if (trimmed.length >= CLAUDE_DUP_VERBATIM_FLOOR) {
+        const candidates = homes.filter((h) => h.lines.has(trimmed));
+        if (candidates.length > 0) {
+          const inProject = candidates.find((h) => projectHas(h.rel, trimmed));
+          const home = inProject || candidates[0];
+          matches.push({ line: i + 1, chars, home: home.rel, tier: 'verbatim', state: inProject ? 'in_project' : 'after_update' });
+          continue;
+        }
+      }
+      if (inFence && trimmed.length >= CLAUDE_DUP_COMMAND_FLOOR) {
+        const cmd = trimmed.match(CLAUDE_DUP_COMMAND_LINE);
+        if (cmd && flagHeadings.has(cmd[1])) {
+          matches.push({ line: i + 1, chars, home: CLAUDE_DUP_COMMANDS_DOC, tier: 'command', state: 'framework_doc' });
+        }
+      }
+    }
+
+    let now = 0;
+    let after = 0;
+    for (const m of matches) {
+      if (m.state === 'after_update') after += m.chars;
+      else now += m.chars;
+    }
+    return {
+      skipped: null,
+      claude_md_chars: claudeText.length,
+      always_loaded_chars: alwaysLoaded,
+      matches,
+      removable_now_chars: now,
+      removable_after_update_chars: after,
+    };
+  } catch (_err) {
+    return skip('error');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -7143,6 +7406,7 @@ module.exports = {
   classifyWorktrees,
   clip,
   collectAlwaysLoadedContext,
+  findClaudeMdOnDemandDuplicates,
   collectOperatorData,
   computeDueRechecks,
   computeMustRead,

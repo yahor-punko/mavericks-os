@@ -44,7 +44,7 @@ paths:
 
 `deploy_contours` — integer. Controls deploy pipeline visibility in `--agent` output. `0` = no deploy pipeline; `merged` is the final state; `deploy_queue` is always empty and deploy warnings are suppressed. `1` = single contour, auto-deploy-on-merge; `merged` = already deployed; `deploy_queue` is always empty and no `deploy_pending` state is set. `2` = dev + prod contours (default behavior when field is absent); `merged` tasks appear in `deploy_queue` as `deploy_pending: true`. Set to `0` for projects like mavericks itself where there is no separate deploy pipeline; set to `1` for projects where merge triggers an automatic deploy.
 
-`last_task_id` — integer, the highest T-NNN assigned so far. Increment before registering a new task to avoid ID collisions. The validator checks for duplicate task IDs.
+`last_task_id` — integer, the highest T-NNN assigned so far. Increment before registering a new task to avoid ID collisions. The validator checks for duplicate task IDs. The minting commands (`--new-task`, `--quick-task`, `--apply-decomposition`) write it at mint; the validator raises it only from `BACKLOG.md` Active Wave headings, as the info finding `last_task_id_auto_patched`; a block hand-registered in any other section leaves it behind until the next mint, which scans both artifacts whole and mints past that block.
 
 **PROCESS_STATE.json is informational** — it is human-maintained and not validated for consistency with BACKLOG.md or TASK_STATUS.md. Do not use `next_action` or `active_slices` as authoritative truth; always verify against BACKLOG.md and TASK_STATUS.md directly.
 

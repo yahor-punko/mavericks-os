@@ -206,9 +206,11 @@ Validator exit codes: `0` = healthy, `1` = drifting, `2` = repair required.
   - See docs/core/ORCHESTRATION_RULES.md "Worktree integration — Main Agent".
 - Runs guardMutatingRoot() FIRST (T-624/T-670 — refuses and NAMES the primary checkout on a never-a-project root or a linked worktree, never auto-retargets).
 - Refuses when a cherry-pick or merge is already in progress in the resolved root.
+- Picks with `git cherry-pick -x`, so every landed commit carries one whole-line origin record, `(cherry picked from commit <full-hash>)`, naming the commit it came from (T-899). `--worktree-report` and `--prune-worktrees` read it as the second integration basis (see those sections).
 - Prints one `integrated: <short-hash>` line per landed commit.
 - When `--task T-NNN` is given and resolves to exactly one task block, it also prints a ready-to-run `--set-status` suggestion — `--task` is optional.
-- On conflict exits non-zero naming `git cherry-pick --abort`/`--continue` with no auto-abort.
+- On conflict exits non-zero naming `git cherry-pick --abort`/`--continue` with no auto-abort, and says the origin record is already in the pending message and survives `cherry-pick --continue`, while abort-and-reapply-by-hand loses it (git writes the origin line into the pending message before it stops on a conflict).
+- Residual cases that carry no record and so stay unintegrated in the worktree surfaces: a hand-typed pick without `-x`, abort-and-reapply by hand, an empty resolution (nothing is committed), and picks made before this change.
 - Writes NO state artifacts itself, so integration and status-booking stay decoupled.
 
 ### --archive-merged
@@ -318,6 +320,14 @@ Validator exit codes: `0` = healthy, `1` = drifting, `2` = repair required.
 ```
 
 - Compare agent/skill files in known projects against mavericks source.
+- Adopter-run behaviour (T-894): an adopter wrapper exports `MAVERICKS_PROJECT_ROOT` as the adopter project root, so the script treats that variable as the framework root only when it names a framework source tree (a root holding `scripts/mavp-operator-lib.js`). Otherwise the framework is the checkout the script lives in, the header names that checkout, and the adopter project is checked too, listed first, followed by any projects named in `MAVERICKS_PROJECTS` or the projects list. With `MAVERICKS_PROJECT_ROOT` naming a framework source tree, or unset, the header and the project list are as before.
+- CLAUDE.md duplicate advisory (T-894): for each checked project that has a `CLAUDE.md` and is not itself a framework source tree, one summary line gives the `CLAUDE.md` size, its always-loaded size, and the characters removable now and after update, followed by one line per framework file naming its path, a state and the `CLAUDE.md` line ranges; a project with nothing to report gets a no-duplicates line, and a skipped project gets a skip line. `findClaudeMdOnDemandDuplicates()` in `mavp-operator-lib.js` computes it, with two tiers:
+  - `verbatim`: a `CLAUDE.md` line of at least 40 trimmed characters that equals a line of a framework rule, skill or agent file. Floor: 40 characters.
+  - `command`: a fenced `./scripts/mavp-operator --flag ...` line of at least 120 trimmed characters whose flag has a `### --flag` heading in the framework's `docs/core/OPERATOR_COMMANDS.md`. Floor: 120 characters.
+  - Each character count is the raw line length plus one.
+- Three states: `in_project` (the project's own copy of that framework file already holds the line, removable now), `framework_doc` (a command line whose contract is in the framework's command reference, removable now) and `after_update` (only the framework copy holds the line, removable once `mavp-install.js --update` delivers that file).
+- No project text is printed: the advisory shows line numbers, character counts and framework file paths only, so text in a project-authored line or in a flagged line's comment never reaches the output. Nothing is edited: it is advisory, never changes the exit code (0) or the final in-sync or drift summary. The closing line points at `--check-archive`, which counts a removed `CLAUDE.md` line as missing unless that line is archived verbatim under `docs/archive/` in the same commit.
+- Example: `./scripts/mavp-operator --check-sync` prints, for a project `my-app`, a line such as `CLAUDE.md: 2400 chars (3100 always loaded); removable now 300 chars, after update 120 chars` and then `.claude/rules/example-rule.md — in_project — CLAUDE.md lines 12-14, 30`.
 
 ### --worktree-report
 
@@ -325,8 +335,11 @@ Validator exit codes: `0` = healthy, `1` = drifting, `2` = repair required.
 ./scripts/mavp-operator --worktree-report [--main-ref <ref>] [--mtime-threshold <ms>] [--json]
 ```
 
-- Read-only: classify every linked agent git worktree into dirty / unintegrated / clean-and-integrated via PATCH-EQUIVALENCE (`git cherry`), never raw reachability.
+- Read-only: classify every linked agent git worktree into dirty / unintegrated / clean-and-integrated via PATCH-EQUIVALENCE (`git cherry`) or a recorded pick origin, never raw reachability.
   - This project integrates by cherry-pick, so a worktree tip is unreachable from main by construction even once fully integrated.
+  - Two bases make a clean worktree integrated (T-899): `patch-equivalence` (every commit ahead of main has a patch-equivalent commit in main; also the no-commits-ahead case), or `recorded-pick` (every commit ahead with no patch equivalent is named by a whole-line `(cherry picked from commit <full-hash>)` record, written by `--integrate`, on a commit reachable from main). The second basis covers a pick whose diff changed on the way in, a resolved conflict or a clean pick onto drifted context, which `git cherry` can no longer match. Every such commit must be recorded; the dirty check and the unknown fallback keep precedence, and the mtime window still gates prunable.
+  - Each entry prints a `via=` token (`patch-equivalence`, `recorded-pick` or `none`); `--json` entries gain the additive `integratedVia` field with the same values (`null` for none). `patchStatus` keeps its meaning.
+  - Stay unintegrated: a hand-typed pick without `-x`, abort-and-reapply by hand, an empty resolution, and picks made before `--integrate` recorded the origin.
 - Shared classifyWorktrees()/formatWorktreeHygieneAdvisory() in mavp-operator-lib.js also feeds the --close-session advisory and --prune-worktrees, so all three surfaces agree.
 - When at least one worktree is genuinely prunable, both this report and the --close-session advisory (both modes) append a second, propose-only line naming the ready-to-run DRY-RUN prune command (`formatWorktreePruneSuggestion()` — never suggests `--yes`), so the operator no longer has to recall `--prune-worktrees` unprompted.
 
@@ -336,10 +349,11 @@ Validator exit codes: `0` = healthy, `1` = drifting, `2` = repair required.
 ./scripts/mavp-operator --prune-worktrees [--yes] [--main-ref <ref>] [--mtime-threshold <ms>]
 ```
 
-- Remove ONLY clean-and-integrated worktrees (same classification as --worktree-report).
+- Remove ONLY clean-and-integrated worktrees (same classification as --worktree-report), on either basis: patch-equivalence or a recorded pick origin (T-899).
 - Additionally gated on an mtime safety window (default 1h) so a just-spawned live agent's still-clean worktree is never removed.
 - Defaults to dry-run (prints what would be removed) — pass --yes to actually delete the worktree + its branch.
 - Run the real (--yes) prune only with zero live sub-agents, since this is a repository-global exclusive-resource operation.
+- Integrated does not mean the task is finished: the real prune still runs only with zero live sub-agents and no task awaiting a fix round.
 
 ### --install
 

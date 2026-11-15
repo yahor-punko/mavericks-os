@@ -514,3 +514,84 @@ function extractIntegratedHashes(stdout) {
 
   cleanupWorktree(PRIMARY, LINKED);
 }
+
+// ---------------------------------------------------------------------------
+// Part 10 (T-899) — every commit --integrate lands carries, as a WHOLE LINE of
+// its message, the origin record `(cherry picked from commit <full-hash>)`
+// naming the picked commit (the range form records each commit's own hash).
+// The hashes are produced at runtime; no literal hash appears in this file.
+// ---------------------------------------------------------------------------
+{
+  const PRIMARY = initPrimary();
+  const LINKED = addLinkedWorktree(PRIMARY, 't899-branch-10');
+  const baseHash = runGit(['rev-parse', 'HEAD'], LINKED);
+
+  writeUtf8(path.join(LINKED, 'origin-a.txt'), 'origin a\n');
+  runGit(['add', 'origin-a.txt'], LINKED);
+  runGit(['commit', '-q', '-m', 'origin commit A'], LINKED);
+  const hashA = runGit(['rev-parse', 'HEAD'], LINKED);
+  writeUtf8(path.join(LINKED, 'origin-b.txt'), 'origin b\n');
+  runGit(['add', 'origin-b.txt'], LINKED);
+  runGit(['commit', '-q', '-m', 'origin commit B', '-m', 'Co-Authored-By: Fixture User <fixture@example.com>'], LINKED);
+  const hashB = runGit(['rev-parse', 'HEAD'], LINKED);
+
+  const env = baseEnv(PRIMARY);
+  const r = runIntegrate([`${baseHash}..${hashB}`], PRIMARY, env);
+  assert.strictEqual(r.status, 0, `Test 10 FAIL: expected exit 0, got ${r.status}. stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+  assert.strictEqual(extractIntegratedHashes(r.stdout).length, 2, `Test 10 FAIL: both "integrated:" lines must still print. stdout:\n${r.stdout}`);
+
+  const messageLines = (rev) => runGit(['log', '-1', '--format=%B', rev], PRIMARY).split('\n');
+  const landedB = messageLines('HEAD');
+  const landedA = messageLines('HEAD~1');
+  assert.ok(
+    landedA.includes(`(cherry picked from commit ${hashA})`),
+    `Test 10 FAIL: commit A's landed message must carry its origin line as a whole line. lines:\n${landedA.join('\n')}`
+  );
+  assert.ok(
+    landedB.includes(`(cherry picked from commit ${hashB})`),
+    `Test 10 FAIL: commit B's landed message must carry its origin line as a whole line. lines:\n${landedB.join('\n')}`
+  );
+  assert.strictEqual(
+    landedB.filter((l) => l.startsWith('(cherry picked from commit ')).length,
+    1,
+    'Test 10 FAIL: exactly one origin line per landed commit'
+  );
+
+  console.log('Test 10 passed: --integrate lands each commit (range form) with its whole-line origin record naming the picked commit');
+  cleanupWorktree(PRIMARY, LINKED);
+}
+
+// Part 10b (T-899) — the conflict output gains one line saying the origin
+// record is already in the pending message and survives --continue, while
+// abort-and-reapply-by-hand loses it; git really does hold the line in the
+// pending message at that point.
+{
+  const PRIMARY = initPrimary();
+  const LINKED = addLinkedWorktree(PRIMARY, 't899-branch-10b');
+
+  writeUtf8(path.join(PRIMARY, 'conflict.txt'), 'primary version\n');
+  runGit(['add', 'conflict.txt'], PRIMARY);
+  runGit(['commit', '-q', '-m', 'primary edits conflict.txt'], PRIMARY);
+  writeUtf8(path.join(LINKED, 'conflict.txt'), 'linked version\n');
+  runGit(['add', 'conflict.txt'], LINKED);
+  runGit(['commit', '-q', '-m', 'linked edits conflict.txt'], LINKED);
+  const conflictingHash = runGit(['rev-parse', 'HEAD'], LINKED);
+
+  const r = runIntegrate([conflictingHash], PRIMARY, baseEnv(PRIMARY));
+  assert.notStrictEqual(r.status, 0, 'Test 10b FAIL: a conflicting pick must exit non-zero');
+  const combined = r.stdout + r.stderr;
+  assert.ok(
+    /origin record is already in the pending message and survives `cherry-pick --continue`/.test(combined) &&
+      /abort-and-reapply-by-hand loses it/.test(combined),
+    `Test 10b FAIL: the conflict output must carry the origin-record line. output:\n${combined}`
+  );
+  const pending = fs.readFileSync(path.join(PRIMARY, '.git', 'MERGE_MSG'), 'utf8').split('\n');
+  assert.ok(
+    pending.includes(`(cherry picked from commit ${conflictingHash})`),
+    `Test 10b FAIL: git must already hold the origin line in the pending message. MERGE_MSG:\n${pending.join('\n')}`
+  );
+
+  console.log('Test 10b passed: the conflict output states the origin record survives --continue, and the pending message holds it');
+  runGit(['cherry-pick', '--abort'], PRIMARY);
+  cleanupWorktree(PRIMARY, LINKED);
+}
