@@ -61,6 +61,7 @@ const {
   runGh,
   scanOutboundText,
   withOutboundBodyFile,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 const { buildCategories, resolvePrivateNames, scanTextAgainstCategories } = require('./mavp-publish-scan.js');
 const { readNamesFileRaw } = require('./mavp-private-names-guard.js');
@@ -634,6 +635,9 @@ function postGithub(opts, argv) {
   console.log(`feedback: ${id} posted as ${slug}#${number}`);
   if (opts.file !== null) removeSubmittedDraft(opts.file);
 }
+
+// T-917: help first (before any argument parsing, header read or inbox access).
+if (handleHelpFlag([USAGE, '', '--help prints this text and exits 0 before reading or writing anything.'])) return;
 
 const argvRest = process.argv.slice(2);
 const opts = parseArgs(argvRest);

@@ -27,7 +27,7 @@ const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
 const TASK_STATUS_MD = path.join(ROOT, 'TASK_STATUS.md');
 const VALIDATOR = path.join(__dirname, 'mavp-validator.js');
 
-const { renameTask, printRepoIdentityHeader, guardMutatingRoot } = require('./mavp-operator-lib.js');
+const { renameTask, printRepoIdentityHeader, guardMutatingRoot, handleHelpFlag } = require('./mavp-operator-lib.js');
 
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -42,7 +42,17 @@ function printUsage() {
   console.error('Updates the ### T-NNN — <title> heading in both BACKLOG.md and TASK_STATUS.md.');
 }
 
+const RENAME_TASK_USAGE = [
+  'Usage: ./scripts/mavp-operator --rename-task T-NNN "New title"',
+  '',
+  'Atomically renames a task title in BACKLOG.md and TASK_STATUS.md.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 function main() {
+  // T-917: help first, before the identity header's read of PROCESS_STATE.json.
+  if (handleHelpFlag(RENAME_TASK_USAGE)) return;
+
   printRepoIdentityHeader(ROOT, { mutating: true });
 
   const rootGuard = guardMutatingRoot(ROOT, '--rename-task');

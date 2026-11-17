@@ -19,7 +19,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execSync } = require('node:child_process');
-const { printRepoIdentityHeader, guardMutatingRoot, locateTaskBlock, updateTaskField } = require('./mavp-operator-lib.js');
+const { printRepoIdentityHeader, guardMutatingRoot, locateTaskBlock, updateTaskField, handleHelpFlag } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -48,6 +48,7 @@ const VALID_STATUSES = [
   'qa_passed',
   'needs_fix',
   'merged',
+  'runtime_verified',
   'deployed_dev',
   'deployed_prod',
 ];
@@ -74,7 +75,17 @@ function printUsage() {
   console.error(`${DIM}Valid statuses: ${VALID_STATUSES.join(', ')}${RESET}`);
 }
 
+const UPDATE_STATUS_USAGE = [
+  'Usage: ./scripts/mavp-operator --update-status T-NNN <status>',
+  '',
+  'Atomically sets a task\'s status in BACKLOG.md and TASK_STATUS.md.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 function main() {
+  // T-917: help first, before the identity header's read of PROCESS_STATE.json.
+  if (handleHelpFlag(UPDATE_STATUS_USAGE)) return;
+
   printRepoIdentityHeader(ROOT, { mutating: true });
 
   const rootGuard = guardMutatingRoot(ROOT, '--update-status');

@@ -24,8 +24,14 @@
  *
  * --commit <hash>   When present, merges "commit: <hash> branch: <branch>" into
  *                   the Evidence field of each updated task in TASK_STATUS.md —
- *                   prior evidence text (e.g. QA notes) is preserved, not
- *                   clobbered. Accepts "HEAD" (resolved to the current repo's
+ *                   other evidence text (e.g. QA notes) is preserved. The FIRST
+ *                   existing commit fragment is replaced in place (a later one
+ *                   is left alone); with none present the pair is appended.
+ *                   A replacement to a different commit prints one line naming
+ *                   the task, the old and the new hash (and, when the field
+ *                   holds several fragments, that only the first was rewritten).
+ *                   The command writes the working tree only; it never stages
+ *                   or commits. Accepts "HEAD" (resolved to the current repo's
  *                   short hash) or a hex string matching /^[0-9a-f]{7,40}$/;
  *                   anything else is rejected before any git subprocess runs.
  *                   A format-valid hash not reachable from --branch prints a
@@ -67,7 +73,7 @@ const path = require('node:path');
 const { execSync } = require('node:child_process');
 const {
   resolveCommitHash,
-  mergeCommitEvidence,
+  mergeCommitEvidenceDetailed,
   printRepoIdentityHeader,
   guardMutatingRoot,
   locateTaskBlock,
@@ -76,6 +82,7 @@ const {
   readTaskField,
   updateTaskField,
   findAnnotatedFieldVariant,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -277,7 +284,17 @@ function printUsage() {
   console.error(`${DIM}Valid statuses: ${VALID_STATUSES.join(', ')}${RESET}`);
 }
 
+const SET_STATUS_USAGE = [
+  'Usage: ./scripts/mavp-operator --set-status T-NNN[,T-MMM,...] <status> [--commit <hash|HEAD>] [--branch <name>] [--from <status>] [--needs-fix-rounds <N>]',
+  '',
+  'Batch-updates status for one or more tasks in BACKLOG.md and TASK_STATUS.md.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 function main() {
+  // T-917: help first, before the identity header's read of PROCESS_STATE.json.
+  if (handleHelpFlag(SET_STATUS_USAGE)) return;
+
   printRepoIdentityHeader(ROOT, { mutating: true });
 
   const rootGuard = guardMutatingRoot(ROOT, '--set-status');
@@ -442,6 +459,9 @@ function main() {
   const evidenceOnly = [];
   const skipped = [];
   const stampedZeroIds = [];
+  // T-908: one entry per task whose existing commit fragment was rewritten to a
+  // different commit — surfaced in the summary below so the swap is never silent.
+  const replacedCommits = [];
 
   for (const taskId of normalisedIds) {
     const inBacklog = taskExistsInFile(backlog, taskId);
@@ -516,8 +536,11 @@ function main() {
       // reaches this point — the guard above `continue`s first.)
       if (commitHash && inTaskStatus) {
         const currentEvidence = readCurrentEvidence(taskStatus, taskId);
-        const mergedEvidence = mergeCommitEvidence(currentEvidence, commitHash, branchName);
-        taskStatus = updateTaskEvidence(taskStatus, taskId, mergedEvidence);
+        const merge = mergeCommitEvidenceDetailed(currentEvidence, commitHash, branchName);
+        taskStatus = updateTaskEvidence(taskStatus, taskId, merge.evidence);
+        if (merge.replaced) {
+          replacedCommits.push({ taskId, ...merge.replaced });
+        }
       }
       // --needs-fix-rounds (T-774): when supplied, write the EXPLICIT value
       // into every targeted task's Evidence field, on ANY target status — this
@@ -579,6 +602,15 @@ function main() {
     if (commitHash) {
       console.log(
         `${GREEN}Evidence written: commit: ${commitHash} branch: ${branchName}${RESET}`
+      );
+    }
+    for (const r of replacedCommits) {
+      const multi =
+        r.fragmentCount > 1
+          ? ` — the Evidence field holds ${r.fragmentCount} commit fragments; only the first was rewritten`
+          : '';
+      console.log(
+        `${YELLOW}Evidence commit replaced: ${r.taskId} ${r.oldHash} replaced by ${commitHash}${multi}${RESET}`
       );
     }
     if (commitWarning) {

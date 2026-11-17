@@ -41,7 +41,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { buildDeployQueue, renderSessionBrief, classifyNextAction, countIntakeUntriaged, countUnackedFeedbackAnswers, countUnreviewedSkillProposals, resolveIntakeDir, semverCompare, computeDueRechecks, computeMustRead, detectPermissionModeConflict, partitionInstallerManaged, splitMustReadOversized, generateProcessStateMd, guardReportingWrite, getDeployPendingForRepo, IN_FLIGHT_STATUSES, normalizeDeployField, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { handleHelpFlag, buildDeployQueue, renderSessionBrief, classifyNextAction, countIntakeUntriaged, countUnackedFeedbackAnswers, countUnreviewedSkillProposals, resolveIntakeDir, semverCompare, computeDueRechecks, computeMustRead, detectPermissionModeConflict, partitionInstallerManaged, splitMustReadOversized, generateProcessStateMd, guardReportingWrite, getDeployPendingForRepo, IN_FLIGHT_STATUSES, normalizeDeployField, parseBlockedBy, parseHold, parseModuleRegistry, parseTasksWithRepo, resolvePermissionMode, resolveContextBundlePath, todayIso } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
@@ -930,9 +930,8 @@ function main() {
 if (require.main === module) {
   try {
     // T-847: --help/-h exits before any state read or write (main() regenerates PROCESS_STATE.md).
-    if (process.argv.slice(2).some((arg) => arg === '--help' || arg === '-h')) {
-      process.stdout.write(USAGE_TEXT);
-    } else {
+    // T-917: the same check now goes through the shared helper (-h kept for this surface).
+    if (!handleHelpFlag(USAGE_TEXT, { short: true })) {
       main();
     }
   } catch (error) {

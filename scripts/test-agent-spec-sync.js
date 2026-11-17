@@ -186,13 +186,29 @@ function extractFrontmatterBlock(fileText) {
 // ---------------------------------------------------------------------------
 // T-753: no-frontmatter-hooks tripwire
 //
-// Measured 2026-09-21: a detector .claude/agents spec whose ONLY hook
-// unconditionally blocked every Bash call — pure shell, no node, no regex —
-// registered successfully and did NOT fire. Frontmatter `PreToolUse` hooks
-// do not execute in this harness at all (see T-752/T-753 BACKLOG entries).
-// A `hooks:` block is therefore dead weight at best, and a false sense of
-// protection at worst (T-752 removed exactly this from developer.md after
-// discovering its destructive-git guard had never once executed).
+// Two dated measurements and one documented rule (corrected by T-919):
+//   - 2026-09-21: a detector .claude/agents spec whose ONLY hook
+//     unconditionally blocked every Bash call — pure shell, no node, no
+//     regex — registered successfully and did NOT fire, with the workspace
+//     trust dialog unaccepted for this project (hasTrustDialogAccepted false).
+//   - 2026-11-17 (RC-7 re-measure): the same shape of probe DID fire — both
+//     Bash calls were blocked and the sentinel log held two lines — with the
+//     trust dialog accepted (hasTrustDialogAccepted true), on the running
+//     harness 2.1.326 (the CLAUDE_CODE_EXECPATH binary; the 2.1.197 figure
+//     recorded on 2026-09-21 was the separate PATH CLI, not the running
+//     harness).
+//   - Documented rule: project-level subagent frontmatter hooks run only
+//     after the workspace trust dialog is accepted for the folder that
+//     contains the agent file; until then the subagent still runs but its
+//     frontmatter hooks are skipped, with only a debug-log error. A -p
+//     (headless) session does not count as trusted.
+// A `hooks:` block is therefore trust-conditional: it gives no protection in
+// an untrusted workspace and nothing in the session says so. A false sense of
+// protection is the defect (T-752 removed exactly this from developer.md
+// after discovering its destructive-git guard had never once executed), and
+// an ill-formed `hooks:` value additionally unregisters the role silently.
+// Adding a block needs an architect-gated decision that replaces THIS
+// assertion.
 //
 // This is a SHAPE-ABSENCE check, not a shape-correctness check: it asserts
 // no top-level `hooks:` key exists at all. Do NOT extend this into a
@@ -209,11 +225,13 @@ function checkNoTopLevelHooksKey(fileText, fileLabel) {
   if (TOP_LEVEL_HOOKS_KEY_RE.test(block)) {
     return (
       `[no-hooks-tripwire] ${fileLabel}: frontmatter carries a top-level "hooks:" key. ` +
-      'Measured 2026-09-21: a detector hook that unconditionally blocked every Bash call ' +
-      'registered successfully and did NOT fire — frontmatter PreToolUse hooks do not execute ' +
-      'in this harness. Re-adding a "hooks:" block requires a quoted LIVE-FIRE observation ' +
-      'proving it actually executes under the current harness, plus removal of THIS assertion ' +
-      'with that evidence attached (see BACKLOG.md T-752/T-753).'
+      'Frontmatter hooks are trust-conditional: a probe did NOT fire on 2026-09-21 with the ' +
+      'workspace trust dialog unaccepted, and DID fire on 2026-11-17 with it accepted (running ' +
+      'harness 2.1.326). Project-level subagent frontmatter hooks are skipped silently until ' +
+      'trust is accepted for the folder containing the agent file, so a "hooks:" block gives no ' +
+      'protection in an untrusted workspace; an ill-formed "hooks:" value also silently ' +
+      'unregisters the role. Adding a "hooks:" block needs an architect-gated decision that ' +
+      'replaces THIS assertion (see BACKLOG.md T-752/T-753/T-919).'
     );
   }
   return null;

@@ -67,6 +67,7 @@ const {
   setBlockField,
   extractBlockField,
   buildTaskStatusEntry,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 
 const RESET = '\x1b[0m';
@@ -225,7 +226,18 @@ function runValidatorOnce() {
   return validatorExitCode;
 }
 
+const RESCOPE_TASK_USAGE = [
+  'Usage: ./scripts/mavp-operator --rescope-task T-NNN [--status <s>] [--owner <role>] [--title "..."]',
+  '',
+  'Atomically re-scopes or un-defers a task (moves it between Deferred Tasks and Active Wave).',
+  'At least one of --status / --owner / --title is required.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 function main() {
+  // T-917: help first, before the identity header's read of PROCESS_STATE.json.
+  if (handleHelpFlag(RESCOPE_TASK_USAGE)) return;
+
   printRepoIdentityHeader(ROOT, { mutating: true });
 
   const rootGuard = guardMutatingRoot(ROOT, '--rescope-task');

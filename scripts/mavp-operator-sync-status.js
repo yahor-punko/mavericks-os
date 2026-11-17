@@ -55,7 +55,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { buildTaskStatusEntry, insertIntoActiveTasks } = require('./mavp-operator-lib.js');
+const { buildTaskStatusEntry, insertIntoActiveTasks, handleHelpFlag } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -276,7 +276,17 @@ function applyStatuses(content, backlogMap) {
   return { updatedContent: result.join('\n'), changes, retitles };
 }
 
+const SYNC_STATUS_USAGE = [
+  'Usage: ./scripts/mavp-operator --sync-status',
+  '',
+  'Syncs TASK_STATUS.md Status lines (and task titles) from BACKLOG.md\'s Active Wave.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 function main() {
+  // T-917: help first, before any artifact read.
+  if (handleHelpFlag(SYNC_STATUS_USAGE)) return;
+
   // Read files — exit 0 with warning if missing
   if (!fs.existsSync(BACKLOG_MD)) {
     process.stderr.write('sync-status: BACKLOG.md not found at ' + BACKLOG_MD + '\n');

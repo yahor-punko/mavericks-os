@@ -38,7 +38,7 @@ for the allocated id, which you then place beside the workaround in your code.
 
 ## Evidence
 
-<!-- Commands run, output, file references. Describe paths and names in words if they are private. -->
+<!-- Commands run, output, file references. Describe paths and names in words if they are private. Search docs/core/DECISIONS.md first and cite the record id if one covers this; for a bug, say whether you reproduced it by running it (command and output) or inferred it from reading code. -->
 
 ## Proposal
 

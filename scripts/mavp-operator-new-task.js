@@ -29,6 +29,7 @@ const {
   guardMutatingRoot,
   resolveTaskOrigin,
   ARCHITECT_GATE_ADVISORY,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -108,7 +109,19 @@ function parseCliArgs(argv) {
   return flags;
 }
 
+const NEW_TASK_USAGE = [
+  'Usage: ./scripts/mavp-operator --new-task --title "..." [--owner <role>] [--repo <name>]',
+  '                                  [--depends-on <T-NNN>] [--requires-ux <y/n>] [--criteria "..."]',
+  '                                  [--verification-type <type>] [--origin architect]',
+  '',
+  'Creates and registers a new task in BACKLOG.md and TASK_STATUS.md. --title is required when',
+  'stdin is not a TTY; the other flags fall back to prompt defaults.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 async function main() {
+  // T-917: help first, before argument parsing and any artifact read.
+  if (handleHelpFlag(NEW_TASK_USAGE)) return;
   const flags = parseCliArgs(process.argv.slice(2));
   const isTTY = !!process.stdin.isTTY;
 

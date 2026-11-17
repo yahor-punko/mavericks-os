@@ -17,7 +17,7 @@
  *   1 — missing/invalid argument, or task ID not found in BACKLOG.md/TASK_STATUS.md
  */
 
-const { buildContextBundle } = require('./mavp-operator-lib.js');
+const { buildContextBundle, handleHelpFlag } = require('./mavp-operator-lib.js');
 
 function printUsage() {
   console.error('Usage: mavp-operator --emit-bundle T-NNN');
@@ -26,6 +26,14 @@ function printUsage() {
 }
 
 function main() {
+  // T-917: help first, before the task-id check and any artifact read.
+  if (handleHelpFlag([
+    'Usage: ./scripts/mavp-operator --emit-bundle T-NNN',
+    '',
+    'Prints the context prefetch bundle of task T-NNN to stdout. Read-only: writes nothing to disk.',
+    '--help prints this text and exits 0 before reading any project state.',
+  ])) return;
+
   const taskId = process.argv[2];
 
   if (!taskId || !/^T-\d+$/.test(taskId)) {

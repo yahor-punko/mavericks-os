@@ -105,10 +105,12 @@ Validator exit codes: `0` = healthy, `1` = drifting, `2` = repair required.
 ### --update-task
 
 ```bash
-./scripts/mavp-operator --update-task
+./scripts/mavp-operator --update-task [T-NNN <status> [owner]]
 ```
 
-- Interactive task status update.
+- Sets a task's status, and optionally its owner role, in BACKLOG.md and TASK_STATUS.md, then runs the validator.
+- Takes the task id, status and owner as positional arguments, or prompts for whatever is missing (a picker over the active tasks) when the id or status is omitted.
+- It changes status and owner only. To change a task's content (title, problem, acceptance criteria and the other fields) from an architect decomposition block, use `--apply-decomposition [FILE] --onto T-NNN`.
 
 ### --set-status
 
@@ -119,7 +121,10 @@ Validator exit codes: `0` = healthy, `1` = drifting, `2` = repair required.
 - Batch status update across BACKLOG + TASK_STATUS.
 - Optional --from guard: only transitions tasks whose current status equals <current_status>, skips others with a warning.
 - Optional --commit merges "commit: <hash> branch: <name>" into each updated task's TASK_STATUS.md Evidence field.
-  - Append, not clobber (prior evidence text, e.g. QA notes, is preserved).
+  - Other evidence text (e.g. QA notes) is preserved.
+  - The first existing commit fragment (a `commit:` key with its optional `branch:`) is replaced in place; with none present the pair is appended.
+  - When that replacement swaps in a different commit, the command prints one line naming the task, the replaced hash and the new hash. Re-running with the same hash, or a longer or shorter form of it, prints no such line.
+  - A field holding several commit fragments has only its first rewritten, and the line then also states how many fragments the field holds and that only the first was rewritten. Evidence that needs several commits is written by hand.
   - Accepts a hex hash (7-40 chars) or the literal HEAD (auto-resolved to the current repo's short hash).
   - Non-hex/non-HEAD input is rejected before any git call.
   - A format-valid hash not reachable from --branch (default main) prints a non-blocking warning but the write still proceeds.
@@ -131,6 +136,7 @@ Validator exit codes: `0` = healthy, `1` = drifting, `2` = repair required.
 - Explicit `--commit`/`--needs-fix-rounds` writes persist on a task already at the target status (summary line `Evidence updated, status unchanged (N): ...`).
 - A `--from`-skipped task receives no evidence write.
 - The auto-stamp still requires a genuine status transition (T-779).
+- The command writes the working tree only and never stages or commits. The edit is durable only after the session commit or a hand commit; before then a hard reset, a checkout of the file or a stash discards or hides it.
 
 ### --rename-task
 
@@ -285,8 +291,8 @@ Validator exit codes: `0` = healthy, `1` = drifting, `2` = repair required.
   - (c) `wave_goal` is null and the wave is not in `parked_waves` — record one with --set-wave-goal first;
   - (d) validator exit 2.
 - On success it archives the Active Wave heading, increments `wave`, resets `wave_session` to 1, clears `wave_goal` and the strategy note, resets `wave_status` to `planning`, writes `wave_summary`.
-- It commits (`git add -u`, tracked files only) as `chore: close wave N` with the trailers `Operator-Confirmed: <the statement, or "typed at terminal">` and `Wave-Goal: <the goal, or "parked — <reason>">`.
-- It then prints the ready-to-paste EXECUTION_LOG line `wave close: W<N> → W<N+1> — goal: "..." — operator-confirmed: "..." — close commit <hash>` (a bare hash — never the `commit:` key form, which the validator would read as evidence).
+- It commits (`git add -u`, tracked files only) as `chore: close wave N` with the trailers `Operator-Confirmed: <the statement, or "typed at terminal">` and `Wave-Goal: <the goal, or "parked — <reason>">`. When the closing wave is in `parked_waves`, `Wave-Goal:` is always `parked — <reason>` — the confirmation closes a parked wave and does not claim its goal was met — and a non-empty `wave_goal` is kept in a separate `Parked-Goal: <the goal>` trailer. On a parked wave the terminal path prints the parked reason first, shows the goal as `recorded goal (not confirmed as met)`, and its prompt asks to confirm closing the parked wave, not that its goal is met.
+- It then prints the ready-to-paste EXECUTION_LOG line `wave close: W<N> → W<N+1> — goal: "..." — operator-confirmed: "..." — close commit <hash>` (a bare hash — never the `commit:` key form, which the validator would read as evidence; for a parked wave with a goal set, `goal:` shows the parked reason and ` — recorded goal, not confirmed as met: "<goal>"` follows it).
 - On the agent path it also prints a `git push` reminder.
 - It never pushes on its own (see the **Wave advance confirmation** convention in CLAUDE.md).
 
@@ -381,10 +387,17 @@ Validator exit codes: `0` = healthy, `1` = drifting, `2` = repair required.
 ### --apply-decomposition
 
 ```bash
-./scripts/mavp-operator --apply-decomposition [FILE]
+./scripts/mavp-operator --apply-decomposition [FILE] [--repo <name>] [--onto LIST]
 ```
 
 - Apply architect decomposition block to BACKLOG + TASK_STATUS.
+- Without `--onto`, registers every task of the block under the next ids, stamped `Origin: architect`.
+- `--onto LIST` applies the block to already-registered tasks. LIST has exactly one comma-separated entry per task in the block, in block order; each entry is an existing task id (`T-NNN`, re-scoped in place) or the literal `new` (registered under the next id, as without `--onto`).
+  - A re-scoped task keeps its heading position, Status, Notes and Evidence; its Origin is stamped `architect`. Both headings take the block's title, Owner role and Verification type are written in both files, and every other field is written in BACKLOG only.
+  - A key absent from the block leaves the existing field untouched. A key present replaces it under the normalisation registration applies, so `depends_on: —`, `requires_ux: false` or an empty `touches:` removes the existing line, and a multi-paragraph `**Problem:**`, `**Acceptance criteria:**` or `**Evidence expected:**` is replaced as one field. An empty value for those three paragraph fields counts as absent.
+  - The command prints, per task, which fields it replaced. The context bundle is regenerated for every task it touches.
+  - `depends_on` titles resolve against the whole block in both directions, across re-scoped and new tasks alike.
+  - Refused with exit 1 and nothing written: an entry count different from the task count; an entry that is neither a task id nor `new`; an id with no heading (or a duplicated heading) in BACKLOG.md or TASK_STATUS.md; the same id twice; a target at `merged`, `deployed_dev`, `deployed_prod`, `runtime_verified` or `deprecated`; any task missing a required field (title, owner_role, verification_type) or carrying an unknown `verification_type`. Without `--onto`, a task missing a required field is skipped with a warning, as before.
 
 ### --arm-recheck
 
@@ -464,6 +477,7 @@ Validator exit codes: `0` = healthy, `1` = drifting, `2` = repair required.
 ```
 
 - Show all flags.
+- `--help` is honoured in any argument position (T-909) on both the canonical wrapper and the installer-generated adopter wrapper: if any argument equals `--help`, the wrapper prints its help and dispatches nothing, so `--set-next-action --help`, `--close-session --help` and `--reflect-skill developer --help` write nothing, commit nothing and start no script. The only exceptions are a first argument of `--agent` or `--snapshot`: those are dispatched as usual and keep their own `--help` usage. `--install` is not exempt: `--install --help` prints the wrapper help and does not start the installer (which has no `--help` handler of its own and would otherwise bootstrap the current directory).
 
 ### node scripts/mavp-install.js <dir>
 

@@ -421,6 +421,72 @@ async function main() {
     console.log('parked-wave waiver passed on both paths.');
   }
 
+  // ------------------------------------ T-910: parked wave WITH a goal set
+  {
+    const goal = 'ship the fixture';
+    const reason = 'waiting on external review';
+    const state = { wave_goal: goal, parked_waves: [`Wave 5 — ${reason}`] };
+    const statement = 'park-close it';
+
+    // (a) agent path: Wave-Goal records the parked reason, Parked-Goal carries G.
+    const dir = buildFixture('parked-goal-agent', { state });
+    const r = runAgent(dir, ['--operator-confirmed', statement]);
+    assert.strictEqual(r.status, 0, `parked+goal agent FAIL: expected exit 0, got ${r.status}:\n${r.out}`);
+    assert.strictEqual(git(dir, 'log', '-1', '--format=%(trailers:key=Wave-Goal,valueonly)'), `parked — ${reason}`, 'parked+goal agent FAIL: Wave-Goal trailer must be the parked reason');
+    assert.strictEqual(git(dir, 'log', '-1', '--format=%(trailers:key=Parked-Goal,valueonly)'), goal, 'parked+goal agent FAIL: Parked-Goal trailer must carry the goal');
+    assert.strictEqual(git(dir, 'log', '-1', '--format=%(trailers:key=Operator-Confirmed,valueonly)'), statement);
+    const shortHash = git(dir, 'rev-parse', '--short', 'HEAD');
+    const expectedLine = `wave close: W5 → W6 — goal: "parked — ${reason}" — recorded goal, not confirmed as met: "${goal}" — operator-confirmed: "${statement}" — close commit ${shortHash}`;
+    assert.ok(r.out.includes(expectedLine), `parked+goal agent FAIL: EXECUTION_LOG line.\nexpected: ${expectedLine}\ngot:\n${r.out}`);
+    assert.ok(!/Wave-Goal: ship the fixture/.test(git(dir, 'log', '-1', '--format=%B')), 'parked+goal agent FAIL: the goal must not sit in the Wave-Goal trailer');
+
+    // (b) parked wave with an empty goal: exact trailers and log line as before, no Parked-Goal.
+    const dirB = buildFixture('parked-nogoal-bytes', { state: { wave_goal: null, parked_waves: [`Wave 5 — ${reason}`] } });
+    const rb = runAgent(dirB, ['--operator-confirmed', statement]);
+    assert.strictEqual(rb.status, 0, `parked no-goal FAIL:\n${rb.out}`);
+    const bodyB = git(dirB, 'log', '-1', '--format=%B');
+    assert.strictEqual(bodyB, `chore: close wave 5\n\nOperator-Confirmed: ${statement}\nWave-Goal: parked — ${reason}`, `parked no-goal FAIL: message bytes changed:\n${bodyB}`);
+    const hashB = git(dirB, 'rev-parse', '--short', 'HEAD');
+    assert.ok(rb.out.includes(`wave close: W5 → W6 — goal: "parked — ${reason}" — operator-confirmed: "${statement}" — close commit ${hashB}`), `parked no-goal FAIL: log line changed:\n${rb.out}`);
+
+    // (c) non-parked wave with a goal (another wave is parked): exact bytes as before.
+    const dirC = buildFixture('nonparked-goal-bytes', { state: { parked_waves: ['Wave 4 — a different wave'] } });
+    const rc = runAgent(dirC, ['--operator-confirmed', statement]);
+    assert.strictEqual(rc.status, 0, `non-parked FAIL:\n${rc.out}`);
+    const bodyC = git(dirC, 'log', '-1', '--format=%B');
+    assert.strictEqual(bodyC, `chore: close wave 5\n\nOperator-Confirmed: ${statement}\nWave-Goal: ${goal}`, `non-parked FAIL: message bytes changed:\n${bodyC}`);
+    const hashC = git(dirC, 'rev-parse', '--short', 'HEAD');
+    assert.ok(rc.out.includes(`wave close: W5 → W6 — goal: "${goal}" — operator-confirmed: "${statement}" — close commit ${hashC}`), `non-parked FAIL: log line changed:\n${rc.out}`);
+    assert.ok(!rc.out.includes('not confirmed'), 'non-parked FAIL: must not carry the recorded-goal marker');
+
+    // (d) terminal path: parked reason first, goal shown as recorded, prompt does not ask about the goal being met.
+    const dirD = buildFixture('parked-goal-terminal', { state });
+    const t = await runTerminal(dirD, [
+      { match: 'Type the wave number', answer: '5' },
+      { match: 'Goal for wave 6', answer: '' },
+      { match: 'Run git push?', answer: 'n' },
+    ]);
+    assert.strictEqual(t.status, 0, `parked+goal terminal FAIL: expected exit 0, got ${t.status}:\n${t.out}`);
+    const iParked = t.out.indexOf(`Wave 5 is parked — ${reason}`);
+    const iRecorded = t.out.indexOf(`Wave 5 recorded goal (not confirmed as met): ${goal}`);
+    assert.ok(iParked !== -1 && iRecorded > iParked, `parked+goal terminal FAIL: parked line must come first, then the recorded goal:\n${t.out}`);
+    assert.ok(!t.out.includes('Wave 5 goal:'), 'parked+goal terminal FAIL: must not print the goal as "Wave 5 goal:"');
+    assert.ok(t.out.includes('Type the wave number (5) to confirm closing this parked wave: '), `parked+goal terminal FAIL: prompt text:\n${t.out}`);
+    assert.ok(!t.out.includes('goal is met and close it'), 'parked+goal terminal FAIL: the prompt must not ask to confirm the goal is met');
+    assert.strictEqual(git(dirD, 'log', '-1', '--format=%(trailers:key=Wave-Goal,valueonly)'), `parked — ${reason}`);
+    assert.strictEqual(git(dirD, 'log', '-1', '--format=%(trailers:key=Parked-Goal,valueonly)'), goal);
+    assert.ok(t.out.includes(`goal: "parked — ${reason}" — recorded goal, not confirmed as met: "${goal}" — operator-confirmed: "typed at terminal"`), `parked+goal terminal FAIL: log line:\n${t.out}`);
+
+    // (e) the refusals still fire on a parked wave with a goal (Active tasks left).
+    const dirE = buildFixture('parked-goal-refuse', { activeStatus: 'in_progress', state });
+    const beforeE = snapshot(dirE);
+    const re = runAgent(dirE, ['--operator-confirmed', statement]);
+    assert.strictEqual(re.status, 1, `parked+goal refusal FAIL:\n${re.out}`);
+    assert.ok(re.out.includes('T-901 still in_progress'), `parked+goal refusal FAIL:\n${re.out}`);
+    assertUnchanged(dirE, beforeE, 'parked+goal refusal');
+    console.log('T-910 passed: parked wave with a goal records the reason in Wave-Goal, the goal in Parked-Goal; empty-goal and non-parked bytes unchanged; terminal text honest.');
+  }
+
   // ------------------------------------- double-bump protection (Case 13)
   {
     // A refused (validator exit 2) run must not bump; after repair the re-run

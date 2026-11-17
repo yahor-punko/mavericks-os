@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const readline = require('node:readline');
-const { collectOperatorData, clip, formatIsoTime, IN_FLIGHT_STATUSES, normalizeWhitespace, recheckRef, relativeTime, renderThinSnapshot, shortenSessionKey } = require('./mavp-operator-lib');
+const { collectOperatorData, clip, formatIsoTime, handleHelpFlag, IN_FLIGHT_STATUSES, normalizeWhitespace, recheckRef, relativeTime, renderThinSnapshot, shortenSessionKey } = require('./mavp-operator-lib');
 
 const MAX_WAVE_TASKS = 10;
 
@@ -416,7 +416,17 @@ function draw() {
   process.stdout.write('\n');
 }
 
+const DASHBOARD_USAGE = [
+  'Usage: ./scripts/mavp-operator [--watch]',
+  '',
+  'Opens the operator dashboard (no flag) or its watch mode (--watch: r = refresh, s = snapshot, q = quit).',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 function main() {
+  // T-917: help first, before any state collection.
+  if (handleHelpFlag(DASHBOARD_USAGE)) return;
+
   const watch = process.argv.includes('--watch');
 
   if (!watch || !process.stdin.isTTY || !process.stdout.isTTY) {

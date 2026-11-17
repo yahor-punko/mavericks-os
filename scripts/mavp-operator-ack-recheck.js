@@ -3,7 +3,15 @@
 // Usage: node mavp-operator-ack-recheck.js RC-N [--rearm]
 
 const path = require('node:path');
-const { ackRecheck, ROOT, printRepoIdentityHeader, guardMutatingRoot } = require('./mavp-operator-lib.js');
+const { ackRecheck, ROOT, printRepoIdentityHeader, guardMutatingRoot, handleHelpFlag } = require('./mavp-operator-lib.js');
+
+// T-917: help first, before the identity header's read of PROCESS_STATE.json and any other read or write.
+if (handleHelpFlag([
+  'Usage: ./scripts/mavp-operator --ack-recheck RC-N [--rearm] [--due YYYY-MM-DD]',
+  '',
+  'Acknowledges a recheck (removes it from rechecks[]); --rearm reschedules it instead.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+])) return;
 
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
 

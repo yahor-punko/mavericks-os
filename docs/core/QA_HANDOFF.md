@@ -39,9 +39,13 @@ If a multi-task integration QA pass is genuinely required, implementation tasks 
 - what was checked recorded
 - reason for pass/fail recorded
 - for tasks with `requires_config_check: true`: `config_check:` block must be present in evidence — list each config key confirmed present and correct in target environment; `qa_passed` must not be set without it
+- a finding QA classifies as blocking (a `needs_fix` item) means `qa_passed` is not booked; a report that words a finding as must-fix while returning a pass verdict goes back to QA for one verdict
+- a blocking finding is closed only by a fix round QA re-verifies, or by QA withdrawing it with a reason — never by moving it to Notes, to a follow-up task or to a deployment prerequisite
+- the single exception is the operator's explicit decision to ship with it open: recorded verbatim in Evidence, with the finding registered as a follow-up task through the architect gate before `merged` (see `docs/core/TASK_LIFECYCLE.md` — "Transition rules")
 
 ### merged
 - orchestrator acceptance recorded
+- before booking, the Main Agent re-reads the last report of each review stage (UX, security, QA) for open blocking findings (a QA `needs_fix` item, a UX must-fix, a security critical or high); an open one blocks `merged` unless the operator's ship-with-it-open decision is recorded verbatim in Evidence and the finding is registered as a follow-up task through the architect gate
 - next-task selection updated
 - `completed_at` date recorded in TASK_STATUS when known (enables cycle time tracking)
 - for `runtime` and `unit` verification types: evidence must include `commit: <hash> — <one-line summary>` (the validator warns if absent)

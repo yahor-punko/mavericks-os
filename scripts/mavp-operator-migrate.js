@@ -33,6 +33,7 @@ const {
   resolveIntakeDir,
   listIntakeItems,
   semverCompare,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 const { MAVERICKS_VERSION } = require('./mavp-version.js');
 
@@ -115,6 +116,8 @@ function readScannable(abs) {
 }
 
 function main(argv) {
+  // T-917: help first, before the argument loop (which refuses unknown arguments) and any read.
+  if (handleHelpFlag([USAGE, '', '--help prints this text and exits 0 before reading anything.'], { argv })) return;
   let legacy = false;
   for (const arg of argv) {
     if (arg === '--legacy') legacy = true;

@@ -136,6 +136,7 @@ const {
   isInstallerManagedPath,
   parseModuleRegistryFromText,
   readFileAtRevision,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 
 const INDEX = ':index'; // sentinel revision meaning "the staged index"
@@ -673,7 +674,9 @@ function run(argv) {
 if (require.main === module) {
   let code;
   try {
-    code = run(process.argv.slice(2));
+    // T-917: help first, in ANY argument position and before parseArgs() (which refuses unknown
+    // arguments) or any git call. run() keeps its own --help branch for in-process callers.
+    code = handleHelpFlag(usage(), { short: true }) ? 0 : run(process.argv.slice(2));
   } catch (err) {
     if (err instanceof UsageError) {
       console.error(`check-archive: ${err.message}`);

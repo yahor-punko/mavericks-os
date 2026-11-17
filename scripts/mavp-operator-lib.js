@@ -21,6 +21,39 @@ function writeUtf8(filePath, content) {
 }
 
 /**
+ * T-917: shared --help handler for every script the operator wrapper dispatches.
+ *
+ * Running a dispatched script directly (`node scripts/<script>.js --help`)
+ * bypasses the wrapper's help-anywhere handling (T-909), so a script that
+ * treats argv[2] as a value used to store the literal text --help, and a
+ * script with no argument parsing ran its whole ritual. Each script therefore
+ * calls this helper as its first statement (before any read, write, git call,
+ * header print or prompt).
+ *
+ * `--help` in ANY argument position counts, mirroring the wrapper. `-h` is
+ * accepted only when `options.short` is true (the two reporting surfaces that
+ * always took it): for the free-text setters `-h` is a legal value.
+ *
+ * On a hit the usage text goes to stdout, process.exitCode is set to 0 (never
+ * process.exit(), so a piped stdout drains) and the function returns true: the
+ * caller must then skip its remaining work. Returns false and does nothing
+ * otherwise.
+ *
+ * @param {string|string[]} usage - usage text (an array is joined with newlines)
+ * @param {{argv?: string[], short?: boolean}} [options]
+ * @returns {boolean} true when help was requested and printed
+ */
+function handleHelpFlag(usage, options = {}) {
+  const argv = Array.isArray(options.argv) ? options.argv : process.argv.slice(2);
+  const wantsHelp = argv.some((arg) => arg === '--help' || (options.short === true && arg === '-h'));
+  if (!wantsHelp) return false;
+  const text = Array.isArray(usage) ? usage.join('\n') : String(usage);
+  process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
+  process.exitCode = 0;
+  return true;
+}
+
+/**
  * Print a first-line repo-identity header so a wrong-repo run (stale shell cwd,
  * or a stale MAVERICKS_PROJECT_ROOT) is obvious immediately. Reads wave and
  * initiative from <root>/PROCESS_STATE.json; degrades to a path-only line when
@@ -2499,7 +2532,7 @@ function parseAllTaskBlocks(markdown) {
 /**
  * Extract trajectory records for a given role from TASK_STATUS.md and BACKLOG.md.
  *
- * Reads all terminal-success tasks (merged, deployed_dev, deployed_prod) whose
+ * Reads all terminal-success tasks (merged, runtime_verified, deployed_dev, deployed_prod) whose
  * Owner role field (or the Owner fallback field) matches the given role, and
  * emits one trajectory record per matching task using evidence text heuristics.
  * Attribution is by that declared field, not by which agent executed the task.
@@ -2549,7 +2582,8 @@ function extractTrajectories(role, options = {}) {
     const taskId = idMatch[1];
 
     // Check status is a terminal-success state
-    const DONE = new Set(['merged', 'deployed_dev', 'deployed_prod']);
+    // T-907: runtime_verified is a post-merge completed status, so it counts as terminal-success.
+    const DONE = new Set(['merged', 'runtime_verified', 'deployed_dev', 'deployed_prod']);
     const statusMatch = block.match(/[-*]\s+\*\*Status:\*\*\s+(\S+)/i);
     if (!statusMatch) continue;
     const status = normalizeWhitespace(statusMatch[1]);
@@ -4418,16 +4452,28 @@ function extractBlockField(block, fieldName) {
  * @param {string} block - Raw task block starting with `### T-NNN`
  * @param {string} fieldName - e.g. "Status", "Owner role"
  * @param {string} value
+ * @param {{afterBullets?: boolean}} [options] - `afterBullets` (T-912) inserts a
+ *   missing field after the heading's contiguous run of top-level bullets
+ *   (and their indented continuation lines) instead of right after the
+ *   heading; a field that already exists is replaced in place either way.
  * @returns {string} The updated block
  */
-function setBlockField(block, fieldName, value) {
+function setBlockField(block, fieldName, value, options) {
   const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const fieldRe = new RegExp(`^(- \\*\\*${escaped}:\\*\\*)\\s*.*$`, 'm');
   if (fieldRe.test(block)) {
-    return block.replace(fieldRe, `$1 ${value}`);
+    // Function replacer: a value carrying `$&`, `$1` or `$'` must land verbatim.
+    return block.replace(fieldRe, (_match, key) => `${key} ${value}`);
   }
   const lines = block.split('\n');
-  lines.splice(1, 0, `- **${fieldName}:** ${value}`);
+  let at = 1;
+  if (options && options.afterBullets) {
+    while (at < lines.length && lines[at].startsWith('- ')) {
+      at++;
+      while (at < lines.length && /^\s+\S/.test(lines[at])) at++;
+    }
+  }
+  lines.splice(at, 0, `- **${fieldName}:** ${value}`);
   return lines.join('\n');
 }
 
@@ -4516,6 +4562,81 @@ function updateTaskField(markdown, taskId, fieldName, value) {
   const updatedBlock = setBlockField(loc.rawBlock, fieldName, value);
   const updated = markdown.slice(0, loc.startIndex) + updatedBlock + markdown.slice(loc.endIndex);
   return { ok: true, updated, reason: null };
+}
+
+/**
+ * Remove a single-line `- **Field:** value` bullet from a raw task block
+ * (T-912). The bounded counterpart of setBlockField() for "this field must
+ * not exist": the bullet line and any directly following indented
+ * continuation lines (sub-bullets) are dropped; every other line is kept
+ * byte-for-byte. A block without the field is returned unchanged.
+ *
+ * @param {string} block - Raw task block starting with the task heading
+ * @param {string} fieldName - e.g. "Depends on", "Requires ux"
+ * @returns {string} The updated block
+ */
+function removeBlockField(block, fieldName) {
+  const prefix = `- **${fieldName}:**`;
+  const lines = block.split('\n');
+  const at = lines.findIndex((line) => line.startsWith(prefix));
+  if (at === -1) return block;
+  let end = at + 1;
+  while (end < lines.length && /^\s+\S/.test(lines[end])) end++;
+  lines.splice(at, end - at);
+  return lines.join('\n');
+}
+
+/**
+ * True when `line` opens a new field inside a task block: a bold-labelled
+ * paragraph (`**Label:** ...`), a top-level bullet field (`- **Label:** ...`)
+ * or a markdown heading. Used as the end boundary of a bold-paragraph field.
+ */
+function isBlockFieldBoundary(line) {
+  return /^\*\*[^*\n]+:\*\*/.test(line) || /^- \*\*/.test(line) || /^#{1,6}\s/.test(line);
+}
+
+/**
+ * Replace (or append) a bold-paragraph field — a `**Label:** text` paragraph
+ * that may span several paragraphs — inside a raw task block (T-912).
+ *
+ * Boundary definition (the one place it is stated): the field starts at the
+ * first line beginning with `**Label:**` and runs up to, but not including,
+ * the next line that opens another field (another `**Other:**` paragraph, a
+ * top-level `- **Other:**` bullet, or a heading), or the end of the block.
+ * Blank lines at the end of that range are not part of the field and stay in
+ * place, so the spacing around the field is preserved. The replaced range is
+ * rewritten as the single paragraph `**Label:** value`.
+ *
+ * When no paragraph exists but the single-line bullet form
+ * `- **Label:** ...` does, that bullet's value is replaced instead (the
+ * quick-task and new-task layout). When neither exists the paragraph is
+ * appended after the block's last non-blank line, preceded by one blank line.
+ *
+ * @param {string} block - Raw task block starting with the task heading
+ * @param {string} label - e.g. "Problem", "Acceptance criteria"
+ * @param {string} value - Replacement text (rendered after the label)
+ * @returns {string} The updated block
+ */
+function setBlockParagraphField(block, label, value) {
+  const prefix = `**${label}:**`;
+  const rendered = `${prefix} ${value}`.split('\n');
+  const lines = block.split('\n');
+  const at = lines.findIndex((line) => line.startsWith(prefix));
+  if (at === -1) {
+    if (lines.some((line) => line.startsWith(`- ${prefix}`))) {
+      return setBlockField(block, label, value);
+    }
+    let last = lines.length - 1;
+    while (last > 0 && lines[last].trim() === '') last--;
+    lines.splice(last + 1, 0, '', ...rendered);
+    return lines.join('\n');
+  }
+  let end = at + 1;
+  while (end < lines.length && !isBlockFieldBoundary(lines[end])) end++;
+  let last = end - 1;
+  while (last > at && lines[last].trim() === '') last--;
+  lines.splice(at, last - at + 1, ...rendered);
+  return lines.join('\n');
 }
 
 /**
@@ -5141,25 +5262,47 @@ function resolveCommitHash(root, rawHash, branchName) {
 /**
  * T-446 — merge a resolved "commit: <hash> branch: <branch>" pair into an
  * existing Evidence field string without deleting prior text (e.g. QA notes).
- * If the evidence already contains a `commit: ... [branch: ...]` token, that
- * token is replaced in place (no duplication). Otherwise the new pair is
- * appended to the end of the existing text, verbatim-preserving it.
+ * If the evidence already contains a `commit: ... [branch: ...]` token, the
+ * FIRST such token is replaced in place (no duplication); any later fragment
+ * is left untouched. Otherwise the new pair is appended to the end of the
+ * existing text, verbatim-preserving it.
+ *
+ * T-908 — the replacement is now reported: this returns the merged string
+ * plus, when an existing fragment was rewritten to a DIFFERENT commit, the
+ * replaced hash and the number of commit fragments the field held. A hash
+ * that merely matches the new one in a longer or shorter form (one is a
+ * prefix of the other, case-insensitive) is not a replacement and reports
+ * `replaced: null`; so does the append path. `mergeCommitEvidence()` below
+ * keeps its string-only contract for existing callers.
  *
  * @param {string} existingEvidence - Current Evidence field text (may be empty or "—").
  * @param {string} hash - Resolved commit hash to write.
  * @param {string} branch - Branch name to write.
- * @returns {string}
+ * @returns {{evidence: string, replaced: ({oldHash: string, fragmentCount: number}|null)}}
  */
-function mergeCommitEvidence(existingEvidence, hash, branch) {
+function mergeCommitEvidenceDetailed(existingEvidence, hash, branch) {
   const replacement = `commit: ${hash} branch: ${branch}`;
   const trimmed = (existingEvidence || '').trim();
   const placeholder = trimmed === '—' || trimmed === '-' ? '' : trimmed;
-  const commitBranchRe = /commit:\s*\S+(?:\s+branch:\s*\S+)?/;
-  if (commitBranchRe.test(placeholder)) {
-    return placeholder.replace(commitBranchRe, replacement);
+  const commitBranchRe = /commit:\s*(\S+)(?:\s+branch:\s*\S+)?/;
+  const first = commitBranchRe.exec(placeholder);
+  if (first) {
+    const oldToken = first[1];
+    const fragmentCount = (placeholder.match(/commit:\s*\S+(?:\s+branch:\s*\S+)?/g) || []).length;
+    const oldLower = oldToken.toLowerCase();
+    const newLower = String(hash).toLowerCase();
+    const sameCommit = oldLower.startsWith(newLower) || newLower.startsWith(oldLower);
+    return {
+      evidence: placeholder.replace(commitBranchRe, replacement),
+      replaced: sameCommit ? null : { oldHash: oldToken, fragmentCount },
+    };
   }
-  if (!placeholder) return replacement;
-  return `${placeholder} ${replacement}`;
+  if (!placeholder) return { evidence: replacement, replaced: null };
+  return { evidence: `${placeholder} ${replacement}`, replaced: null };
+}
+
+function mergeCommitEvidence(existingEvidence, hash, branch) {
+  return mergeCommitEvidenceDetailed(existingEvidence, hash, branch).evidence;
 }
 
 /**
@@ -7324,6 +7467,7 @@ function renderSessionBrief(agentJson, opts) {
 
 module.exports = {
   ROOT,
+  handleHelpFlag,
   renderSessionBrief,
   computeShipsIn,
   countIntakeUntriaged,
@@ -7469,6 +7613,7 @@ module.exports = {
   locateTaskBlock,
   lookupTaskTitle,
   mergeCommitEvidence,
+  mergeCommitEvidenceDetailed,
   MODULE_META_HEADINGS,
   moveActiveBlocksToParkedSection,
   moveParkedBlocksToActiveSection,
@@ -7514,6 +7659,8 @@ module.exports = {
   safeRealpath,
   scoreTrajectory,
   setBlockField,
+  removeBlockField,
+  setBlockParagraphField,
   shortenSessionKey,
   splitTrajectoriesForReflect,
   summarizeTrajectories,

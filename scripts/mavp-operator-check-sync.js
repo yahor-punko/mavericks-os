@@ -29,7 +29,7 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 
 const { composePostToolUseHookCommand, isManagedPostToolUseCommand } = require('./mavp-install.js');
-const { findClaudeMdOnDemandDuplicates, isFrameworkSourceTree } = require('./mavp-operator-lib.js');
+const { findClaudeMdOnDemandDuplicates, isFrameworkSourceTree, handleHelpFlag } = require('./mavp-operator-lib.js');
 
 /**
  * Resolve the framework root --check-sync compares against (T-894).
@@ -386,7 +386,17 @@ function checkProject(projectPath) {
   return drifted;
 }
 
+const CHECK_SYNC_USAGE = [
+  'Usage: ./scripts/mavp-operator --check-sync',
+  '',
+  'Compares agent/skill files in known projects against the mavericks source. Read-only; takes no options.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 function main() {
+  // T-917: help first, before any directory scan or file read.
+  if (handleHelpFlag(CHECK_SYNC_USAGE)) return;
+
   console.log(`\n${BOLD}MavP Check-Sync${RESET} ${DIM}comparing against ${MAVERICKS_ROOT}${RESET}\n`);
 
   const homeMavericksPath = path.join(os.homedir(), '.mavericks');

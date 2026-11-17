@@ -61,6 +61,7 @@ const {
   appendRecheckEntry,
   todayIso,
   validateUntil,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -254,7 +255,20 @@ function unparkWave(waveNumber) {
   };
 }
 
+const PARK_WAVE_USAGE = [
+  'Usage: ./scripts/mavp-operator --park-wave [N] --reason "text" [--until YYYY-MM-DD]',
+  '       ./scripts/mavp-operator --unpark-wave <N>',
+  '',
+  '--park-wave moves ALL of wave N\'s (default: the current wave) task blocks out of BACKLOG.md\'s Active Wave',
+  'and TASK_STATUS.md\'s Active tasks into parked sections and records the wave and reason in parked_waves;',
+  '--until arms a wave recheck. --unpark-wave restores the blocks byte-for-byte and removes the entry.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 function main() {
+  // T-917: help first, before the identity header's read of PROCESS_STATE.json.
+  if (handleHelpFlag(PARK_WAVE_USAGE)) return;
+
   printRepoIdentityHeader(ROOT, { mutating: true });
 
   const mode = process.argv[2];

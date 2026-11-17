@@ -377,7 +377,25 @@ MAVERICKS="$MAVERICKS_ROOT/scripts"
 export MAVERICKS_PROJECT_ROOT="$PROJECT_ROOT"
 export MAVERICKS_SCRIPTS="$MAVERICKS"
 
-if [[ "\${1-}" == "--help" ]]; then
+# --help in ANY argument position prints this help and dispatches nothing (T-909),
+# except when the first argument is --agent or --snapshot: those two keep
+# their own --help usage and are dispatched as usual. --install is NOT exempt:
+# the installer has no --help handler and would bootstrap the current directory. Several
+# dispatched flags take free-form values, so a trailing --help used to be
+# forwarded as a value (or dropped) and ran the flag's real action.
+WANT_HELP=0
+case "\${1-}" in
+  --agent|--snapshot) ;;
+  *)
+    for MAVP_ARG in "$@"; do
+      if [[ "$MAVP_ARG" == "--help" ]]; then
+        WANT_HELP=1
+      fi
+    done
+    ;;
+esac
+
+if [[ "\${1-}" == "--help" || "$WANT_HELP" == "1" ]]; then
   echo "Usage: ./scripts/mavp-operator [flag]"
   echo ""
   echo "Flags:"
@@ -410,7 +428,9 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "                       Usage: --intake [--brief [ids] | --triage <id> --disposition \\"<value>\\" [--note \\"text\\"] | --publish-answers [--operator-confirmed \\"statement\\"] | --pull [--repo <owner/repo>]]"
   echo "  --new-task       Interactively create and register a new task"
   echo "  --quick-task     Quickly register a task skeleton (title + problem only)"
-  echo "  --apply-decomposition [FILE]  Parse architect decomposition block and register tasks"
+  echo "  --apply-decomposition [FILE] [--onto LIST]  Parse architect decomposition block and register tasks"
+  echo "                   --onto LIST re-scopes already-registered tasks from the block instead of registering them:"
+  echo "                   one comma-separated entry per block task, each an existing task id or new (register as usual)"
   echo "  --quick-merge    Fast-track an XS change directly to merged (title + commit hash)"
   echo "  --update-task    Interactively update an existing task"
   echo "  --merge-task     Promote a qa_passed task to merged with evidence"
@@ -451,7 +471,8 @@ if [[ "\${1-}" == "--help" ]]; then
   echo "  --demo           Run a narrated walkthrough of the operator loop against a throwaway fixture"
   echo "                   Usage: --demo [--phase dashboard|lifecycle|drift|all] [--step] [--keep] [--no-color] [--reveal <ms>]"
   echo "  --version        Print the installed Mavericks framework version"
-  echo "  --help           Show this help message and exit"
+  echo "  --help           Show this help message and exit (accepted in any argument position; dispatches nothing,"
+  echo "                   except --agent and --snapshot, which keep their own --help usage)"
   echo ""
   echo "(no flag)          Open the operator dashboard"
   exit 0
@@ -1453,8 +1474,48 @@ function detectBehindUpstreamGuard(sourceRoot) {
   }
 }
 
+/**
+ * Usage text printed for --help / -h (T-918). Plain text, no banner, no ANSI.
+ * Names the target argument and every flag main() parses.
+ */
+function buildInstallerUsage() {
+  return [
+    'Usage: node scripts/mavp-install.js [mode] [target-dir] [options]',
+    '',
+    'Bootstraps (or re-syncs) the Mavericks framework into a project.',
+    '',
+    'Arguments:',
+    '  target-dir             Project directory to install into (default: the current directory)',
+    '',
+    'Modes (at most one; with none, a fresh install creates the missing files):',
+    '  --check                Report what would be done; exit 1 if not bootstrapped. Writes nothing.',
+    '  --update               Re-sync agents, skills, rules, hooks and project scripts from the framework.',
+    '                         Never touches BACKLOG.md, TASK_STATUS.md or PROCESS_STATE.*.',
+    '  --hooks-only           Sync only the managed hooks into .claude/settings.local.json.',
+    '  --strip                Destructive pre-publish cleanup; needs an interactive terminal and confirmation.',
+    '',
+    'Options:',
+    '  --yes, -y              Accept the default answer to the fresh-install prompt (ignored by --strip).',
+    '  --no-hooks             With --update, skip the hooks merge for that run.',
+    '  --transcript-archive   Also activate the transcript-archive hook (fresh install, --update, --hooks-only).',
+    '  --stale-source-ok      Proceed even when the framework source is behind its upstream.',
+    '  --keep-artifacts       With --strip, leave the state artifacts on disk untouched.',
+    '  --help, -h             Print this usage and exit 0. Writes nothing, in every mode.',
+    ''
+  ].join('\n');
+}
+
 async function main() {
   const args = process.argv.slice(2);
+  // T-918: help is the first statement of main() — before the banner and before
+  // any guard (so no git fetch is started) — and it wins in every mode. Without
+  // it, the first non-dash argument is the target and the fallback is
+  // process.cwd(), so `--help` used to run a real bootstrap in the cwd.
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(buildInstallerUsage());
+    process.exitCode = 0;
+    return;
+  }
   const checkOnly = args.includes('--check');
   const updateOnly = args.includes('--update');
   const stripMode = args.includes('--strip');

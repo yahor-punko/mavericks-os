@@ -22,7 +22,19 @@ const {
   guardMutatingRoot,
   classifyNextAction,
   generateProcessStateMd,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
+
+// T-917: --help is the first statement, before any read or write; without it
+// the literal text --help would become the stored next_action.
+if (handleHelpFlag([
+  'Usage: ./scripts/mavp-operator --set-next-action "text"',
+  '',
+  'Sets PROCESS_STATE.json next_action to the text (an empty string clears it) and',
+  'regenerates PROCESS_STATE.md. A value containing a volatile fact is refused',
+  '(exit 1, nothing written); a value not starting with T-NNN is written with an advisory.',
+  '--help prints this text and exits 0 before reading or writing any project state.',
+])) return;
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');

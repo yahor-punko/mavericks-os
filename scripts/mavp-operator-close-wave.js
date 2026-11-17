@@ -56,6 +56,7 @@ const {
   parseActiveWaveMergedTitles,
   generateProcessStateMd,
   guardMutatingRoot,
+  handleHelpFlag,
   printRepoIdentityHeader,
 } = require('./mavp-operator-lib.js');
 
@@ -172,7 +173,19 @@ function makeAsker(rl) {
   });
 }
 
+const CLOSE_WAVE_USAGE = [
+  'Usage: ./scripts/mavp-operator --close-wave [--interactive] [--operator-confirmed "statement"] [--next-goal "text"]',
+  '',
+  'The ONLY wave-advance path. Terminal path: the operator types the wave number.',
+  'Agent path: --operator-confirmed "<the operator\'s statement, verbatim>" is required.',
+  'Run --close-session first: it sweeps merged tasks out of Active tasks.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 async function main() {
+  // T-917: help first, before the identity header's read of PROCESS_STATE.json.
+  if (handleHelpFlag(CLOSE_WAVE_USAGE)) return;
+
   printRepoIdentityHeader(ROOT, { mutating: true });
 
   const rootGuard = guardMutatingRoot(ROOT, '--close-wave');
@@ -239,7 +252,12 @@ async function main() {
   const backlogBefore = fs.existsSync(BACKLOG_MD) ? fs.readFileSync(BACKLOG_MD, 'utf8') : '';
   const mergedTitles = parseActiveWaveMergedTitles(backlogBefore, waveN);
   const autoSummary = buildAutoSummary(waveN, mergedTitles);
-  const goalForTrailer = goalText !== null ? goalText : `parked — ${parked.reason}`;
+  // T-910: a parked wave is recorded as parked in the Wave-Goal trailer and the
+  // log line even when a goal is set — the operator's confirmation on a parked
+  // wave closes it, it does not claim the goal was met. A non-empty goal rides
+  // along in a separate Parked-Goal trailer that makes no such claim.
+  const goalForTrailer = parked ? `parked — ${parked.reason}` : goalText;
+  const parkedGoal = parked && goalText !== null ? oneLine(goalText) : null;
 
   let nextGoal = args.nextGoal;
   let confirmationLabel = statement;
@@ -248,7 +266,12 @@ async function main() {
 
   if (terminalPath) {
     console.log(`\n${BOLD}MavP Close Wave${RESET}\n`);
-    console.log(goalText !== null ? `Wave ${waveN} goal: ${goalText}` : `Wave ${waveN} is parked — ${parked.reason}`);
+    if (parked) {
+      console.log(`Wave ${waveN} is parked — ${parked.reason}`);
+      if (parkedGoal !== null) console.log(`Wave ${waveN} recorded goal (not confirmed as met): ${parkedGoal}`);
+    } else {
+      console.log(`Wave ${waveN} goal: ${goalText}`);
+    }
     console.log(autoSummary);
     const receipt = buildSuiteReceiptLine(ROOT);
     if (receipt) console.log(receipt);
@@ -258,7 +281,9 @@ async function main() {
 
     rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     ask = makeAsker(rl);
-    const typed = await ask(`Type the wave number (${waveN}) to confirm its goal is met and close it: `);
+    const typed = await ask(parked
+      ? `Type the wave number (${waveN}) to confirm closing this parked wave: `
+      : `Type the wave number (${waveN}) to confirm its goal is met and close it: `);
     if (typed === null || typed.trim() !== String(waveN)) {
       if (rl) rl.close();
       console.log(`\nAborted — wave number not confirmed; nothing was changed.`);
@@ -296,7 +321,8 @@ async function main() {
   // Commit: subject `chore: close wave N`, trailers in the final paragraph.
   let closeHash = null;
   const subject = `chore: close wave ${waveN}`;
-  const trailers = `Operator-Confirmed: ${confirmationLabel}\nWave-Goal: ${oneLine(goalForTrailer)}`;
+  const trailers = `Operator-Confirmed: ${confirmationLabel}\nWave-Goal: ${oneLine(goalForTrailer)}`
+    + (parkedGoal !== null ? `\nParked-Goal: ${parkedGoal}` : '');
   const addRes = spawnSync('git', ['-C', ROOT, 'add', '-u'], { encoding: 'utf8' });
   const commitRes = addRes.status === 0
     ? spawnSync('git', ['-C', ROOT, 'commit', '-m', subject, '-m', trailers], { encoding: 'utf8' })
@@ -315,7 +341,8 @@ async function main() {
   // literal evidence-key form (the key, a colon and a hash) — a bare hash only.
   if (closeHash) {
     console.log(`\n${BOLD}EXECUTION_LOG line:${RESET}`);
-    console.log(`wave close: W${waveN} → W${newWave} — goal: "${oneLine(goalForTrailer)}" — operator-confirmed: "${confirmationLabel}" — close commit ${closeHash}`);
+    const recorded = parkedGoal !== null ? ` — recorded goal, not confirmed as met: "${parkedGoal}"` : '';
+    console.log(`wave close: W${waveN} → W${newWave} — goal: "${oneLine(goalForTrailer)}"${recorded} — operator-confirmed: "${confirmationLabel}" — close commit ${closeHash}`);
   }
 
   if (terminalPath) {

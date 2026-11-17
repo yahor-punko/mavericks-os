@@ -9,9 +9,10 @@
  *
  * Every phase builds its own fixture under os.tmpdir() from templates/, then
  * shells out to the REAL operator tools (dashboard / set-status / validator)
- * via child_process — this script never require()s mavp-operator-lib.js or any
- * mutator script in-process, because ROOT resolution would bind to the real
- * repo instead of the fixture. The fixture is always removed afterwards
+ * via child_process — this script never uses mavp-operator-lib.js state or any
+ * mutator script in-process (the one in-process use is the handleHelpFlag()
+ * call at the top of main(), which touches no project state), because ROOT
+ * resolution would bind to the real repo instead of the fixture. The fixture is always removed afterwards
  * (normal exit or SIGINT) unless --keep is passed.
  *
  * Usage:
@@ -523,7 +524,18 @@ function parseArgs(argv) {
   return opts;
 }
 
+const DEMO_USAGE = [
+  'Usage: ./scripts/mavp-operator --demo [--phase dashboard|lifecycle|drift|session|all] [--step] [--keep] [--no-color] [--reveal <ms>]',
+  '',
+  'Runs a narrated walkthrough of the operator loop against a throwaway fixture built under the system',
+  'temp directory (removed afterwards unless --keep).',
+  '--help prints this text and exits 0 before building any fixture.',
+];
+
 async function main() {
+  // T-917: help first, before argument parsing and before any fixture is built.
+  if (require('./mavp-operator-lib.js').handleHelpFlag(DEMO_USAGE)) return;
+
   const opts = parseArgs(process.argv.slice(2));
   KEEP = opts.keep;
 

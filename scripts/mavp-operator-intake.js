@@ -48,6 +48,7 @@ const {
   sanitizeForTerminal,
   scanOutboundText,
   withOutboundBodyFile,
+  handleHelpFlag,
   clearFeedbackField,
   matchMarkdownHeading,
   writeAnswerSection,
@@ -548,6 +549,8 @@ function pull(opts) {
 }
 
 function main() {
+  // T-917: help first, before the framework-repo check and any inbox read.
+  if (handleHelpFlag([USAGE, '', '--help prints this text and exits 0 before reading or writing anything.'])) return;
   if (!fs.existsSync(path.join(ROOT, 'scripts', 'mavp-operator-lib.js'))) {
     fail(`--intake runs in the framework repository (no scripts/mavp-operator-lib.js under ${ROOT})`);
   }

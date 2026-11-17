@@ -153,6 +153,53 @@ const uxTask = (status) => backlogBlock({ id: 'T-901', status, verification: 'vi
   assert.strictEqual(count(out, 'ux_evidence_missing'), 1, `case 5c: expected one ux_evidence_missing for merged:\n${out}`);
 }
 
+// 5d. T-907: a bold `**ux:**` label followed by content satisfies the gate.
+{
+  const { out } = runFixture({
+    activeBlocks: [uxTask('qa_passed')],
+    taskStatusBlocks: [taskStatusBlock({ id: 'T-901', status: 'qa_passed', evidence: 'commit: abc1234 **ux:** pass frames: f1 viewed: 2 img/0 txt/0 unopened' })],
+  });
+  assert.strictEqual(count(out, 'ux_evidence_missing'), 0, `case 5d: bold ux label with content must not fire:\n${out}`);
+}
+
+// 5e. T-907: bold label at the very start of the Evidence text also satisfies it.
+{
+  const { out } = runFixture({
+    activeBlocks: [uxTask('qa_passed')],
+    taskStatusBlocks: [taskStatusBlock({ id: 'T-901', status: 'qa_passed', evidence: '**ux:** pass frames: f1 viewed: 2 img/0 txt/0 unopened' })],
+  });
+  assert.strictEqual(count(out, 'ux_evidence_missing'), 0, `case 5e: leading bold ux label must not fire:\n${out}`);
+}
+
+// 5f. T-907: an EMPTY bold label (nothing after it) still yields the finding,
+// and the warning text names both accepted label forms.
+{
+  const { out } = runFixture({
+    activeBlocks: [uxTask('qa_passed')],
+    taskStatusBlocks: [taskStatusBlock({ id: 'T-901', status: 'qa_passed', evidence: 'commit: abc1234 **ux:**' })],
+  });
+  assert.strictEqual(count(out, 'ux_evidence_missing'), 1, `case 5f: empty bold label must still fire:\n${out}`);
+  assert.ok(out.includes('**ux:**') && /ux: <content>/.test(out), `case 5f: message should name both accepted label forms:\n${out}`);
+}
+
+// 5g. T-907: `requires_ux: true` prose and `flux:` / `linux:` still yield the finding.
+for (const [label, evidence] of [['requires_ux', 'requires_ux: true'], ['flux', 'flux: ok'], ['linux', 'linux: ok'], ['bold-linux', 'a**ux:** pass']]) {
+  const { out } = runFixture({
+    activeBlocks: [uxTask('qa_passed')],
+    taskStatusBlocks: [taskStatusBlock({ id: 'T-901', status: 'qa_passed', evidence })],
+  });
+  assert.strictEqual(count(out, 'ux_evidence_missing'), 1, `case 5g (${label}): expected one ux_evidence_missing:\n${out}`);
+}
+
+// 5h. T-907: a requires-ux task at runtime_verified is judged like merged (needs ux evidence).
+{
+  const { out } = runFixture({
+    activeBlocks: [uxTask('runtime_verified')],
+    taskStatusBlocks: [taskStatusBlock({ id: 'T-901', status: 'runtime_verified', evidence: 'commit: abc1234' })],
+  });
+  assert.strictEqual(count(out, 'ux_evidence_missing'), 1, `case 5h: runtime_verified without ux must fire:\n${out}`);
+}
+
 // 6. A visual task under an archived `## Wave N` heading yields no finding.
 {
   const { out } = runFixture({

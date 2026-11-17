@@ -21,8 +21,14 @@
  *   <!-- mavp-decomposition-end -->
  *
  * Usage:
- *   ./scripts/mavp-operator --apply-decomposition [FILE]
+ *   ./scripts/mavp-operator --apply-decomposition [FILE] [--repo <name>]
  *   echo "<block>" | ./scripts/mavp-operator --apply-decomposition
+ *   ./scripts/mavp-operator --apply-decomposition [FILE] --onto T-5,new
+ *
+ * --onto LIST (T-912) re-scopes already-registered tasks from the block in
+ * place instead of registering them: LIST has exactly one comma-separated
+ * entry per task of the block, each an existing task id (re-scope that task)
+ * or the literal `new` (register under the next id, as without --onto).
  */
 
 'use strict';
@@ -42,6 +48,12 @@ const {
   printRepoIdentityHeader,
   guardMutatingRoot,
   normalizeDeployField,
+  locateTaskBlock,
+  extractBlockField,
+  setBlockField,
+  removeBlockField,
+  setBlockParagraphField,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -306,6 +318,296 @@ function buildBacklogEntry(id, task, repoName) {
   return lines.join('\n') + '\n';
 }
 
+// ---------------------------------------------------------------------------
+// --onto (T-912): re-scope registered tasks from a decomposition block
+// ---------------------------------------------------------------------------
+
+// A task in one of these states is past re-scoping: its content is history.
+const ONTO_REFUSED_STATUSES = ['merged', 'deployed_dev', 'deployed_prod', 'runtime_verified', 'deprecated'];
+
+// A field the block lacks is added after the task's bullet run, not above Status.
+const AFTER_BULLETS = { afterBullets: true };
+
+const hasKey = (task, key) => Object.prototype.hasOwnProperty.call(task, key);
+
+/**
+ * Parse a raw `--onto` LIST. One entry per comma, each trimmed: an existing
+ * task id (`T-NNN`, normalised to upper case) or the literal `new`. An empty
+ * entry (trailing comma, empty LIST) or anything else is a refusal.
+ *
+ * @param {string} raw
+ * @returns {{entries: Array<{kind: 'new'}|{kind: 'id', id: string}>, refusals: string[]}}
+ */
+function parseOntoList(raw) {
+  const entries = [];
+  const refusals = [];
+  String(raw).split(',').forEach((part, i) => {
+    const text = part.trim();
+    if (/^new$/i.test(text)) {
+      entries.push({ kind: 'new' });
+    } else if (/^T-\d+$/i.test(text)) {
+      entries.push({ kind: 'id', id: text.toUpperCase() });
+    } else {
+      entries.push({ kind: 'invalid' });
+      refusals.push(`apply-decomposition: --onto entry ${i + 1} "${text}" is neither an existing task id (T-NNN) nor "new"`);
+    }
+  });
+  return { entries, refusals };
+}
+
+/** Replace the title of the heading line that opens a raw task block. */
+function replaceBlockHeadingTitle(block, title) {
+  const nl = block.indexOf('\n');
+  const head = nl === -1 ? block : block.slice(0, nl);
+  const rest = nl === -1 ? '' : block.slice(nl);
+  return head.replace(/^(###\s+T-\d+\s+—\s*).*$/, (_m, pre) => pre + title) + rest;
+}
+
+/**
+ * Re-scope one BACKLOG.md task block from a parsed block task. Status and
+ * every field the block does not name are left alone; fields it names are
+ * replaced under the normalisation registration applies (a value that
+ * registration would not write at all removes the existing field instead).
+ *
+ * @param {string} block - Raw task block (from locateTaskBlock)
+ * @param {object} task - Parsed task (depends_on already title-resolved)
+ * @param {string|null} repoName - Batch --repo default
+ * @returns {{block: string, replaced: string[]}} replaced = display names of written fields
+ */
+function rescopeBacklogBlock(block, task, repoName) {
+  let b = block;
+  const replaced = [];
+  const set = (name, value) => { b = setBlockField(b, name, value, AFTER_BULLETS); replaced.push(name); };
+  const setOrRemove = (name, value) => {
+    b = value === null ? removeBlockField(b, name) : setBlockField(b, name, value, AFTER_BULLETS);
+    replaced.push(name);
+  };
+
+  b = replaceBlockHeadingTitle(b, task.title);
+  replaced.push('Title');
+  set('Owner role', task.owner_role);
+  set('Verification type', task.verification_type);
+  // Every task applied through this command passed the architect gate.
+  set('Origin', 'architect');
+
+  if (hasKey(task, 'depends_on')) {
+    const dep = String(task.depends_on).trim();
+    setOrRemove('Depends on', !dep || dep === '—' || dep === '-' ? null : dep);
+  }
+  if (hasKey(task, 'requires_ux')) {
+    setOrRemove('Requires ux', task.requires_ux.toLowerCase() === 'true' ? 'true' : null);
+  }
+  if (hasKey(task, 'requires_security_review')) {
+    setOrRemove('Requires security review', task.requires_security_review.toLowerCase() === 'true' ? 'true' : null);
+  }
+  if (hasKey(task, 'touches')) setOrRemove('Touches', task.touches || null);
+  if (hasKey(task, 'type')) setOrRemove('Type', task.type.trim() || null);
+  if (hasKey(task, 'repo') || repoName) {
+    // Single repo -> `Repo`, several -> `Repos` (same rendering as registration);
+    // the other spelling is removed so exactly one of the two remains.
+    const line = resolveRepoLine(task, repoName);
+    if (line) {
+      const name = line.startsWith('- **Repos:**') ? 'Repos' : 'Repo';
+      b = removeBlockField(b, name === 'Repos' ? 'Repo' : 'Repos');
+      b = setBlockField(b, name, line.slice(`- **${name}:** `.length), AFTER_BULLETS);
+    } else {
+      b = removeBlockField(removeBlockField(b, 'Repo'), 'Repos');
+    }
+    replaced.push('Repo');
+  }
+  if (hasKey(task, 'deploy')) {
+    const raw = task.deploy.trim();
+    if (!raw) setOrRemove('Deploy', null);
+    else if (normalizeDeployField(raw) === 'none') set('Deploy', 'none');
+    // any other value is reserved: warned about by the caller, field untouched
+  }
+
+  // Bold-paragraph fields: an empty value counts as absent (nothing to write).
+  const paragraphs = [
+    ['problem', 'Problem'],
+    ['acceptance_criteria', 'Acceptance criteria'],
+    ['evidence_expected', 'Evidence expected'],
+  ];
+  for (const [key, label] of paragraphs) {
+    if (hasKey(task, key) && task[key]) {
+      b = setBlockParagraphField(b, label, task[key]);
+      replaced.push(label);
+    }
+  }
+  return { block: b, replaced };
+}
+
+/** Re-scope one TASK_STATUS.md task block: heading title, Owner role, Verification type only. */
+function rescopeTaskStatusBlock(block, task) {
+  let b = replaceBlockHeadingTitle(block, task.title);
+  b = setBlockField(b, 'Owner role', task.owner_role);
+  b = setBlockField(b, 'Verification type', task.verification_type);
+  return b;
+}
+
+/** Splice a replacement block over the task block `id` in a document (id must locate exactly once). */
+function replaceTaskBlock(markdown, id, makeBlock) {
+  const loc = locateTaskBlock(markdown, id);
+  return markdown.slice(0, loc.startIndex) + makeBlock(loc.rawBlock) + markdown.slice(loc.endIndex);
+}
+
+/**
+ * The --onto pipeline: validate everything (any refusal exits 1 with nothing
+ * written), then re-scope the named tasks in place and register the `new`
+ * ones, write both artifacts, regenerate context bundles and run the validator.
+ *
+ * @param {string[]} rawTasks - Raw task strings of the block
+ * @param {string} ontoRaw - Raw --onto LIST
+ * @param {string|null} [repoName] - Batch --repo default
+ */
+function applyOnto(rawTasks, ontoRaw, repoName) {
+  const refusals = [];
+  const { entries, refusals: listRefusals } = parseOntoList(ontoRaw);
+  refusals.push(...listRefusals);
+
+  if (entries.length !== rawTasks.length) {
+    refusals.push(`apply-decomposition: --onto has ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'} but the block has ${rawTasks.length} task(s); one entry per task is required`);
+  }
+
+  // The same validation registration applies, except nothing is skipped: any
+  // task failing it refuses the whole run.
+  const tasks = rawTasks.map((raw) => parseTaskBlock(raw));
+  tasks.forEach((task, i) => {
+    const missing = validateTask(task);
+    if (missing.length > 0) {
+      refusals.push(`apply-decomposition: task ${i + 1}${task.title ? ` "${task.title}"` : ''} — missing required field(s): ${missing.join(', ')}`);
+      return;
+    }
+    const refusal = validateVerificationType(task);
+    if (refusal) refusals.push(refusal);
+  });
+
+  const backlog = readUtf8(BACKLOG_MD);
+  const taskStatus = readUtf8(TASK_STATUS_MD);
+
+  const seen = new Set();
+  entries.forEach((entry, i) => {
+    if (entry.kind !== 'id') return;
+    const key = parseInt(entry.id.slice(2), 10);
+    if (seen.has(key)) {
+      refusals.push(`apply-decomposition: --onto names ${entry.id} more than once`);
+      return;
+    }
+    seen.add(key);
+    for (const [file, doc] of [['BACKLOG.md', backlog], ['TASK_STATUS.md', taskStatus]]) {
+      const loc = locateTaskBlock(doc, entry.id);
+      if (loc.count === 0) {
+        refusals.push(`apply-decomposition: ${entry.id} has no heading in ${file}`);
+      } else if (loc.count > 1) {
+        refusals.push(`apply-decomposition: ${entry.id} has a duplicated heading in ${file}`);
+      } else {
+        const status = String(extractBlockField(loc.rawBlock, 'Status') || '').split(/\s+/)[0].toLowerCase();
+        if (ONTO_REFUSED_STATUSES.includes(status)) {
+          refusals.push(`apply-decomposition: ${entry.id} has status ${status} in ${file}; a task in ${ONTO_REFUSED_STATUSES.join(', ')} cannot be re-scoped`);
+        }
+      }
+    }
+  });
+
+  if (refusals.length > 0) {
+    for (const line of [...new Set(refusals)]) console.error(line);
+    console.error('apply-decomposition: --onto refused — nothing written.');
+    process.exitCode = 1;
+    return;
+  }
+
+  // A deploy value other than none is reserved (T-815): ignored, with a warning.
+  for (const task of tasks) {
+    if (task.deploy && task.deploy.trim() && normalizeDeployField(task.deploy) !== 'none') {
+      console.warn(`apply-decomposition: task "${task.title}" — deploy "${task.deploy.trim()}" is not recognised (only "none" is carried); ignored`);
+    }
+  }
+
+  // Ids: an existing id for a re-scope, the next free id for each `new`.
+  let nextNum = null;
+  const ids = entries.map((entry) => {
+    if (entry.kind === 'id') return entry.id;
+    if (nextNum === null) {
+      nextNum = parseInt(getNextTaskId(BACKLOG_MD, TASK_STATUS_MD, PROCESS_STATE_JSON).replace('T-', ''), 10);
+    }
+    return formatTaskId(nextNum++);
+  });
+
+  // Title references in depends_on resolve in both directions across the block.
+  const dep = resolveDependsOnTitles(tasks, ids);
+  for (const w of dep.warnings) console.warn(w);
+
+  let updatedBacklog = backlog;
+  let updatedTaskStatus = taskStatus;
+  const results = [];
+  dep.tasks.forEach((task, i) => {
+    const id = ids[i];
+    if (entries[i].kind === 'id') {
+      let replaced = [];
+      updatedBacklog = replaceTaskBlock(updatedBacklog, id, (block) => {
+        const out = rescopeBacklogBlock(block, task, repoName);
+        replaced = out.replaced;
+        return out.block;
+      });
+      updatedTaskStatus = replaceTaskBlock(updatedTaskStatus, id, (block) => rescopeTaskStatusBlock(block, task));
+      results.push({ id, task, rescoped: true, replaced });
+    } else {
+      updatedBacklog = insertIntoActiveWave(updatedBacklog, buildBacklogEntry(id, task, repoName));
+      updatedTaskStatus = insertIntoActiveTasks(
+        updatedTaskStatus,
+        buildTaskStatusEntry(id, task.title, task.owner_role, task.verification_type, 'planned')
+      );
+      results.push({ id, task, rescoped: false, replaced: [] });
+    }
+  });
+
+  writeUtf8(BACKLOG_MD, updatedBacklog);
+  console.log(`${GREEN}✓ BACKLOG.md — ${results.length} task(s) applied${RESET}`);
+  writeUtf8(TASK_STATUS_MD, updatedTaskStatus);
+  console.log(`${GREEN}✓ TASK_STATUS.md — ${results.length} task(s) applied${RESET}`);
+
+  const registered = results.filter((r) => !r.rescoped);
+  if (registered.length > 0) {
+    const lastNumericId = parseInt(registered[registered.length - 1].id.replace('T-', ''), 10);
+    if (updateLastTaskId(PROCESS_STATE_JSON, lastNumericId)) {
+      console.log(`${GREEN}✓ PROCESS_STATE.json — last_task_id updated to ${lastNumericId}${RESET}`);
+    }
+  }
+
+  // Context bundles — best effort, never fatal; regenerated for re-scoped tasks too.
+  for (const r of results) {
+    const bundleResult = writeContextBundle(r.id, { root: ROOT, backlogPath: BACKLOG_MD, taskStatusPath: TASK_STATUS_MD });
+    if (bundleResult.ok) {
+      console.log(`${GREEN}✓ Context bundle — .mavp/context/${r.id}.md${RESET}`);
+    } else {
+      console.log(`${DIM}(context bundle not written for ${r.id}: ${bundleResult.reason})${RESET}`);
+    }
+  }
+
+  console.log(`\n${BOLD}Applied tasks:${RESET}`);
+  for (const r of results) {
+    if (r.rescoped) {
+      console.log(`  ${CYAN}${r.id}${RESET}: re-scoped "${r.task.title}" — replaced: ${r.replaced.join(', ')}`);
+    } else {
+      console.log(`  ${CYAN}${r.id}${RESET}: registered "${r.task.title}"`);
+    }
+  }
+
+  console.log(`\n${DIM}Running validator...${RESET}`);
+  const exitCode = runValidator();
+  if (exitCode === 0) {
+    console.log(`${GREEN}✓ Validator: healthy${RESET}`);
+  } else if (exitCode === 1) {
+    console.log(`${YELLOW}⚠ Validator: drifting (exit 1)${RESET}`);
+  } else {
+    console.log(`${RED}✗ Validator: repair required (exit ${exitCode})${RESET}`);
+    process.exitCode = exitCode;
+    return;
+  }
+
+  console.log(`\n${BOLD}apply-decomposition complete${RESET} — ${results.length - registered.length} task(s) re-scoped, ${registered.length} registered.\n`);
+}
+
 function runValidator() {
   const result = spawnSync('node', [VALIDATOR, ROOT], {
     stdio: ['inherit', 'pipe', 'pipe'],
@@ -317,27 +619,51 @@ function runValidator() {
 }
 
 /**
- * Parse CLI args: an optional positional FILE path plus an optional
- * `--repo <name>` flag supplying the batch-level default repo.
+ * Parse CLI args: an optional positional FILE path, an optional
+ * `--repo <name>` flag supplying the batch-level default repo, and an
+ * optional `--onto <LIST>` (or `--onto=<LIST>`) flag (T-912). The `onto` key
+ * is present in the result ONLY when the flag was given (its value is the raw
+ * LIST string, '' when the flag had no value), so the result without --onto
+ * keeps exactly the two-key shape it always had.
  *
  * @param {string[]} argv - process.argv.slice(2)
- * @returns {{filePath: string|null, repoName: string|null}}
+ * @returns {{filePath: string|null, repoName: string|null, onto?: string}}
  */
 function parseCliArgs(argv) {
   let filePath = null;
   let repoName = null;
+  let onto;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--repo') {
       repoName = argv[i + 1] || null;
       i++;
+    } else if (argv[i] === '--onto') {
+      onto = argv[i + 1] === undefined ? '' : argv[i + 1];
+      i++;
+    } else if (argv[i].startsWith('--onto=')) {
+      onto = argv[i].slice('--onto='.length);
     } else if (!filePath) {
       filePath = argv[i];
     }
   }
-  return { filePath, repoName };
+  const parsed = { filePath, repoName };
+  if (onto !== undefined) parsed.onto = onto;
+  return parsed;
 }
 
+const APPLY_DECOMPOSITION_USAGE = [
+  'Usage: ./scripts/mavp-operator --apply-decomposition [FILE] [--onto LIST]',
+  '',
+  'Parses the architect decomposition block (from FILE, otherwise from stdin) and registers its',
+  'tasks. --onto LIST re-scopes already-registered tasks instead: one comma-separated entry per',
+  'block task, each an existing task id or new.',
+  '--help prints this text and exits 0 before reading stdin or writing anything.',
+];
+
 async function main() {
+  // T-917: help first, before the identity header, any file or stdin read.
+  if (handleHelpFlag(APPLY_DECOMPOSITION_USAGE)) return;
+
   printRepoIdentityHeader(ROOT, { mutating: true });
 
   const rootGuard = guardMutatingRoot(ROOT, '--apply-decomposition');
@@ -347,13 +673,13 @@ async function main() {
   }
 
   const today = new Date().toISOString().slice(0, 10);
-  const { filePath, repoName } = parseCliArgs(process.argv.slice(2));
+  const { filePath, repoName, onto } = parseCliArgs(process.argv.slice(2));
 
   console.log(`\n${BOLD}MavP Apply Decomposition${RESET} ${DIM}${today}${RESET}\n`);
 
   // Read input
   const input = readInput(filePath);
-  await applyDecompositionFromString(input, repoName);
+  await applyDecompositionFromString(input, repoName, onto === undefined ? undefined : { onto });
 }
 
 /**
@@ -362,9 +688,10 @@ async function main() {
  *
  * @param {string} input - Raw string containing <!-- mavp-decomposition-start --> block.
  * @param {string} [repoName] - Optional repo name written to each task's Repo field. Omit to leave the field blank.
+ * @param {{onto?: string}} [options] - `onto`: the raw `--onto` LIST (T-912). Omit for plain registration.
  * @returns {Promise<void>} Resolves on success; sets process.exitCode on failure.
  */
-async function applyDecompositionFromString(input, repoName) {
+async function applyDecompositionFromString(input, repoName, options) {
   if (!input || !input.trim()) {
     console.error(`${RED}No input provided. Pipe a decomposition block or pass FILE as argument.${RESET}`);
     process.exitCode = 1;
@@ -394,6 +721,12 @@ async function applyDecompositionFromString(input, repoName) {
   }
 
   console.log(`${CYAN}Found ${rawTasks.length} task(s) in block.${RESET}\n`);
+
+  // --onto re-scopes registered tasks in place (T-912); its own pipeline.
+  if (options && options.onto !== undefined) {
+    applyOnto(rawTasks, options.onto, repoName);
+    return;
+  }
 
   // Validate all tasks before touching files (atomicity)
   const parsedTasks = [];
@@ -533,4 +866,9 @@ module.exports = {
   resolveDependsOnTitles,
   parseCliArgs,
   applyDecompositionFromString,
+  ONTO_REFUSED_STATUSES,
+  parseOntoList,
+  rescopeBacklogBlock,
+  rescopeTaskStatusBlock,
+  applyOnto,
 };

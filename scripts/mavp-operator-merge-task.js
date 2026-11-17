@@ -19,6 +19,7 @@ const {
   guardMutatingRoot,
   locateTaskBlock,
   updateTaskField,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -118,7 +119,17 @@ async function prompt(rl, question) {
   return new Promise(resolve => rl.question(`${question}: `, answer => resolve(answer.trim())));
 }
 
+const MERGE_TASK_USAGE = [
+  'Usage: ./scripts/mavp-operator --merge-task',
+  '',
+  'Promotes a qa_passed task to merged with evidence; prompts for the task and its evidence.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 async function main() {
+  // T-917: help first, before the identity header's read of PROCESS_STATE.json.
+  if (handleHelpFlag(MERGE_TASK_USAGE)) return;
+
   printRepoIdentityHeader(ROOT, { mutating: true });
 
   const rootGuard = guardMutatingRoot(ROOT, '--merge-task');

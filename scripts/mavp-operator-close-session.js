@@ -20,7 +20,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const readline = require('node:readline');
-const { execSync, spawnSync } = require('node:child_process');
+const { execSync, execFileSync, spawnSync } = require('node:child_process');
 
 /**
  * Resolve the mavericks installation's scripts/ directory, so project-copied
@@ -47,7 +47,7 @@ function resolveMavericksScriptsDir() {
 }
 
 const MAVERICKS_SCRIPTS_DIR = resolveMavericksScriptsDir();
-const { normalizeDeployField, generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, formatWorktreePruneSuggestion, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, resolvePermissionMode, printRepoIdentityHeader, guardMutatingRoot, getCommitHashesReachable, isShallowRepository, extractCommitHashesFromEvidence, buildReachableHashIndex, isHashReachable, isSelfHostedRoot, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError, pruneStaleActiveSlices, parseFeedbackNotes, listIntakeItems, listFeedbackDrafts, formatFeedbackDraftLine, resolveIntakeDir, findPreviousCloseSessionCommit, FEEDBACK_ALIAS_PATTERN } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
+const { handleHelpFlag, normalizeDeployField, generateProcessStateMd, archiveActiveWaveInBacklog, archiveMergedTasksFromActiveWave, classifyNextAction, classifyWorktrees, formatWorktreeHygieneAdvisory, formatWorktreePruneSuggestion, parseActiveWaveMergedTitles, parseMidWaveArchivedTasks, resolvePermissionMode, printRepoIdentityHeader, guardMutatingRoot, parseRepoMap, getCommitHashesReachable, isShallowRepository, extractCommitHashesFromEvidence, buildReachableHashIndex, isHashReachable, isSelfHostedRoot, isTaskHeadingFor, headingLeadingTaskId, moveTaskBlockToSection, TERMINAL_SKIP_STATUSES, ARCHIVABLE_TERMINAL_STATUSES, DEFERRED_TASK_STATUS_HEADING, UnresolvableMainRefError, pruneStaleActiveSlices, parseFeedbackNotes, listIntakeItems, listFeedbackDrafts, formatFeedbackDraftLine, resolveIntakeDir, findPreviousCloseSessionCommit, FEEDBACK_ALIAS_PATTERN } = require(path.join(MAVERICKS_SCRIPTS_DIR, 'mavp-operator-lib'));
 
 // T-530: checkVersionBump()'s release-awareness reads the public mirror's
 // tags EXCLUSIVELY through these check-changelog-frozen.js exports — never
@@ -508,10 +508,55 @@ function resolveRemoteTrackingRef(root) {
 }
 
 /**
+ * Git environment for a spawn aimed at one specific working tree: ambient
+ * GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE (set by git for the hooks it runs)
+ * take precedence over the spawn's cwd, so left in place they would make a
+ * check aimed at a sibling repository silently read this one instead.
+ */
+function cleanGitEnv() {
+  const env = { ...process.env };
+  delete env.GIT_DIR;
+  delete env.GIT_WORK_TREE;
+  delete env.GIT_INDEX_FILE;
+  return env;
+}
+
+/**
+ * Run `git <args>` in `cwd`; returns trimmed stdout, or null when git fails
+ * (not a repo, unknown revision, git unavailable). Never throws.
+ */
+function gitOut(cwd, args) {
+  try {
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when `commitHash` (short or full hex) names a commit OBJECT present in
+ * the git repository at `root`. Existence only, not reachability: it is the
+ * precondition for any claim ("pushed" or "HELD") about the commit there.
+ */
+function commitExistsIn(root, commitHash) {
+  if (!commitHash || !/^[0-9a-f]{4,40}$/i.test(commitHash)) return false;
+  return gitOut(root, ['cat-file', '-e', `${commitHash}^{commit}`]) !== null;
+}
+
+/**
  * True/false when reachability from the remote-tracking ref could be
  * determined; null when it could not (no remote, no commit hash, git
- * unavailable) — callers must treat null as "degrade to a status-only
- * label", never as "not reachable".
+ * unavailable, or the commit object does not exist in `root`) — callers must
+ * treat null as "degrade to a status-only label", never as "not reachable".
+ *
+ * T-911: a commit object that is absent from `root` is "not found here", not
+ * "held": a hash that was never in this repository cannot be unpushed from it
+ * (a cross-repo task's evidence commit lives in the sibling repository).
  *
  * @param {string} root - Absolute path to the git working tree.
  * @param {string|null} commitHash - Evidence commit hash (short or full).
@@ -519,11 +564,68 @@ function resolveRemoteTrackingRef(root) {
  */
 function isCommitReachableFromRemote(root, commitHash) {
   if (!commitHash) return null;
+  if (!commitExistsIn(root, commitHash)) return null;
   const ref = resolveRemoteTrackingRef(root);
   if (!ref) return null;
   const reachableHashes = getCommitHashesReachable(root, ref);
   if (reachableHashes === null) return null;
   return reachableHashes.some((full) => full.startsWith(commitHash));
+}
+
+/**
+ * Sibling-repository counterpart of isCommitReachableFromRemote() (T-911):
+ * true when the commit sits on at least one remote-tracking ref of the repo at
+ * `siblingRoot` (refs/remotes/*, as of that repo's last fetch/push — no
+ * network call), false when the commit exists there but on none, null when the
+ * repo has no remote-tracking refs at all or the commit does not exist there.
+ *
+ * @param {string} siblingRoot - Absolute path to the sibling git working tree.
+ * @param {string} commitHash - Evidence commit hash (short or full hex).
+ * @returns {boolean|null}
+ */
+function isCommitOnAnyRemoteRef(siblingRoot, commitHash) {
+  if (!commitExistsIn(siblingRoot, commitHash)) return null;
+  const all = gitOut(siblingRoot, ['for-each-ref', '--format=%(refname)', 'refs/remotes']);
+  if (!all) return null;
+  const containing = gitOut(siblingRoot, ['for-each-ref', '--contains', commitHash, '--format=%(refname)', 'refs/remotes']);
+  if (containing === null) return null;
+  return containing.length > 0;
+}
+
+/**
+ * Absolute paths of the sibling repositories a task's Repo:/Repos: field names,
+ * resolved through docs/REPO_MAP.md (parseRepoMap) and kept only when the path
+ * is the top level of its own git work tree and is not `root` itself. A repo
+ * id with no map entry, no `path`, or a path that is not a git work tree
+ * contributes nothing (never throws).
+ *
+ * @param {string} root - Absolute path to the hub's git working tree.
+ * @param {string|null|undefined} repoField - raw Repo: value, e.g. "svc-a" or "svc-a, svc-b".
+ * @returns {string[]}
+ */
+function resolveSiblingRepoRoots(root, repoField) {
+  if (!repoField) return [];
+  let repoMap;
+  try { repoMap = parseRepoMap(root); } catch { return []; }
+  let rootReal;
+  try { rootReal = fs.realpathSync(root); } catch { rootReal = path.resolve(root); }
+  const out = [];
+  for (const raw of String(repoField).split(',')) {
+    const id = raw.trim().split(/\s+/)[0];
+    const entry = id ? repoMap[id] : null;
+    if (!entry || !entry.path) continue;
+    const abs = path.isAbsolute(entry.path) ? entry.path : path.join(root, entry.path);
+    let real;
+    try { real = fs.realpathSync(abs); } catch { continue; }
+    if (real === rootReal || out.includes(real)) continue;
+    const top = gitOut(real, ['rev-parse', '--show-toplevel']);
+    if (!top) continue;
+    let topReal;
+    try { topReal = fs.realpathSync(top); } catch { continue; }
+    if (topReal !== real) continue; // a plain directory nested inside another repo is not a work tree of its own
+    out.push(real);
+  }
+  return out;
 }
 
 /**
@@ -543,6 +645,16 @@ function isCommitReachableFromRemote(root, commitHash) {
  * (no remote configured, git unavailable, no evidence commit) this degrades
  * to a status-only label instead of guessing either way.
  *
+ * T-911 rule — HELD is printed only when the evidence commit OBJECT exists in
+ * the repository that was checked. The commit is looked up in `root` first;
+ * when it is absent there, it is looked up in the repositories the task's
+ * `repoField` names, resolved through docs/REPO_MAP.md `path` (a path that is
+ * not a git work tree of its own is skipped), and judged there: reachable
+ * (terminal label) when it sits on any remote-tracking ref of that repo,
+ * HELD when it exists there but on none. A commit found in no checked
+ * repository degrades to the status-only label, never HELD. No network call
+ * is made: sibling remote-tracking refs are read as of their last fetch/push.
+ *
  * @param {number} deployContours
  * @param {string|null} status - task's current status (from TASK_STATUS.md)
  * @param {string|null} evidenceCommit - evidence commit hash, or null
@@ -551,20 +663,32 @@ function isCommitReachableFromRemote(root, commitHash) {
  *   carries `Deploy: none`. Replaces the deploy_contours>=2 merged label and
  *   the contours 0/1 reachable-true label with NO_DEPLOY_LABEL; the HELD
  *   (reachable-false) label and the deployed_* labels are unchanged.
+ * @param {string|null} [repoField] - T-911: the task's raw `Repo:`/`Repos:`
+ *   value; names the sibling repositories searched (via docs/REPO_MAP.md) when
+ *   the evidence commit does not exist in `root`.
  * @returns {string}
  */
 const NO_DEPLOY_LABEL = '— без деплоя';
-function getDeployLabel(deployContours, status, evidenceCommit, root, noDeploy) {
+function getDeployLabel(deployContours, status, evidenceCommit, root, noDeploy, repoField) {
   if (deployContours >= 2) {
     if (status === 'deployed_prod') return '✓ в проде';
     if (status === 'deployed_dev') return '✓ в dev';
-    if (status === 'merged') return noDeploy === true ? NO_DEPLOY_LABEL : '⏳ не задеплоен';
+    // T-907: runtime_verified is the post-merge status (merged -> runtime_verified),
+    // still awaiting deploy, so it renders exactly like merged — never "not merged".
+    if (status === 'merged' || status === 'runtime_verified') return noDeploy === true ? NO_DEPLOY_LABEL : '⏳ не задеплоен';
     return '⏳ не смёрджен';
   }
 
   // deploy_contours 0 or 1
   const terminalLabel = deployContours === 0 ? '✓ задеплоен' : '✓ авто-деплой';
-  const reachable = isCommitReachableFromRemote(root, evidenceCommit);
+  let reachable = isCommitReachableFromRemote(root, evidenceCommit);
+  if (reachable === null && evidenceCommit && !commitExistsIn(root, evidenceCommit)) {
+    // T-911: not in this repository — judge it where it lives (REPO_MAP path).
+    for (const siblingRoot of resolveSiblingRepoRoots(root, repoField)) {
+      reachable = isCommitOnAnyRemoteRef(siblingRoot, evidenceCommit);
+      if (reachable !== null) break;
+    }
+  }
   if (reachable === true) return noDeploy === true ? NO_DEPLOY_LABEL : terminalLabel;
   if (reachable === false) return '⚠ смёрджен — HELD, не запушен';
   // reachable === null: can't verify (no remote / no commit / git unavailable) — degrade
@@ -937,7 +1061,7 @@ function printSessionCompletedTable(sessionCompletedIds, taskStatusContent, back
     const commitStr = ev.commit ? ev.commit.slice(0, 7) : '—';
     const branchStr = ev.branch || '—';
     const status = taskStatusMap ? taskStatusMap.get(id) : null;
-    const deploy = getDeployLabel(deployContours, status, ev.commit, gitRoot, noDeployIds.has(id));
+    const deploy = getDeployLabel(deployContours, status, ev.commit, gitRoot, noDeployIds.has(id), repo);
     console.log(` ${pad(taskLabel, COL_TASK)}${pad(commitStr, COL_COMMIT)}${pad(branchStr, COL_BRANCH)}${deploy}`);
   }
   console.log('');
@@ -2903,7 +3027,20 @@ async function runInteractive() {
   console.log(`\nRENAME_SESSION: ${renameLabel}\n`);
 }
 
+const CLOSE_SESSION_USAGE = [
+  'Usage: ./scripts/mavp-operator --close-session [--interactive | --non-interactive]',
+  '                                [--summary "text" | --auto-summary] [--mark-merged T-NNN[,T-MMM,...]] [--push]',
+  '',
+  'End-of-session ritual: sweeps terminal tasks, writes the session summary and makes the',
+  'session commit. Never advances the wave (--close-wave is the only wave-advance path) and',
+  'never pushes on its own in non-interactive mode.',
+  '--help prints this text and exits 0 before reading, writing or committing anything.',
+];
+
 async function main() {
+  // T-917: help first, before the identity header's read of PROCESS_STATE.json.
+  if (handleHelpFlag(CLOSE_SESSION_USAGE)) return;
+
   printRepoIdentityHeader(ROOT, { mutating: true });
 
   const rootGuard = guardMutatingRoot(ROOT, '--close-session');

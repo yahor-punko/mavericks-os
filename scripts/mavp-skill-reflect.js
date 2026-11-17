@@ -39,6 +39,15 @@ const {
 // ---------------------------------------------------------------------------
 // CLI argument
 // ---------------------------------------------------------------------------
+// T-917: help first, before the role check, any trajectory read/write or API call.
+if (lib.handleHelpFlag([
+  'Usage: ./scripts/mavp-operator --reflect-skill <role>',
+  '',
+  'Runs the skill reflection loop (SkillOpt) for one role: mines past task outcomes and writes a proposal',
+  'under SKILL_PROPOSALS/. <role> is a lowercase slug matching a .claude/agents/<role>.md file.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+])) return;
+
 const role = process.argv[2];
 
 if (!role || !/^[a-z][a-z0-9-]*$/.test(role)) {

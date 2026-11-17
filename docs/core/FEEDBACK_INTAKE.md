@@ -39,7 +39,10 @@ Copy `templates/FEEDBACK_ITEM_TEMPLATE.md` and fill in:
 
 Leave **Item**, **Adopter**, **Framework version**, **Submitted** and **Channel** alone: submission stamps them. Delete the framework-written fields (Disposition through Published) or leave them empty; only the framework writes them. Keep one concern per item, and never renumber. A submission that is missing a required field is refused with `feedback: refused — missing or invalid required field(s): ...` or `feedback: refused — missing or empty required section "## <name>"`, and nothing is written.
 
-Write the Evidence section so a stranger can follow it, and describe private paths and names in words rather than quoting them.
+Write the Evidence section so a stranger can follow it, and describe private paths and names in words rather than quoting them. Two habits make an item faster to answer, as guidance and never as a refusal rule (an item without them is still accepted):
+
+- **Search `docs/core/DECISIONS.md` first.** When a decision record covers the topic, cite its id (for example `DR-009`) in the item, so the framework side can tell a request to revisit a decision from a request for something never decided.
+- **Say how a bug was established.** For a `bug`, state in Evidence whether you reproduced it by running it (give the command and its output) or inferred it from reading code, so the reader knows whether the behavior was observed or reasoned.
 
 ## Submit to the local inbox, then track the answer
 

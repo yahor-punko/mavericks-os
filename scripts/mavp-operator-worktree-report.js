@@ -46,6 +46,7 @@ const {
   printRepoIdentityHeader,
   relativeTime,
   UnresolvableMainRefError,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -75,7 +76,17 @@ function parseArgs(argv) {
   return out;
 }
 
+const WORKTREE_REPORT_USAGE = [
+  'Usage: ./scripts/mavp-operator --worktree-report [--main-ref <ref>] [--mtime-threshold <ms>] [--json]',
+  '',
+  'Classifies every agent git worktree (dirty / unintegrated / clean-and-integrated). Read-only.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 function main() {
+  // T-917: help first, before argument parsing and any git call.
+  if (handleHelpFlag(WORKTREE_REPORT_USAGE)) return;
+
   const args = parseArgs(process.argv.slice(2));
   const options = { mainRef: args.mainRef };
   if (Number.isFinite(args.mtimeThresholdMs)) options.mtimeThresholdMs = args.mtimeThresholdMs;

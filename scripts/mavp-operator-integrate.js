@@ -77,6 +77,7 @@ const {
   printRepoIdentityHeader,
   guardMutatingRoot,
   locateTaskBlock,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -125,7 +126,18 @@ function gitHeadPathExists(root, name) {
   }
 }
 
+const INTEGRATE_USAGE = [
+  'Usage: ./scripts/mavp-operator --integrate <commit|base..tip> [--task T-NNN]',
+  '',
+  'Cherry-picks a commit or a range into the resolved project root, pinned to that root. Refuses on a',
+  'never-a-project root, a linked worktree or an in-progress pick; writes no state artifacts.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 function main() {
+  // T-917: help first, before the identity header's read of PROCESS_STATE.json.
+  if (handleHelpFlag(INTEGRATE_USAGE)) return;
+
   printRepoIdentityHeader(ROOT, { mutating: true });
 
   // T-743 round 2: `--integrate` is the single adjudicated exemption from

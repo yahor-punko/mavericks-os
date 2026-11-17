@@ -16,7 +16,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { ROOT, collectOperatorData, printRepoIdentityHeader, guardMutatingRoot } = require('./mavp-operator-lib');
+const { ROOT, collectOperatorData, printRepoIdentityHeader, guardMutatingRoot, handleHelpFlag } = require('./mavp-operator-lib');
 
 const HANDOFF_PATH = path.join(ROOT, 'HANDOFF.md');
 const EXECUTION_LOG_PATH = path.join(ROOT, 'EXECUTION_LOG.md');
@@ -191,7 +191,17 @@ function handoffGitAdvisory(root) {
 // Main
 // ---------------------------------------------------------------------------
 
+const HANDOFF_USAGE = [
+  'Usage: ./scripts/mavp-operator --handoff [--notes "text"]',
+  '',
+  'Writes HANDOFF.md at the project root for cross-session continuity; --notes appends the text',
+  'as operator notes. --help prints this text and exits 0 before reading or writing anything.',
+];
+
 function main() {
+  // T-917: help first, before the identity header's read of PROCESS_STATE.json.
+  if (handleHelpFlag(HANDOFF_USAGE)) return;
+
   printRepoIdentityHeader(ROOT, { mutating: true });
 
   const rootGuard = guardMutatingRoot(ROOT, '--handoff');

@@ -91,6 +91,14 @@
 //      declaring Repos: <self-id>, other-repo is still checked, not skipped
 //      (control case) — the fallback never swallows a task that also names
 //      its own repo.
+//  19. (T-911) the --close-session session-completed table (getDeployLabel()
+//      / printSessionCompletedTable() in mavp-operator-close-session.js)
+//      resolves a cross-repo task's push state in the repository that holds
+//      its evidence commit, found through docs/REPO_MAP.md: pushed in S ->
+//      terminal label, in S on no remote-tracking ref -> HELD, S unresolvable
+//      -> status-only label; a hash in the hub follows the hub's rule as
+//      before; HELD is printed only when the commit object exists in a
+//      repository that was checked (a hash found nowhere degrades).
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -1196,8 +1204,201 @@ function makeShallowFixture(name) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 18 (T-907): `runtime_verified` is a completed status, so
+// checkCommitReachable() judges its commit evidence exactly as it does a
+// merged task's: unreachable hash on an Active-tasks entry -> WARNING naming
+// task + hash; reachable hash -> no finding.
+// ---------------------------------------------------------------------------
+{
+  const { root, headHash, orphanHash } = makeGitFixture('runtime-verified-fixture');
+  const repoMap = { 'this-repo': { path: root } };
+  const rec = (taskId, hash) => ({
+    taskId,
+    status: 'runtime_verified',
+    repo: 'this-repo',
+    rawBlock: taskBlock({ taskId, status: 'runtime_verified', repo: 'this-repo', evidenceLine: `commit: ${hash}` }),
+  });
+
+  const orphan = checkCommitReachable({ activeRecords: [rec('T-940', orphanHash)], recentlyCompletedRecords: [], root, repoMap });
+  assert.strictEqual(orphan.length, 1, `Test 18a FAIL: expected exactly 1 finding for an unreachable runtime_verified hash, got: ${JSON.stringify(orphan)}`);
+  assert.strictEqual(orphan[0].checkName, 'commit_unreachable', 'Test 18a FAIL: checkName');
+  assert.strictEqual(orphan[0].severity, 'warning', 'Test 18a FAIL: Active-tasks severity must be warning');
+  assert.ok(orphan[0].message.includes('T-940') && orphan[0].message.includes(orphanHash), 'Test 18a FAIL: message should name task and hash');
+
+  const reachable = checkCommitReachable({ activeRecords: [rec('T-941', headHash)], recentlyCompletedRecords: [], root, repoMap });
+  assert.strictEqual(reachable.length, 0, `Test 18b FAIL: reachable hash must produce no finding, got: ${JSON.stringify(reachable)}`);
+
+  console.log('Test 18 passed: a runtime_verified task gets the merged-class commit_unreachable check');
+}
+
+// ---------------------------------------------------------------------------
+// Test 19 (T-911): the --close-session session-completed table resolves a
+// cross-repo task's push state in the repository that holds its evidence
+// commit (located through docs/REPO_MAP.md), and prints HELD only for a commit
+// whose object exists in a repository that was actually checked.
+// Fixture: hub H and sibling S, each with its own bare remote; H's
+// docs/REPO_MAP.md gives S's path. deploy_contours 1 (terminal label is the
+// auto-deploy one).
+// ---------------------------------------------------------------------------
+{
+  const { getDeployLabel, printSessionCompletedTable } = require('./mavp-operator-close-session.js');
+  const TERMINAL = '✓ авто-деплой';
+  const HELD_RE = /HELD/;
+
+  function gitIn(dir, args) {
+    return cp.execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  }
+
+  // A work tree with its own bare remote: one pushed commit, one local-only commit.
+  function makeRepoWithRemote(name) {
+    const dir = path.join(TMP_DIR, `t911-${name}`);
+    const bare = path.join(TMP_DIR, `t911-${name}-bare`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(bare, { recursive: true });
+    gitIn(bare, ['init', '-q', '--bare', '-b', 'main']);
+    gitIn(dir, ['init', '-q', '-b', 'main']);
+    gitIn(dir, ['config', 'user.email', 'demo@example.invalid']);
+    gitIn(dir, ['config', 'user.name', 'Fixture User']);
+    gitIn(dir, ['remote', 'add', 'origin', bare]);
+    // Content and messages carry the repo name so H and S never share a commit hash.
+    fs.writeFileSync(path.join(dir, 'a.txt'), `a-${name}`);
+    gitIn(dir, ['add', 'a.txt']);
+    gitIn(dir, ['commit', '-q', '-m', `fixture: pushed in ${name}`]);
+    gitIn(dir, ['push', '-q', 'origin', 'HEAD:main']);
+    const pushed = gitIn(dir, ['rev-parse', 'HEAD']);
+    fs.writeFileSync(path.join(dir, 'b.txt'), `b-${name}`);
+    gitIn(dir, ['add', 'b.txt']);
+    gitIn(dir, ['commit', '-q', '-m', `fixture: unpushed in ${name}`]);
+    const unpushed = gitIn(dir, ['rev-parse', 'HEAD']);
+    return { dir, pushed, unpushed };
+  }
+
+  function writeRepoMap(hubDir, entryLines) {
+    fs.mkdirSync(path.join(hubDir, 'docs'), { recursive: true });
+    fs.writeFileSync(path.join(hubDir, 'docs', 'REPO_MAP.md'), `# Repo map\n\n${entryLines}\n`, 'utf8');
+  }
+  const mapEntry = (id, p) => `## ${id}\n\n- **label:** ${id}\n${p ? `- **path:** ${p}\n` : ''}`;
+
+  const H = makeRepoWithRemote('hub');
+  const S = makeRepoWithRemote('sibling');
+  writeRepoMap(H.dir, mapEntry('sibling-svc', S.dir));
+
+  // (a) Repo S, commit pushed in S -> terminal label, never HELD.
+  const a = getDeployLabel(1, 'merged', S.pushed, H.dir, false, 'sibling-svc');
+  assert.strictEqual(a, TERMINAL, `Test 19a FAIL: a cross-repo commit pushed in its own repo must render the terminal label, got "${a}"`);
+
+  // (a, end to end) the same through the printed table row.
+  {
+    const ts = `## Active tasks\n\n### T-950 — Cross-repo fixture\n\n- **Status:** merged\n- **Evidence:** commit: ${S.pushed.slice(0, 7)} branch: main\n`;
+    const bl = `## Active Wave\n\n### T-950 — Cross-repo fixture\n\n- **Status:** merged\n- **Repo:** sibling-svc\n`;
+    const lines = [];
+    const origLog = console.log;
+    console.log = (...args) => lines.push(args.join(' '));
+    try {
+      printSessionCompletedTable(['T-950'], ts, bl, 1, new Map([['T-950', 'merged']]), H.dir);
+    } finally {
+      console.log = origLog;
+    }
+    const row = lines.find((l) => l.includes('T-950'));
+    assert.ok(row, `Test 19a FAIL: no table row for T-950 in: ${JSON.stringify(lines)}`);
+    assert.ok(row.includes(TERMINAL) && !HELD_RE.test(row), `Test 19a FAIL: table row must carry the terminal label and not HELD, got "${row}"`);
+  }
+
+  // (b) Repo S, commit exists in S but on no remote-tracking ref of S -> HELD.
+  const b = getDeployLabel(1, 'merged', S.unpushed, H.dir, false, 'sibling-svc');
+  assert.ok(HELD_RE.test(b), `Test 19b FAIL: an unpushed commit that exists in S must render HELD, got "${b}"`);
+
+  // (b2) a commit pushed to a NON-current branch of S still sits on a
+  // remote-tracking ref of S -> terminal label (any refs/remotes/* counts).
+  {
+    gitIn(S.dir, ['checkout', '-q', '-b', 'feature']);
+    fs.writeFileSync(path.join(S.dir, 'c.txt'), 'c');
+    gitIn(S.dir, ['add', 'c.txt']);
+    gitIn(S.dir, ['commit', '-q', '-m', 'fixture: feature commit']);
+    const featureCommit = gitIn(S.dir, ['rev-parse', 'HEAD']);
+    gitIn(S.dir, ['push', '-q', 'origin', 'HEAD:feature']);
+    gitIn(S.dir, ['checkout', '-q', 'main']);
+    const b2 = getDeployLabel(1, 'merged', featureCommit, H.dir, false, 'sibling-svc');
+    assert.strictEqual(b2, TERMINAL, `Test 19b2 FAIL: a commit on another remote-tracking branch of S must render the terminal label, got "${b2}"`);
+  }
+
+  // (c) status-only label, never HELD, when S cannot be resolved.
+  {
+    // c1: REPO_MAP entry without a path.
+    writeRepoMap(H.dir, mapEntry('sibling-svc', null));
+    const c1 = getDeployLabel(1, 'merged', S.unpushed, H.dir, false, 'sibling-svc');
+    assert.strictEqual(c1, 'merged', `Test 19c1 FAIL: no REPO_MAP path must degrade to the status-only label, got "${c1}"`);
+    // c1b: no REPO_MAP entry for the repo id at all.
+    writeRepoMap(H.dir, mapEntry('other-svc', S.dir));
+    const c1b = getDeployLabel(1, 'merged', S.unpushed, H.dir, false, 'sibling-svc');
+    assert.strictEqual(c1b, 'merged', `Test 19c1b FAIL: an unmapped repo id must degrade to the status-only label, got "${c1b}"`);
+    // c1c: no Repo: field on the task.
+    writeRepoMap(H.dir, mapEntry('sibling-svc', S.dir));
+    const c1c = getDeployLabel(1, 'merged', S.unpushed, H.dir, false, null);
+    assert.strictEqual(c1c, 'merged', `Test 19c1c FAIL: no Repo: field and a commit absent from H must degrade, got "${c1c}"`);
+    // c2: path exists but is a plain directory outside any git work tree.
+    const plain = path.join(TMP_DIR, 't911-plain-dir');
+    fs.mkdirSync(plain, { recursive: true });
+    writeRepoMap(H.dir, mapEntry('sibling-svc', plain));
+    const c2 = getDeployLabel(1, 'merged', S.unpushed, H.dir, false, 'sibling-svc');
+    assert.strictEqual(c2, 'merged', `Test 19c2 FAIL: a non-git path must degrade to the status-only label, got "${c2}"`);
+    // c3: path is a plain directory NESTED inside H's work tree (inside a work
+    // tree, but not a work tree of its own).
+    const nested = path.join(H.dir, 'vendor', 'sibling');
+    fs.mkdirSync(nested, { recursive: true });
+    writeRepoMap(H.dir, mapEntry('sibling-svc', nested));
+    const c3 = getDeployLabel(1, 'merged', S.unpushed, H.dir, false, 'sibling-svc');
+    assert.strictEqual(c3, 'merged', `Test 19c3 FAIL: a directory nested in H that is not its own work tree must degrade, got "${c3}"`);
+    // c4: path does not exist.
+    writeRepoMap(H.dir, mapEntry('sibling-svc', path.join(TMP_DIR, 't911-missing')));
+    const c4 = getDeployLabel(1, 'merged', S.unpushed, H.dir, false, 'sibling-svc');
+    assert.strictEqual(c4, 'merged', `Test 19c4 FAIL: a missing path must degrade to the status-only label, got "${c4}"`);
+    writeRepoMap(H.dir, mapEntry('sibling-svc', S.dir));
+  }
+
+  // (c5) S is a git work tree with no remote-tracking refs at all -> status-only.
+  {
+    const lone = path.join(TMP_DIR, 't911-lone');
+    fs.mkdirSync(lone, { recursive: true });
+    gitIn(lone, ['init', '-q', '-b', 'main']);
+    gitIn(lone, ['config', 'user.email', 'demo@example.invalid']);
+    gitIn(lone, ['config', 'user.name', 'Fixture User']);
+    gitIn(lone, ['commit', '-q', '--allow-empty', '-m', 'fixture: lone']);
+    const loneCommit = gitIn(lone, ['rev-parse', 'HEAD']);
+    writeRepoMap(H.dir, mapEntry('lone-svc', lone));
+    const c5 = getDeployLabel(1, 'merged', loneCommit, H.dir, false, 'lone-svc');
+    assert.strictEqual(c5, 'merged', `Test 19c5 FAIL: a sibling with no remote-tracking refs must degrade, got "${c5}"`);
+    writeRepoMap(H.dir, mapEntry('sibling-svc', S.dir));
+  }
+
+  // (d) a commit whose object exists in H: HELD when unpushed, terminal when
+  // pushed — with or without a Repo: field naming a sibling.
+  assert.ok(HELD_RE.test(getDeployLabel(1, 'merged', H.unpushed, H.dir, false, null)), 'Test 19d FAIL: unpushed H commit must render HELD');
+  assert.strictEqual(getDeployLabel(1, 'merged', H.pushed, H.dir, false, null), TERMINAL, 'Test 19d FAIL: pushed H commit must render the terminal label');
+  assert.ok(HELD_RE.test(getDeployLabel(1, 'merged', H.unpushed, H.dir, false, 'sibling-svc')), 'Test 19d FAIL: unpushed H commit must render HELD even when Repo: names a sibling');
+  assert.strictEqual(getDeployLabel(1, 'merged', H.pushed, H.dir, false, 'sibling-svc'), TERMINAL, 'Test 19d FAIL: pushed H commit must render the terminal label even when Repo: names a sibling');
+  assert.strictEqual(getDeployLabel(0, 'merged', H.pushed, H.dir, false, null), '✓ задеплоен', 'Test 19d FAIL: contours 0 terminal label unchanged');
+
+  // (e) a hash that exists in no checked repository degrades to the status-only
+  // label — absence from H is not evidence of "held".
+  {
+    const ghost = '0123abc'; // hex-shaped, committed nowhere
+    for (const repoField of [null, 'sibling-svc', 'unknown-svc']) {
+      const e = getDeployLabel(1, 'merged', ghost, H.dir, false, repoField);
+      assert.strictEqual(e, 'merged', `Test 19e FAIL: a hash found in no checked repo (Repo: ${repoField}) must degrade to the status-only label, got "${e}"`);
+      assert.ok(!HELD_RE.test(e), 'Test 19e FAIL: HELD printed for a commit that exists nowhere');
+    }
+  }
+
+  // T-907 behaviour kept: runtime_verified at contours >= 2 still renders like merged.
+  assert.strictEqual(getDeployLabel(2, 'runtime_verified', null, H.dir, false, 'sibling-svc'), '⏳ не задеплоен', 'Test 19 FAIL: T-907 runtime_verified label must be unchanged');
+
+  console.log('Test 19 passed: cross-repo push state resolves in the repo holding the commit; HELD only for a commit that exists in a checked repo');
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
 
-console.log('\nAll T-448/T-489/T-565/T-858 assertions passed.');
+console.log('\nAll T-448/T-489/T-565/T-858/T-911 assertions passed.');

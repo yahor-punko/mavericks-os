@@ -63,6 +63,7 @@ const {
   updateLastTaskId,
   printRepoIdentityHeader,
   guardMutatingRoot,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -463,7 +464,18 @@ async function collectBatch() {
 // Main
 // ---------------------------------------------------------------------------
 
+const QUICK_MERGE_USAGE = [
+  'Usage: ./scripts/mavp-operator --quick-merge [--verification-type <artifact|runtime|unit>] [--owner <role>]',
+  '',
+  'Fast-tracks XS changes (<=2 files, <=10 lines diff, no risk) directly to merged; prompts for',
+  'title, commit hash and an optional note per item.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 async function main() {
+  // T-917: help first, before flag validation, the header and any artifact read.
+  if (handleHelpFlag(QUICK_MERGE_USAGE)) return;
+
   // Flag validation runs FIRST — before the header, before input collection,
   // before any file existence check or write. An invalid --verification-type
   // or --owner refuses the entire run, naming the invalid value and the

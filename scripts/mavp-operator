@@ -3,7 +3,25 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 
-if [[ "${1-}" == "--help" ]]; then
+# --help in ANY argument position prints this help and dispatches nothing (T-909),
+# except when the first argument is --agent or --snapshot: those two keep
+# their own --help usage and are dispatched as usual. --install is NOT exempt:
+# the installer has no --help handler and would bootstrap the current directory. Several
+# dispatched flags take free-form values, so a trailing --help used to be
+# forwarded as a value (or dropped) and ran the flag's real action.
+WANT_HELP=0
+case "${1-}" in
+  --agent|--snapshot) ;;
+  *)
+    for MAVP_ARG in "$@"; do
+      if [[ "$MAVP_ARG" == "--help" ]]; then
+        WANT_HELP=1
+      fi
+    done
+    ;;
+esac
+
+if [[ "${1-}" == "--help" || "$WANT_HELP" == "1" ]]; then
   echo "Usage: ./scripts/mavp-operator [flag]"
   echo ""
   echo "Flags:"
@@ -47,9 +65,12 @@ if [[ "${1-}" == "--help" ]]; then
   echo "                   all three flags (title/problem/repo) are required when stdin is not a TTY (refuses otherwise, writes nothing)"
   echo "                   Origin defaults to manual (prints a one-line architect-gate advisory, non-blocking);"
   echo "                   --origin architect attests the task went through architect decomposition and suppresses it"
-  echo "  --apply-decomposition [FILE]  Parse architect decomposition block and register tasks"
+  echo "  --apply-decomposition [FILE] [--onto LIST]  Parse architect decomposition block and register tasks"
   echo "                   Reads from FILE if provided, otherwise from stdin"
   echo "                   Every registered task is stamped Origin: architect (this path IS the gate; no advisory)"
+  echo "                   --onto LIST re-scopes already-registered tasks from the block instead of registering them:"
+  echo "                   one comma-separated entry per block task, each an existing task id or new (register as usual);"
+  echo "                   Status, TASK_STATUS Notes and Evidence stay untouched; refused (nothing written) for merged/deployed/deprecated tasks"
   echo "  --quick-merge    Fast-track an XS change directly to merged (title + commit hash)"
   echo "                   Use only for XS changes: <=2 files, <=10 lines diff, no risk"
   echo "  --update-task    Interactively update an existing task"
@@ -118,7 +139,8 @@ if [[ "${1-}" == "--help" ]]; then
   echo "  --version        Print the installed Mavericks framework version"
   echo "  --demo           Run a narrated walkthrough of the operator loop against a throwaway fixture"
   echo "                   Usage: --demo [--phase dashboard|lifecycle|drift|all] [--step] [--keep] [--no-color] [--reveal <ms>]"
-  echo "  --help           Show this help message and exit"
+  echo "  --help           Show this help message and exit (accepted in any argument position; dispatches nothing,"
+  echo "                   except --agent and --snapshot, which keep their own --help usage)"
   echo ""
   echo "(no flag)          Open the operator dashboard"
   exit 0

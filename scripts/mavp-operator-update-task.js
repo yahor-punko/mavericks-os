@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
 const { execSync } = require('node:child_process');
-const { writeContextBundle, updateTaskField, printRepoIdentityHeader, guardMutatingRoot } = require('./mavp-operator-lib.js');
+const { writeContextBundle, updateTaskField, printRepoIdentityHeader, guardMutatingRoot, handleHelpFlag } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const BACKLOG_MD = path.join(ROOT, 'BACKLOG.md');
@@ -86,7 +86,17 @@ async function prompt(rl, question) {
   return new Promise(resolve => rl.question(`${question}: `, resolve));
 }
 
+const UPDATE_TASK_USAGE = [
+  'Usage: ./scripts/mavp-operator --update-task [T-NNN <status> [<owner>]]',
+  '',
+  'Updates an existing task; without arguments it prompts interactively.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 async function main() {
+  // T-917: help first, before the identity header's read of PROCESS_STATE.json.
+  if (handleHelpFlag(UPDATE_TASK_USAGE)) return;
+
   printRepoIdentityHeader(ROOT, { mutating: true });
 
   const rootGuard = guardMutatingRoot(ROOT, '--update-task');

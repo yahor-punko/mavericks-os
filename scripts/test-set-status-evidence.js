@@ -725,6 +725,114 @@ const REAL_COMMIT_SHORT = execFileSync('git', ['-C', REPO, 'rev-parse', '--short
   console.log('Test 11g passed: annotated-only Evidence at target status refused by the T-778 gate (exit 1, byte-identical)');
 }
 
+// ---------------------------------------------------------------------------
+// Part 12 (T-908) — --commit reports the evidence commit it replaces.
+//   (a) QA text + a commit fragment (OLD, branch main): --commit NEW keeps the
+//       QA text, carries NEW, and prints ONE line naming the task, OLD and NEW.
+//   (b) same hash, or a longer / shorter form of it: no replacement line.
+//   (c) two fragments: first replaced, line also says the count and that only
+//       the first was rewritten; the second fragment is untouched.
+//   (d) no fragment: pair appended, no replacement line.
+//   (f) inputs accepted before are still accepted (never refused).
+// Expected values below come from the acceptance contract, not from a run.
+// ---------------------------------------------------------------------------
+{
+  const env = { ...process.env, MAVERICKS_PROJECT_ROOT: REPO };
+
+  gitQuiet(REPO, ['commit', '-q', '--allow-empty', '-m', 'third commit']);
+  const NEW_SHORT = execFileSync('git', ['-C', REPO, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
+  assert.notStrictEqual(NEW_SHORT, REAL_COMMIT_SHORT, 'Test 12 setup FAIL: need two distinct hashes');
+  const OLD = REAL_COMMIT_SHORT;
+  const OTHER_FRAGMENT = 'fedcba9';
+  const stripAnsi = (t) => t.replace(/\x1b\[[0-9;]*m/g, '');
+  const replacedLines = (out) => stripAnsi(out).split('\n').filter((l) => /^Evidence commit replaced:/.test(l));
+
+  // (a) replaced fragment reported once, QA text intact.
+  writeFixture(REPO, 'T-980', 'merged', `QA ok. commit: ${OLD} branch: main`);
+  const rA = runSetStatus(['T-980', 'merged', '--commit', NEW_SHORT], REPO, env);
+  assert.notStrictEqual(rA.status, 2, `Test 12a FAIL: exit must not be 2, got:\n${rA.output}`);
+  assert.strictEqual(taskStatusEvidence(REPO, 'T-980'), `QA ok. commit: ${NEW_SHORT} branch: main`, 'Test 12a FAIL: QA text must stay and the fragment must carry NEW');
+  const linesA = replacedLines(rA.output);
+  assert.strictEqual(linesA.length, 1, `Test 12a FAIL: expected exactly one replacement line, got:\n${rA.output}`);
+  assert.ok(linesA[0].includes('T-980') && linesA[0].includes(OLD) && linesA[0].includes(NEW_SHORT), `Test 12a FAIL: line must name T-980, OLD and NEW, got: ${linesA[0]}`);
+  assert.ok(!/only the first/.test(linesA[0]), `Test 12a FAIL: single-fragment line must not carry the multi-fragment note, got: ${linesA[0]}`);
+  console.log(`Test 12a passed: replacement reported once — "${linesA[0]}"`);
+
+  // (b) same hash, longer form, shorter form: no line.
+  for (const [label, given, already] of [
+    ['same', OLD, OLD],
+    ['longer', REAL_COMMIT, OLD],
+    ['shorter', OLD.slice(0, 7), REAL_COMMIT],
+  ]) {
+    writeFixture(REPO, 'T-981', 'merged', `QA ok. commit: ${already} branch: main`);
+    const r = runSetStatus(['T-981', 'merged', '--commit', given], REPO, env);
+    assert.notStrictEqual(r.status, 2, `Test 12b (${label}) FAIL: exit must not be 2, got:\n${r.output}`);
+    assert.strictEqual(replacedLines(r.output).length, 0, `Test 12b (${label}) FAIL: no replacement line expected, got:\n${r.output}`);
+  }
+  console.log('Test 12b passed: same / longer / shorter form of the same hash prints no replacement line');
+
+  // (c) two fragments: first replaced, second untouched, count + first-only said.
+  writeFixture(REPO, 'T-982', 'merged', `QA ok. commit: ${OLD} branch: main then commit: ${OTHER_FRAGMENT} branch: main`);
+  const rC = runSetStatus(['T-982', 'merged', '--commit', NEW_SHORT], REPO, env);
+  assert.strictEqual(
+    taskStatusEvidence(REPO, 'T-982'),
+    `QA ok. commit: ${NEW_SHORT} branch: main then commit: ${OTHER_FRAGMENT} branch: main`,
+    'Test 12c FAIL: only the first fragment may be rewritten'
+  );
+  const linesC = replacedLines(rC.output);
+  assert.strictEqual(linesC.length, 1, `Test 12c FAIL: expected exactly one replacement line, got:\n${rC.output}`);
+  assert.ok(linesC[0].includes('T-982') && linesC[0].includes(OLD) && linesC[0].includes(NEW_SHORT), `Test 12c FAIL: line must name T-982, OLD and NEW, got: ${linesC[0]}`);
+  assert.ok(/2 commit fragments/.test(linesC[0]), `Test 12c FAIL: line must state the fragment count (2), got: ${linesC[0]}`);
+  assert.ok(/only the first was rewritten/.test(linesC[0]), `Test 12c FAIL: line must say only the first was rewritten, got: ${linesC[0]}`);
+  console.log(`Test 12c passed: two fragments — first replaced, line states count and first-only — "${linesC[0]}"`);
+
+  // (d) no fragment: appended, no line.
+  writeFixture(REPO, 'T-983', 'merged', 'QA ok.');
+  const rD = runSetStatus(['T-983', 'merged', '--commit', NEW_SHORT], REPO, env);
+  assert.strictEqual(taskStatusEvidence(REPO, 'T-983'), `QA ok. commit: ${NEW_SHORT} branch: main`, 'Test 12d FAIL: pair must be appended');
+  assert.strictEqual(replacedLines(rD.output).length, 0, `Test 12d FAIL: no replacement line expected on append, got:\n${rD.output}`);
+  console.log('Test 12d passed: no fragment — pair appended, no replacement line');
+
+  // (f) previously accepted inputs are still accepted: none ends in a refusal.
+  for (const args of [
+    ['--commit', REAL_COMMIT, '--branch', 'develop'],
+    ['--commit', 'HEAD'],
+    ['--commit', OLD, '--branch', 'main'],
+  ]) {
+    writeFixture(REPO, 'T-984', 'merged', `QA ok. commit: abc1234 branch: main`);
+    const r = runSetStatus(['T-984', 'merged', ...args], REPO, env);
+    assert.ok(!/Error:/.test(r.output), `Test 12f FAIL: ${args.join(' ')} must not be refused, got status ${r.status}:\n${r.output}`);
+    assert.ok(/Evidence (written|updated)|Updated|Evidence commit replaced/.test(stripAnsi(r.output)), `Test 12f FAIL: ${args.join(' ')} must write, got:\n${r.output}`);
+  }
+  console.log('Test 12f passed: previously accepted --commit/--branch inputs are not refused');
+
+  // Named mutants on the real set-status source, toggled in-process with an
+  // unconditional restore (same technique as Test 11f).
+  const original = readUtf8(SET_STATUS_PATH);
+  const runMutant = (needle, replacement, taskId, evidence) => {
+    assert.ok(original.includes(needle), `Test 12 mutant setup FAIL: ${needle} not found in source`);
+    try {
+      writeUtf8(SET_STATUS_PATH, original.replace(needle, replacement));
+      writeFixture(REPO, taskId, 'merged', evidence);
+      return runSetStatus([taskId, 'merged', '--commit', NEW_SHORT], REPO, env).output;
+    } finally {
+      writeUtf8(SET_STATUS_PATH, original);
+    }
+  };
+  // Red 1: dropping the report -> no line at all (the pre-change shape).
+  const redOut1 = runMutant('if (merge.replaced) {', 'if (false) {', 'T-985', `QA ok. commit: ${OLD} branch: main`);
+  assert.strictEqual(replacedLines(redOut1).length, 0, 'Test 12 red-1 FAIL: with the report disabled no replacement line may print');
+  // Red 2: dropping the multi-fragment clause -> (c)'s count assertions would fail.
+  const redOut2 = runMutant('r.fragmentCount > 1', 'r.fragmentCount > 99', 'T-986', `QA ok. commit: ${OLD} branch: main then commit: ${OTHER_FRAGMENT} branch: main`);
+  assert.ok(!/only the first was rewritten/.test(redOut2), 'Test 12 red-2 FAIL: with the clause disabled the note must be absent');
+  assert.strictEqual(replacedLines(redOut2).length, 1, 'Test 12 red-2 FAIL: the base line must still print under the clause mutant');
+  assert.strictEqual(readUtf8(SET_STATUS_PATH), original, 'Test 12 FAIL: source must be restored byte-for-byte');
+  writeFixture(REPO, 'T-985', 'merged', `QA ok. commit: ${OLD} branch: main`);
+  const greenOut = runSetStatus(['T-985', 'merged', '--commit', NEW_SHORT], REPO, env).output;
+  assert.strictEqual(replacedLines(greenOut).length, 1, 'Test 12 green FAIL: restored source must print the replacement line');
+  console.log('Test 12g passed: report-disabled and clause-disabled mutants lose the line / note [red]; restored source prints it [green]');
+}
+
 fs.rmSync(REPO, { recursive: true, force: true });
 
-console.log('\nAll T-446 / T-608 / T-774 / T-779 assertions passed.');
+console.log('\nAll T-446 / T-608 / T-774 / T-779 / T-908 assertions passed.');

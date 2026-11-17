@@ -73,9 +73,15 @@ Rules:
 
 ## What `--apply-decomposition` does
 
-The `--apply-decomposition [FILE] [--repo <name>]` operator command parses this block and:
+The `--apply-decomposition [FILE] [--repo <name>] [--onto LIST]` operator command parses this block and (without `--onto`):
 1. Assigns sequential T-NNN IDs continuing from `last_task_id`.
 2. Appends entries to `BACKLOG.md` with status `planned`, writing a `- **Repo:**`/`- **Repos:**` line when a task's `repo:` field or the batch `--repo <name>` CLI default resolves to a value (per-task `repo:` wins when both are present), rewriting a `depends_on:` that names another task of the same block by title into that task's assigned T-NNN, and writing `- **Deploy:** none` when a task declares `deploy: none`.
 3. Appends stub entries to `TASK_STATUS.md`.
 4. Increments `last_task_id` in `PROCESS_STATE.json`.
 5. Runs the validator to confirm artifact sync.
+
+### Re-scoping registered tasks: `--onto`
+
+When the gate's decomposition belongs to tasks that are already registered, the block does not have to become new tasks. `--apply-decomposition [FILE] --onto LIST` applies it to them in place. LIST has exactly one comma-separated entry per task in the block, in block order; each entry is an existing task id (`T-NNN`, re-scope that task) or the literal `new` (register it under the next id, as above). For example, `--onto T-5,new` re-scopes `T-5` from the first task of the block and registers the second.
+
+A re-scoped task takes the block's title in both files, Owner role and Verification type in both files, and the other fields in `BACKLOG.md`; its Origin reads `architect`. Its Status and the `TASK_STATUS.md` Notes and Evidence are untouched. A key the block does not carry leaves that field as it was; a key it does carry replaces the field under the same normalisation registration applies. The command prints which fields it replaced for each task. The same validation as registration applies, but nothing is skipped: the command refuses (exit 1, both files unchanged) on an entry count that differs from the task count, an unknown or duplicated task id, a target at `merged`, `deployed_dev`, `deployed_prod`, `runtime_verified` or `deprecated`, a task missing a required field, or an unknown `verification_type`.

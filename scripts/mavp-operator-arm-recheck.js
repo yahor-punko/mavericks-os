@@ -3,7 +3,15 @@
 // Usage: node mavp-operator-arm-recheck.js T-NNN --due YYYY-MM-DD [--interval 8w] [--note "..."]
 
 const path = require('node:path');
-const { armRecheck, ROOT, printRepoIdentityHeader, guardMutatingRoot } = require('./mavp-operator-lib.js');
+const { armRecheck, ROOT, printRepoIdentityHeader, guardMutatingRoot, handleHelpFlag } = require('./mavp-operator-lib.js');
+
+// T-917: help first, before the identity header's read of PROCESS_STATE.json and any other read or write.
+if (handleHelpFlag([
+  'Usage: ./scripts/mavp-operator --arm-recheck T-NNN --due YYYY-MM-DD [--interval 8w] [--note "..."]',
+  '',
+  'Registers a time-based recheck entry in PROCESS_STATE.json rechecks[]. --interval enables rearming.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+])) return;
 
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');
 const BACKLOG_PATH = path.join(ROOT, 'BACKLOG.md');

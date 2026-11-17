@@ -42,6 +42,7 @@ const {
   formatWorktreeHygieneAdvisory,
   printRepoIdentityHeader,
   UnresolvableMainRefError,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
@@ -76,7 +77,17 @@ function removeWorktree(root, entry) {
   }
 }
 
+const PRUNE_WORKTREES_USAGE = [
+  'Usage: ./scripts/mavp-operator --prune-worktrees [--yes] [--main-ref <ref>] [--mtime-threshold <ms>]',
+  '',
+  'Removes ONLY clean-and-integrated worktrees past the mtime safety window; without --yes it is a dry run.',
+  '--help prints this text and exits 0 before reading or writing anything.',
+];
+
 function main() {
+  // T-917: help first, before argument parsing and any git call (a bare --yes would remove worktrees).
+  if (handleHelpFlag(PRUNE_WORKTREES_USAGE)) return;
+
   const args = parseArgs(process.argv.slice(2));
   const options = { mainRef: args.mainRef };
   if (Number.isFinite(args.mtimeThresholdMs)) options.mtimeThresholdMs = args.mtimeThresholdMs;

@@ -19,7 +19,18 @@ const {
   printRepoIdentityHeader,
   guardMutatingRoot,
   generateProcessStateMd,
+  handleHelpFlag,
 } = require('./mavp-operator-lib.js');
+
+// T-917: --help is the first statement, before any read or write; without it
+// the literal text --help would become the stored wave goal.
+if (handleHelpFlag([
+  'Usage: ./scripts/mavp-operator --set-wave-goal "text"',
+  '',
+  'Sets PROCESS_STATE.json wave_goal to the text (an empty string clears it) and',
+  'regenerates PROCESS_STATE.md. A missing argument exits 1 and writes nothing.',
+  '--help prints this text and exits 0 before reading or writing any project state.',
+])) return;
 
 const ROOT = process.env.MAVERICKS_PROJECT_ROOT || path.resolve(__dirname, '..');
 const PROCESS_STATE_JSON = path.join(ROOT, 'PROCESS_STATE.json');

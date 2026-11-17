@@ -59,6 +59,7 @@ const {
   parseModuleRegistry,
   parseModuleRegistryFromText,
   readFileAtRevision,
+  handleHelpFlag,
   MUST_READ_EXCLUDED_PATHS,
 } = require('./mavp-operator-lib');
 
@@ -88,6 +89,7 @@ const STATUSES_REQUIRING_REPO = new Set([
   'qa_passed',
   'needs_fix',
   'merged',
+  'runtime_verified',
   'deployed_dev',
   'deployed_prod',
 ]);
@@ -111,7 +113,12 @@ const ACTIVE_BACKLOG_STATUSES = new Set([
 // Terminal statuses that are not considered active for backlog comparison.
 // Tasks with these statuses are excluded from active-task cross-checking
 // and do not require presence in ACTIVE_BACKLOG_STATUSES.
-const TERMINAL_TASK_STATUSES = new Set(['merged', 'deployed_dev', 'deployed_prod']);
+// T-907: `runtime_verified` is a post-merge completed status (merged ->
+// runtime_verified), so it belongs here exactly like `merged`; leaving it out
+// made a runtime_verified task mirrored in TASK_STATUS Active tasks fail
+// missing_in_backlog (the backlog parse drops non-active statuses).
+// ACTIVE_BACKLOG_STATUSES deliberately does NOT list it, matching `merged`.
+const TERMINAL_TASK_STATUSES = new Set(['merged', 'runtime_verified', 'deployed_dev', 'deployed_prod']);
 
 // T-489: number of individual commit_unreachable findings a "Recently
 // completed" (archived) section may accumulate before they are collapsed
@@ -1265,15 +1272,20 @@ function checkConfigCheck(backlogRecords, taskStatusRecords) {
  *  - visual_without_ux: a visual-verification task that does not declare
  *    requires ux true (deprecated/deferred and superseded tasks are skipped).
  *  - ux_evidence_missing: a requires-ux task that is past the UX review stage
- *    but whose TASK_STATUS Evidence carries no `ux:` line. The token is matched
- *    at the start of the text or after whitespace, so `linux:` / `flux:` in
- *    prose never satisfies it.
+ *    but whose TASK_STATUS Evidence carries no `ux:` line (plain `ux:` or bold
+ *    `**ux:**`, followed by content). The token is matched at the start of the
+ *    text or after whitespace, so `linux:` / `flux:` / `requires_ux:` in prose
+ *    never satisfies it.
  * Fed the Active Wave records only (archived waves are never judged).
  */
 const UX_EVIDENCE_REQUIRED_STATUSES = new Set([
   'ux_passed', 'ready_for_qa', 'qa_in_progress', 'qa_passed', ...TERMINAL_TASK_STATUSES,
 ]);
-const UX_EVIDENCE_TOKEN = /(^|\s)ux:\s*\S/i;
+// T-907: two accepted label forms, plain `ux:` and bold `**ux:**`, each at the
+// start of the text or after whitespace and each followed by content. The bold
+// form's closing `**` is part of the label, so an empty bold label (nothing
+// after it) never satisfies the gate, and `requires_ux:` never matches either.
+const UX_EVIDENCE_TOKEN = /(^|\s)(?:ux:|\*\*ux:\*\*)\s*\S/i;
 
 function checkUxGate(backlogRecords, taskStatusRecords) {
   const findings = [];
@@ -1305,9 +1317,9 @@ function checkUxGate(backlogRecords, taskStatusRecords) {
           createFinding({
             checkName: 'ux_evidence_missing',
             taskId: record.taskId,
-            message: `${record.taskId} has Requires ux: true and status ${record.status} but evidence has no ux: line`,
+            message: `${record.taskId} has Requires ux: true and status ${record.status} but evidence has no ux: line (accepted label forms: "ux: <content>" or bold "**ux:** <content>")`,
             repairTarget: 'TASK_STATUS.md',
-            suggestedAction: 'Add "ux: <pass|needs_fix> frames: <id> viewed: <n img>/<m txt>/<k unopened>" to the evidence field recording the UX review outcome.',
+            suggestedAction: 'Add "ux: <pass|needs_fix> frames: <id> viewed: <n img>/<m txt>/<k unopened>" (the label may also be written bold as "**ux:**") to the evidence field recording the UX review outcome. The label must be followed by content.',
           })
         );
       }
@@ -3681,7 +3693,18 @@ function getExitCode(overallCandidateState) {
   return 0;
 }
 
+const VALIDATOR_USAGE = [
+  'Usage: ./scripts/mavp-operator --validate [--json]',
+  '       node scripts/mavp-validator.js [<project-root>] [--json]',
+  '',
+  'Checks that BACKLOG.md and TASK_STATUS.md agree. Exit codes: 0 healthy, 1 drifting, 2 repair required.',
+  '--help prints this text and exits 0 before reading any project state.',
+];
+
 function main() {
+  // T-917: help first, before the root argument is resolved and before any artifact read.
+  if (handleHelpFlag(VALIDATOR_USAGE)) return;
+
   // Resolution order (deliberately mirrors getProjectRoot()'s precedence,
   // extended with the explicit-argument tier): explicit path argument
   // (argv[2]) wins when present, else MAVERICKS_PROJECT_ROOT, else
